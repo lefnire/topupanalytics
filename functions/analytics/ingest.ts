@@ -1,8 +1,10 @@
 import {UAParser} from 'ua-parser-js';
-import {APIGatewayProxyHandlerV2} from "aws-lambda"; // Use V2 event type
-import {FirehoseClient, PutRecordCommand} from "@aws-sdk/client-firehose";
+import { APIGatewayProxyHandlerV2 } from "aws-lambda"; // Use V2 event type
+import { FirehoseClient, PutRecordCommand } from "@aws-sdk/client-firehose";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  colsCompliant, 
+  colsCompliant,
   colsAll as colsAll_, 
   isCompliant, 
   ONLY_COMPLIANT,
@@ -17,20 +19,51 @@ const eventsColsMap = Object.fromEntries(eventsColsAll.map(c => [c, true]));
 
 // Initialize Firehose client
 const firehoseClient = new FirehoseClient({});
+const dynamoClient = new DynamoDBClient({});
+const docClient = DynamoDBDocumentClient.from(dynamoClient);
+
 const EVENTS_FIREHOSE_STREAM_NAME = process.env.EVENTS_FIREHOSE_STREAM_NAME;
 const INITIAL_EVENTS_FIREHOSE_STREAM_NAME = process.env.INITIAL_EVENTS_FIREHOSE_STREAM_NAME;
+const SITES_TABLE_NAME = process.env.SITES_TABLE_NAME;
 
 
-// POST /event
+// POST /api/events
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   log('Received event:', JSON.stringify(event, null, 2));
 
-  if (!event.body) {
-    return {statusCode: 400, body: JSON.stringify({message: 'Missing event body'})};
+  // --- Site ID Validation ---
+  const siteId = event.queryStringParameters?.site; // Changed from token/header
+
+  if (!siteId) {
+    log('Missing site query parameter'); // Updated log message
+    return { statusCode: 400, body: JSON.stringify({ message: 'Bad Request: Missing site parameter' }) }; // Updated status code and message
+  }
+
+  if (!SITES_TABLE_NAME) {
+    console.error("SITES_TABLE_NAME environment variable is not set.");
+    return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error' }) };
   }
 
   try {
-    // Basic validation - ensure it's JSON
+    const getParams = {
+      TableName: SITES_TABLE_NAME,
+      Key: { site_id: siteId },
+    };
+    const getSiteCommand = new GetCommand(getParams); // Renamed variable
+    const { Item } = await docClient.send(getSiteCommand); // Use renamed variable
+
+    if (!Item) {
+      log(`Invalid site_id received: ${siteId}`);
+      return { statusCode: 403, body: JSON.stringify({ message: 'Forbidden: Invalid site identifier' }) };
+    }
+    // Optional: Add checks here if the site has an 'isActive' flag, etc.
+    log(`Validated site_id: ${siteId}`);
+
+    // --- Event Body Processing ---
+    if (!event.body) {
+      return { statusCode: 400, body: JSON.stringify({ message: 'Missing event body' }) };
+    }
+
     let body;
     try {
       body = JSON.parse(event.body);
@@ -129,6 +162,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         // Timestamps & Properties
         timestamp: timestamp,
         properties: body.properties || {},
+        site_id: siteId, // Inject validated site_id
       };
 
     } else {
@@ -141,6 +175,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         session_id: body.session_id?.toString(),
         properties: body.properties || {},
         timestamp: timestamp,
+        site_id: siteId, // Inject validated site_id
       };
     }
 
@@ -179,14 +214,15 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       },
     };
 
-    const command = new PutRecordCommand(params);
-    const response = await firehoseClient.send(command);
+    const putRecordCommand = new PutRecordCommand(params); // Renamed variable
+    const response = await firehoseClient.send(putRecordCommand); // Use renamed variable
 
-    log('Successfully put record to Firehose:', response.RecordId);
+    log('Successfully put record to Firehose:', response.RecordId); // Correct access
 
+    // Return 202 Accepted as the processing is asynchronous
     return {
-      statusCode: 200,
-      body: JSON.stringify({message: 'Event received', recordId: response.RecordId}),
+      statusCode: 202, // Use 202 Accepted
+      body: JSON.stringify({ message: 'Event accepted', recordId: response.RecordId }), // Correct access
     };
 
   } catch (error: any) {

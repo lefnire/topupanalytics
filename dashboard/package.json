@@ -9,11 +9,13 @@
     "typecheck": "react-router typegen && tsc"
   },
   "dependencies": {
+    "@aws-amplify/ui-react": "^6.11.1",
     "@duckdb/duckdb-wasm": "^1.29.1-dev132.0",
     "@nivo/sankey": "^0.89.1",
     "@react-router/node": "^7.5.1",
     "@react-router/serve": "^7.5.1",
     "arquero": "^8.0.1",
+    "aws-amplify": "^6.14.3",
     "isbot": "^5.1.17",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

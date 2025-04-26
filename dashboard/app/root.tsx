@@ -6,9 +6,31 @@ import {
   Scripts,
   ScrollRestoration,
 } from "react-router";
+import { Amplify } from 'aws-amplify';
+import { Authenticator, ThemeProvider, defaultTheme } from '@aws-amplify/ui-react';
+import '@aws-amplify/ui-react/styles.css'; // Default Amplify UI styles
 
 import type { Route } from "./+types/root";
 import "./app.css";
+
+// Configure Amplify
+Amplify.configure({
+  Auth: {
+    Cognito: {
+      region: import.meta.env.VITE_AWS_REGION, // Reverted to prompt structure
+      userPoolId: import.meta.env.VITE_COGNITO_USER_POOL_ID,
+      userPoolClientId: import.meta.env.VITE_COGNITO_CLIENT_ID,
+    }
+  }
+});
+
+// Optional: Customize Amplify UI theme if needed
+const theme = {
+  name: 'custom-theme',
+  tokens: {
+    // Add custom theme tokens here if desired
+  },
+};
 
 export const links: Route.LinksFunction = () => [
   { rel: "preconnect", href: "https://fonts.googleapis.com" },
@@ -41,9 +63,24 @@ export function Layout({ children }: { children: React.ReactNode }) {
   );
 }
 
+// Wrap the main App component with Authenticator
 export default function App() {
-  return <Outlet />;
+  return (
+    <ThemeProvider theme={theme}>
+      <Authenticator>
+        {({ signOut, user }) => (
+          <main>
+            {/* Optional: Display user info or sign out button */}
+            {/* <h1>Hello {user?.username}</h1> */}
+            {/* <button onClick={signOut}>Sign out</button> */}
+            <Outlet /> {/* Render the rest of the app */}
+          </main>
+        )}
+      </Authenticator>
+    </ThemeProvider>
+  );
 }
+
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   let message = "Oops!";

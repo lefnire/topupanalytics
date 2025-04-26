@@ -22,6 +22,7 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from 'zustand/middleware';
 import * as duckdb from '@duckdb/duckdb-wasm';
 import * as arrow from 'apache-arrow';
+import { fetchAuthSession } from 'aws-amplify/auth'; // Import fetchAuthSession
 
 // Import wasm files
 import duckdb_wasm from '@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url';
@@ -381,7 +382,26 @@ export const useStore = create<AnalyticsState>()(
 
             _fetchData: async (range: string) => {
                 if (!endpoint) throw new Error("API endpoint not set.");
-                const response = await fetch(`${endpoint}?range=${range}`);
+
+                // Get Cognito ID token
+                let idToken;
+                try {
+                    const session = await fetchAuthSession();
+                    idToken = session.tokens?.idToken?.toString();
+                    if (!idToken) {
+                        throw new Error("No ID token found in session.");
+                    }
+                } catch (authError) {
+                    console.error("Authentication error:", authError);
+                    throw new Error("Failed to get authentication token. Please log in again.");
+                }
+
+                const response = await fetch(`${endpoint}?range=${range}`, {
+                    headers: {
+                        'Authorization': `Bearer ${idToken}` // Add Authorization header
+                    }
+                });
+
                 if (!response.ok) {
                     const errorBody = await response.text();
                     throw new Error(`HTTP error ${response.status}: ${errorBody || response.statusText}`);

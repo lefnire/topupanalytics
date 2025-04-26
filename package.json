@@ -4,19 +4,21 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "sst dev",
-    "deploy": "sst deploy",
-    "deploy:prod": "sst deploy --stage=production",
-    "remove": "sst remove",
-    "remove:dev": "sst remove --stage=dev",
-    "remove:prod": "sst remove --stage=production",
+    "dev": "AWS_PROFILE=diyadmin AWS_REGION=us-east-1 sst dev",
+    "deploy": "AWS_PROFILE=diyadmin AWS_REGION=us-east-1 sst deploy",
+    "deploy:prod": "AWS_PROFILE=diyadmin AWS_REGION=us-east-1 sst deploy --stage=production",
+    "remove": "AWS_PROFILE=diyadmin AWS_REGION=us-east-1 sst remove",
+    "remove:dev": "AWS_PROFILE=diyadmin AWS_REGION=us-east-1 sst remove --stage=dev",
+    "remove:prod": "AWS_PROFILE=diyadmin AWS_REGION=us-east-1 sst remove --stage=production",
     "upgrade": "sst upgrade"
   },
   "dependencies": {
     "@aws-sdk/client-athena": "^3.787.0",
+    "@aws-sdk/client-dynamodb": "^3.797.0",
     "@aws-sdk/client-firehose": "^3.793.0",
     "@aws-sdk/client-glue": "^3.787.0",
     "@aws-sdk/client-s3": "^3.787.0",
+    "@aws-sdk/lib-dynamodb": "^3.797.0",
     "date-fns": "^4.1.0",
     "sst": "3.13.19",
     "ua-parser-js": "^2.0.3"

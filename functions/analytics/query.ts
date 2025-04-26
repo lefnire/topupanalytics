@@ -1,72 +1,53 @@
 /**
  * Events (for website analytics, like page_view & clicks) are stored as parquet files
- * in S3, cataloged by a Glue Table. The infra can be seen in /sst.config.ts. This is for
- * an app that's a data analytics platform, so scalability and cost are the most
- * important factors (since there's eventually gonna be terrabytes of data) and I was
- * told this setup is the cheapest, most scalable solution.
- *
- * Now, the data is stored as:
- * * `/events/dt=YYYY-MM-DD`
- * * `/initial_events/dt=YYYY-MM-DD`
- *
- * `initial_events` are fully-hydrated event data, that's sent from the client on the very
- * page_view of the session. This includes session_id, pathname, geo, device, referer, utm, etc
- * - see ./ingest.ts. Subsequent events of that session are stored in `events`, and only include the data
- * needed for that particular event: session_id, pathname, event, timestamp, etc.
- *
- * This file here fetches the `initial_events` and `events` for a given time range, using
- * Athena to query the Glue Tables. The results are returned separately.
+ * in S3, cataloged by Glue Iceberg tables. The infra can be seen in /sst.config.ts.
+ * This function queries the Iceberg tables using Athena based on the authenticated user's sites
+ * and a specified date range.
  */
 
-import {APIGatewayProxyHandlerV2} from "aws-lambda"; // Use V2 event type
+import { APIGatewayProxyHandlerV2WithJWTAuthorizer } from "aws-lambda"; // Use V2 event type with JWT
 import {
   AthenaClient,
   StartQueryExecutionCommand,
-  GetQueryExecutionCommand, // Re-needed for polling
+  GetQueryExecutionCommand,
   GetQueryResultsCommand,
-  QueryExecutionState,      // Re-needed for polling
-  GetQueryExecutionCommandOutput, // Re-needed for polling
+  QueryExecutionState,
+  GetQueryExecutionCommandOutput,
   Row,
   Datum,
-  // waitUntilQueryExecutionSucceeded // Removed waiter import
 } from "@aws-sdk/client-athena";
-import { subDays, format } from 'date-fns'; // Or use Day.js or Luxon
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { subDays, format, parseISO, isValid } from 'date-fns'; // Add date parsing/validation
 import {
   ONLY_COMPLIANT,
-  initialOnlySchema, // Keep this import to derive initial-only fields
-  eventsColsCompliant,
-  eventsColsAll,
-  initialEventsSchema, // Keep this import to get types
-  initialColsAll,
-  commonSchema // Import commonSchema definition as well
+  initialOnlySchema,
+  commonSchema
 } from './schema'
-import {log} from './utils'
+import { log } from './utils'
 
-// Initialize Athena client
+// Initialize AWS Clients
 const athenaClient = new AthenaClient({});
+const ddbClient = new DynamoDBClient({});
+const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
+
+// Environment Variables
 const DATABASE = process.env.ATHENA_DATABASE;
-const INITIAL_EVENTS_TABLE = process.env.ATHENA_INITIAL_EVENTS_TABLE;
-const EVENTS_TABLE = process.env.ATHENA_EVENTS_TABLE;
+// Use Iceberg table names
+const INITIAL_EVENTS_TABLE = process.env.ATHENA_INITIAL_EVENTS_ICEBERG_TABLE;
+const EVENTS_TABLE = process.env.ATHENA_EVENTS_ICEBERG_TABLE;
 const OUTPUT_LOCATION = process.env.ATHENA_OUTPUT_LOCATION;
+const SITES_TABLE_NAME = process.env.SITES_TABLE_NAME; // For user site lookup
 
-// Helper function for sleep (Re-needed for polling)
+// Helper function for sleep
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-// -----------------------------------------------------------------------------
-//  generatePartitionFilter (REMOVED)
-// -----------------------------------------------------------------------------
-// This function is no longer needed as we use a simple date range filter
-// on the 'dt' partition.
 
 // Helper to parse Athena results into a more usable format
 const parseResults = (rows: Row[] | undefined): Record<string, any>[] => {
     if (!rows || rows.length === 0) return [];
-
     const headerRow = rows[0].Data;
     if (!headerRow) return [];
-
     const headers = headerRow.map(d => d.VarCharValue ?? 'unknown');
-
     const dataRows = rows.slice(1); // Skip header row
     return dataRows.map(row => {
         const record: Record<string, any> = {};
@@ -86,8 +67,12 @@ async function executeAthenaQuery(
 ): Promise<Record<string, any>[]> {
     log(`Executing ${queryName} Query:`, queryString);
 
-    // Remove comments and trailing semicolon if present, as Athena expects only one statement
+    // Remove comments and trailing semicolon if present
     const finalQuery = queryString.replace(/\\s*--.*$/gm, '').trim().replace(/;$/, '');
+
+    if (!DATABASE || !OUTPUT_LOCATION) {
+        throw new Error("Missing required environment variables for Athena query.");
+    }
 
     const startQueryCmd = new StartQueryExecutionCommand({
         QueryString: finalQuery,
@@ -106,13 +91,13 @@ async function executeAthenaQuery(
         }
         log(`Started ${queryName} Query Execution ID: ${queryExecutionId}. Waiting for completion...`);
 
-        // --- Poll for Query Completion with Exponential Backoff ---
+        // Poll for Query Completion with Exponential Backoff
         let queryState: QueryExecutionState | undefined = undefined;
         let getQueryExecOutput: GetQueryExecutionCommandOutput | undefined;
-        const maxAttempts = 30; // Max attempts (e.g., 30 attempts with ~5s max wait = ~2.5 mins max)
+        const maxAttempts = 30;
         let attempts = 0;
-        let backoffTime = 500; // Start with 0.5 seconds
-        const maxBackoff = 5000; // Max 5 seconds between polls
+        let backoffTime = 500;
+        const maxBackoff = 5000;
 
         while (attempts < maxAttempts) {
             attempts++;
@@ -122,93 +107,147 @@ async function executeAthenaQuery(
                 );
                 queryState = getQueryExecOutput?.QueryExecution?.Status?.State;
             } catch (pollError: any) {
-                // Handle potential errors during polling (e.g., ThrottlingException)
                 log(`${queryName} - Attempt ${attempts}: Error polling status: ${pollError.message}. Retrying after ${backoffTime}ms...`);
                 if (attempts >= maxAttempts) {
                     throw new Error(`${queryName} query polling failed after multiple retries: ${pollError.message}`);
                 }
                 await sleep(backoffTime);
                 backoffTime = Math.min(backoffTime * 1.5, maxBackoff);
-                continue; // Skip to next attempt
+                continue;
             }
 
             log(`${queryName} - Attempt ${attempts}: Query state: ${queryState}`);
 
-            if (queryState === QueryExecutionState.SUCCEEDED) {
-                break; // Exit loop on success
-            } else if (queryState === QueryExecutionState.FAILED || queryState === QueryExecutionState.CANCELLED) {
+            if (queryState === QueryExecutionState.SUCCEEDED) break;
+            if (queryState === QueryExecutionState.FAILED || queryState === QueryExecutionState.CANCELLED) {
                 const reason = getQueryExecOutput?.QueryExecution?.Status?.StateChangeReason || 'Unknown reason';
                 console.error(`${queryName} query failed or was cancelled:`, reason);
                 throw new Error(`${queryName} Query ${queryState}: ${reason}`);
-            } else if (queryState === QueryExecutionState.QUEUED || queryState === QueryExecutionState.RUNNING) {
-                // Continue polling
+            }
+            if (queryState === QueryExecutionState.QUEUED || queryState === QueryExecutionState.RUNNING) {
                 await sleep(backoffTime);
-                backoffTime = Math.min(backoffTime * 1.5, maxBackoff); // Increase backoff for next poll
+                backoffTime = Math.min(backoffTime * 1.5, maxBackoff);
             } else {
-                 // Handle unexpected states if necessary
                  throw new Error(`${queryName} query entered unexpected state: ${queryState}`);
             }
         }
 
         if (queryState !== QueryExecutionState.SUCCEEDED) {
-            // If loop finishes without success (e.g., maxAttempts reached)
             throw new Error(`${queryName} query did not succeed after ${attempts} attempts. Final state: ${queryState}`);
         }
 
-
-        // --- Fetch Results ---
+        // Fetch Results
         log(`${queryName} query succeeded. Fetching results...`);
         const resultsCmd = new GetQueryResultsCommand({ QueryExecutionId: queryExecutionId });
         const resultsResponse = await athenaClient.send(resultsCmd);
-
         const results = parseResults(resultsResponse.ResultSet?.Rows);
         log(`Fetched ${results.length} ${queryName} results.`);
-
         return results;
+
     } catch (error: any) {
         console.error(`Error executing ${queryName} Athena query (ID: ${queryExecutionId}):`, error);
-        // If the query started but failed/cancelled, try to stop it (best effort)
-        if (queryExecutionId && error.name !== 'ResourceNotFoundException') { // Avoid stopping if ID never existed
-            try {
-                // Stop potentially running query on error (implement if needed, requires StopQueryExecution permission)
-                // await athenaClient.send(new StopQueryExecutionCommand({ QueryExecutionId: queryExecutionId }));
-                // log(`Attempted to stop query ${queryExecutionId}`);
-            } catch (stopError) {
-                console.warn(`Could not stop query ${queryExecutionId}:`, stopError);
-            }
-        }
-        throw error; // Re-throw to be handled by the caller
+        // Best effort stop query (requires StopQueryExecution permission)
+        // if (queryExecutionId && error.name !== 'ResourceNotFoundException') {
+        //     try {
+        //         await athenaClient.send(new StopQueryExecutionCommand({ QueryExecutionId: queryExecutionId }));
+        //         log(`Attempted to stop query ${queryExecutionId}`);
+        //     } catch (stopError) { console.warn(`Could not stop query ${queryExecutionId}:`, stopError); }
+        // }
+        throw error; // Re-throw
     }
 }
 
-// GET /query
-export const handler: APIGatewayProxyHandlerV2 = async (event) => {
+// GET /api/query
+export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) => {
     log('Received event:', JSON.stringify(event, null, 2));
 
-    // --- Get Date Range Parameter ---
-    const rangeParam = event.queryStringParameters?.range ?? '7d'; // Default to 7 days
-    let rangeDays = 7;
-    if (rangeParam.endsWith('d')) {
-        const days = parseInt(rangeParam.slice(0, -1), 10);
-        if (!isNaN(days) && days > 0) {
-            rangeDays = days;
-        } else {
-             console.warn(`Invalid range format: ${rangeParam}. Defaulting to 7 days.`);
-             // rangeDays remains 7
-        }
-    } else {
-        console.warn(`Invalid range format: ${rangeParam}. Defaulting to 7 days.`);
-        // rangeDays remains 7
+    // --- Authentication & Authorization ---
+    const userSub = event.requestContext.authorizer?.jwt.claims.sub;
+    if (!userSub) {
+        log("Unauthorized: Missing user sub in JWT claims.");
+        return { statusCode: 401, body: JSON.stringify({ message: "Unauthorized" }) };
     }
-    log(`Processing range: ${rangeDays} days`);
+    log(`Authenticated user sub: ${userSub}`);
 
-    // --- Calculate Date Range ---
-    const endDate = new Date();
-    const startDate = subDays(endDate, rangeDays -1); // Inclusive range (e.g., 7d = today + 6 previous days)
+    if (!SITES_TABLE_NAME || !DATABASE || !INITIAL_EVENTS_TABLE || !EVENTS_TABLE || !OUTPUT_LOCATION) {
+        console.error("Missing required environment variables.");
+        return { statusCode: 500, body: JSON.stringify({ message: "Internal server configuration error." }) };
+    }
+
+    // --- Get User's Sites from DynamoDB ---
+    let siteIds: string[] = [];
+    try {
+        const queryCommand = new QueryCommand({
+            TableName: SITES_TABLE_NAME,
+            IndexName: "ownerSubIndex", // Use the GSI name defined in sst.config.ts
+            KeyConditionExpression: "owner_sub = :sub",
+            ExpressionAttributeValues: { ":sub": userSub },
+            ProjectionExpression: "site_id", // Only fetch the site_id
+        });
+        const queryResult = await ddbDocClient.send(queryCommand);
+        siteIds = queryResult.Items?.map(item => item.site_id) ?? [];
+
+        if (siteIds.length === 0) {
+            log(`No sites found for user sub: ${userSub}`);
+            // Return empty results, not an error
+            return {
+                statusCode: 200,
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ initialEvents: [], events: [], commonSchema: [], initialOnlySchema: [] }),
+            };
+        }
+        log(`User ${userSub} has access to sites: ${siteIds.join(', ')}`);
+
+    } catch (error: any) {
+        console.error(`Error querying SitesTable for user ${userSub}:`, error);
+        return { statusCode: 500, body: JSON.stringify({ message: "Error fetching user sites.", details: error.message }) };
+    }
+
+    // --- Get Date Range Parameters ---
+    // Default to last 7 days if not provided or invalid
+    const defaultEndDate = new Date();
+    const defaultStartDate = subDays(defaultEndDate, 6); // 7 days inclusive
+
+    const rawStartDate = event.queryStringParameters?.startDate;
+    const rawEndDate = event.queryStringParameters?.endDate;
+
+    let startDate = defaultStartDate;
+    let endDate = defaultEndDate;
+
+    if (rawStartDate) {
+        const parsed = parseISO(rawStartDate);
+        if (isValid(parsed)) {
+            startDate = parsed;
+        } else {
+            log(`Invalid startDate format: ${rawStartDate}. Using default.`);
+        }
+    }
+    if (rawEndDate) {
+        const parsed = parseISO(rawEndDate);
+        if (isValid(parsed)) {
+            endDate = parsed; // Consider setting time to end of day if needed
+        } else {
+            log(`Invalid endDate format: ${rawEndDate}. Using default.`);
+        }
+    }
+
+    // Ensure start date is not after end date
+    if (startDate > endDate) {
+        log(`Start date ${format(startDate, 'yyyy-MM-dd')} is after end date ${format(endDate, 'yyyy-MM-dd')}. Using default range.`);
+        startDate = defaultStartDate;
+        endDate = defaultEndDate;
+    }
+
     const startDateFormat = format(startDate, 'yyyy-MM-dd');
     const endDateFormat = format(endDate, 'yyyy-MM-dd');
-    // Cast dt to DATE explicitly to ensure correct comparison with DATE literals
+    log(`Querying data from ${startDateFormat} to ${endDateFormat}`);
+
+    // --- Construct Filters ---
+    // Use DATE type for dt comparison
     const dateFilterSql = `CAST(dt AS DATE) BETWEEN DATE '${startDateFormat}' AND DATE '${endDateFormat}'`;
+    // Create site ID filter (handle potential SQL injection by ensuring siteIds are valid)
+    // For simplicity, assuming siteIds are safe internal IDs. Use parameterization if needed.
+    const siteIdFilterSql = `site_id IN (${siteIds.map(id => `'${id}'`).join(', ')})`; // Simple IN clause
 
     try {
         // --- Determine Schemas based on Compliance ---
@@ -220,33 +259,20 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         const initialOnlySelectColNames = initialOnlySchemaFields.map(s => s.name);
 
         // --- Construct SELECT Strings for Athena ---
-        // Athena needs quoted names, and properties needs casting
         const mapColumnToSelect = (colName: string): string => {
-            if (colName === 'properties') {
-                // Cast map to JSON string directly in Athena
-                return `CAST("${colName}" AS JSON) AS "${colName}"`;
-            } else {
-                // Just quote other column names
-                return `"${colName}"`;
-            }
+            if (colName === 'properties') return `CAST("${colName}" AS JSON) AS "${colName}"`;
+            return `"${colName}"`;
         };
 
-        const eventsSelectCols = commonSelectColNames
-            .map(mapColumnToSelect) // Use the mapping function
-            .join(', ');
+        const eventsSelectCols = commonSelectColNames.map(mapColumnToSelect).join(', ');
+        const initialSelectCols = [...commonSelectColNames, ...initialOnlySelectColNames].map(mapColumnToSelect).join(', ');
 
-        const initialSelectCols = [...commonSelectColNames, ...initialOnlySelectColNames]
-            .map(mapColumnToSelect) // Use the mapping function
-            .join(', ');
-
-
-        // --- Construct Separate Queries ---
-        // No need to check for empty columns as schema guarantees compliant columns exist
+        // --- Construct Queries for Iceberg Tables ---
         const initialEventsQuery = `
 SELECT
-    ${initialSelectCols} 
+    ${initialSelectCols}
 FROM "${DATABASE}"."${INITIAL_EVENTS_TABLE}"
-WHERE ${dateFilterSql}
+WHERE ${dateFilterSql} AND ${siteIdFilterSql}
 ORDER BY "timestamp" DESC
         `;
 
@@ -254,17 +280,15 @@ ORDER BY "timestamp" DESC
 SELECT
     ${eventsSelectCols}
 FROM "${DATABASE}"."${EVENTS_TABLE}"
-WHERE ${dateFilterSql}
+WHERE ${dateFilterSql} AND ${siteIdFilterSql}
 ORDER BY "timestamp" DESC
         `;
 
-
         // --- Execute Queries in Parallel ---
         log('Executing queries in parallel...');
-        // No need for conditional execution as column lists are guaranteed non-empty
         const [initialEventsResults, eventsResults] = await Promise.all([
-            executeAthenaQuery(initialEventsQuery, "Initial Events"),
-            executeAthenaQuery(eventsQuery, "Events")
+            executeAthenaQuery(initialEventsQuery, "Initial Events (Iceberg)"),
+            executeAthenaQuery(eventsQuery, "Events (Iceberg)")
         ]);
 
         log(`Finished executing queries. Initial: ${initialEventsResults.length}, Events: ${eventsResults.length}`);
@@ -276,7 +300,6 @@ ORDER BY "timestamp" DESC
             body: JSON.stringify({
                 initialEvents: initialEventsResults,
                 events: eventsResults,
-                // Send the determined schema fields (name and type)
                 commonSchema: commonSchemaFields.map(({ name, type }) => ({ name, type })),
                 initialOnlySchema: initialOnlySchemaFields.map(({ name, type }) => ({ name, type }))
             }),
