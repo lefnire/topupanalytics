@@ -1,9 +1,27 @@
-import React, {useState, useEffect, useMemo, useCallback, lazy, Suspense, memo} from 'react'; // Add lazy and Suspense
-import {useShallow} from 'zustand/shallow'; // Correct import
+import React, { useState, useEffect, useMemo, useCallback, lazy, Suspense, memo } from 'react';
+import { Navigate } from 'react-router'; // Import Navigate for redirection
+import { useShallow } from 'zustand/shallow';
+import { useAuth } from '../contexts/AuthContext'; // Import the auth hook
+import { Button } from '../components/ui/button'; // Import Button for logout
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
-import {useStore, type AnalyticsState, type AggregatedData, type CardDataItem, type Segment} from '../stores/analyticsStore'; // Import Segment
+import { useStore, type AnalyticsState, type AggregatedData, type CardDataItem, type Segment } from '../stores/analyticsStore'; // Import Segment
+import { type Site } from '../lib/api'; // Import Site type from lib/api
+import {
+ Select,
+ SelectContent,
+ SelectItem,
+ SelectTrigger,
+ SelectValue,
+} from "../components/ui/select"; // Import Select components
+import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover"; // Import Popover
+import { Calendar } from "../components/ui/calendar"; // Import Calendar
+import { Calendar as CalendarIcon } from "lucide-react"; // Import Calendar icon
+import { format, differenceInDays } from 'date-fns'; // Import date-fns functions
+import { type DateRange } from 'react-day-picker'; // Import DateRange type
+import { cn } from "../lib/utils"; // Import cn utility
+
 // Remove direct import, use React.lazy instead
 // import { SankeyCard } from './components/SankeyCard';
 
@@ -493,7 +511,10 @@ import { UsageCard } from './components/UsageCard'; // Assuming path is correct
 // --- Main Dashboard Component ---
 
 export default function AnalyticsDashboard() {
-  // Get state and actions from store using consolidated status/error
+  // --- Auth State ---
+  const { isAuthenticated, isLoading: isAuthLoading, logout, user } = useAuth();
+
+  // --- Analytics Store State ---
   const {
     selectedRange,
     setSelectedRange,
@@ -505,7 +526,12 @@ export default function AnalyticsDashboard() {
     addSegment, // Get segment actions
     removeSegment,
     clearSegments,
-    db
+    db,
+    sites, // Get sites state
+    selectedSiteId, // Get selected site ID
+    setSelectedSiteId, // Get setter action
+    userPreferences, // Get user preferences
+    // fetchSites is called internally by fetchAndLoadData on init
   } = useStore(useShallow(
     // Type is inferred from useStore hook
     (state) => ({
@@ -520,20 +546,22 @@ export default function AnalyticsDashboard() {
       removeSegment: state.removeSegment,
       clearSegments: state.clearSegments,
       db: state.db, // Need db state to check for init error
+      sites: state.sites,
+      selectedSiteId: state.selectedSiteId,
+      setSelectedSiteId: state.setSelectedSiteId,
+      userPreferences: state.userPreferences, // Add userPreferences
+      // fetchSites: state.fetchSites, // Not needed directly here
     })
   ));
 
   useEffect(() => {
     if (isServer) return;
+    // fetchAndLoadData now handles DB init and fetching sites if necessary
     useStore.getState().fetchAndLoadData();
 
     return () => { useStore.getState().cleanup(); }
     // Depend on endpoint to refetch if it changes
-  }, []);
-
-  const handleRangeChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
-    setSelectedRange(event.target.value); // This already clears segments in the store action
-  };
+  }, []); // Empty dependency array ensures this runs only once on mount
 
   // Simplified handler: Receives the fully formed Segment object
   const handleItemClick = useCallback((segment: Segment) => {
@@ -541,14 +569,13 @@ export default function AnalyticsDashboard() {
     addSegment(segment); // Directly call addSegment from the store
   }, [addSegment]); // Dependency: addSegment action
 
-  const domainName = 'ocdevel.com'; // Changed from 'Your Site'
+  // Find the selected site object to display its domain and get allowance/plan
+  const selectedSite = useMemo(() => sites.find(site => site.site_id === selectedSiteId), [sites, selectedSiteId]);
 
-  const dateRanges = [
-    {value: '1d', label: 'Last 24 hours'},
-    {value: '7d', label: 'Last 7 days'},
-    {value: '30d', label: 'Last 30 days'},
-    {value: '90d', label: 'Last 90 days'},
-  ];
+  // --- Analytics Locking Logic ---
+  const isPaymentActive = userPreferences?.is_payment_active ?? false;
+  const requestAllowance = selectedSite?.request_allowance ?? 0; // Default to 0 if site not found or allowance missing
+  const isLocked = requestAllowance <= 0 && !isPaymentActive;
 
   // Derive UI states from status
   const isLoading = status === 'initializing' || status === 'loading_data' || status === 'aggregating';
@@ -559,14 +586,36 @@ export default function AnalyticsDashboard() {
   const stats = aggregatedData?.stats;
   const chartData = aggregatedData?.chartData;
 
-  // Determine overall display state
-  const displayDataAvailable = isIdle && !!aggregatedData && !!stats && !!chartData;
-  // Show "No Data" only when idle, no error, and aggregatedData is null or empty after trying to load
-  const noDataFound = isIdle && !error && !aggregatedData;
+  // Determine overall display state, considering the lock
+  const displayDataAvailable = !isLocked && isIdle && !!aggregatedData && !!stats && !!chartData && !!selectedSiteId; // Ensure site is selected and not locked
+  // Show "No Data" only when idle, no error, not locked, and aggregatedData is null or empty after trying to load
+  const noDataFound = !isLocked && isIdle && !error && !aggregatedData && !!selectedSiteId; // Only show if a site IS selected but has no data and not locked
 
   // Specific check for critical DB init error
   const dbInitError = isError && !db; // Check if error occurred and db is still null
 
+  // Calculate chart title suffix based on date range duration
+  const chartTitleSuffix = useMemo(() => {
+    if (!selectedRange?.from || !selectedRange?.to) return '';
+    const diff = differenceInDays(selectedRange.to, selectedRange.from);
+    return diff <= 1 ? 'per Hour' : 'per Day'; // Hourly if range is 1 day or less
+  }, [selectedRange]);
+
+  // --- Auth Loading Check ---
+  if (isAuthLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        Checking authentication...
+      </div>
+    );
+  }
+
+  // --- Auth Redirect Check ---
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+
+  // --- DB Init Error Check ---
   if (dbInitError) {
     return (
       <div className="min-h-screen bg-gray-100 p-4 sm:p-6 lg:p-8 flex items-center justify-center">
@@ -578,76 +627,143 @@ export default function AnalyticsDashboard() {
     )
   }
 
+  // --- Placeholder Callbacks for UsageCard ---
+  // TODO: Implement actual Stripe Setup Intent flow trigger
+  const handleSetupAutoPay = () => {
+    console.log("Trigger Stripe Setup Intent flow...");
+    // Example: redirect or open modal
+    alert("Redirecting to payment setup...");
+    // Replace with actual navigation or modal logic
+    // window.location.href = '/setup-payment';
+  };
+
+  // TODO: Implement actual Stripe Customer Portal link generation/navigation
+  const handleManagePayment = () => {
+    console.log("Trigger Stripe Customer Portal...");
+    // Example: Fetch portal link from backend and redirect
+    alert("Redirecting to manage payment...");
+    // Replace with actual API call and redirect
+    // api.post('/api/stripe/create-portal-session').then(data => window.location.href = data.url);
+  };
+
   return <>
     <div className="min-h-screen bg-gray-100 p-4 sm:p-6 lg:p-8">
       <div className="max-w-7xl mx-auto">
         {/* Header Section */}
         <header className="mb-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-            {/* Left Side: Site Name and Segments */}
-            <div className="flex flex-col items-start gap-2">
-                <div className="flex items-center gap-3">
-                    {/* Replace img with a styled div for the avatar */}
-                    <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center text-white text-xs font-bold">
-                      {domainName?.charAt(0).toUpperCase() || 'A'}
-                    </div>
-                    {/*<img src="/assets/ocdevel-red.svg" alt="ocdevel logo" className="w-6 h-6" />*/}
-                    <h1 className="text-xl font-semibold text-gray-800">{domainName}</h1>
-                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4 text-gray-400">
-                       <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-                     </svg>
-                </div>
-                 {/* Segment Display Area */}
-                {segments.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-2 mt-1">
-                        {segments.map((segment, index) => (
-                            <span key={index} className="flex items-center gap-1 bg-blue-100 text-blue-800 text-xs font-medium px-2 py-0.5 rounded-full">
-                                {segment.label}
-                                <button
-                                    onClick={() => removeSegment(segment)}
-                                    className="ml-1 text-blue-600 hover:text-blue-800 focus:outline-none"
-                                    aria-label={`Remove filter: ${segment.label}`}
-                                    title={`Remove filter: ${segment.label}`}
-                                >
-                                    &times; {/* Cross icon */}
-                                </button>
-                            </span>
-                        ))}
-                        {/* Optional: Add a "Clear All" button */}
-                        {segments.length > 1 && (
-                            <button
-                                onClick={clearSegments}
-                                className="text-xs text-gray-500 hover:text-gray-700 underline focus:outline-none ml-1"
-                                title="Clear all filters"
-                            >
-                                Clear all
-                            </button>
-                        )}
-                    </div>
-                )}
-            </div>
+          {/* Left Side: Site Selector and Segments */}
+          <div className="flex flex-col items-start gap-2">
+              {/* Site Selector */}
+              <Select
+                  value={selectedSiteId ?? ''}
+                  onValueChange={(value) => setSelectedSiteId(value || null)}
+                  disabled={sites.length === 0 || isLoading || isRefreshing} // Disable while loading/refreshing
+              >
+                  <SelectTrigger className="w-auto min-w-[180px] h-9 text-lg font-semibold border-none shadow-none focus:ring-0 p-0 gap-2">
+                      <div className="flex items-center gap-2">
+                           {/* Avatar */}
+                           <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold ${selectedSite ? 'bg-blue-500' : 'bg-gray-400'}`}>
+                              {selectedSite?.name?.charAt(0).toUpperCase() || '?'}
+                           </div>
+                           {/* Site Name */}
+                           <SelectValue placeholder="Select a site..." />
+                      </div>
+                  </SelectTrigger>
+                  <SelectContent>
+                      {sites.length > 0 ? (
+                          sites.map((site) => (
+                              <SelectItem key={site.site_id} value={site.site_id}>
+                                  {site.name} ({site.site_id}) {/* Display name and ID */}
+                              </SelectItem>
+                          ))
+                      ) : (
+                          <SelectItem value="loading" disabled>
+                            {status === 'error' ? 'Error loading sites' : 'Loading sites...'}
+                          </SelectItem>
+                      )}
+                  </SelectContent>
+              </Select>
+              {/* Segment Display Area */}
+              {segments.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 mt-1">
+                      {segments.map((segment, index) => (
+                          <span key={index} className="flex items-center gap-1 bg-blue-100 text-blue-800 text-xs font-medium px-2 py-0.5 rounded-full">
+                              {segment.label}
+                              <button
+                                  onClick={() => removeSegment(segment)}
+                                  className="ml-1 text-blue-600 hover:text-blue-800 focus:outline-none"
+                                  aria-label={`Remove filter: ${segment.label}`}
+                                  title={`Remove filter: ${segment.label}`}
+                              >
+                                  &times; {/* Cross icon */}
+                              </button>
+                          </span>
+                      ))}
+                      {/* Optional: Add a "Clear All" button */}
+                      {segments.length > 1 && (
+                          <button
+                              onClick={clearSegments}
+                              className="text-xs text-gray-500 hover:text-gray-700 underline focus:outline-none ml-1"
+                              title="Clear all filters"
+                          >
+                              Clear all
+                          </button>
+                      )}
+                  </div>
+              )}
+          </div>
 
-            {/* Right Side: Date Range Selector */}
-            <div className="flex items-center gap-4 text-sm text-gray-600 flex-shrink-0">
-                {/* Add background refresh indicator */}
-                {isRefreshing && <span className="text-xs text-gray-400 animate-pulse">(syncing...)</span>}
-                <select
-                    value={selectedRange}
-                    onChange={handleRangeChange}
-                    disabled={isLoading} // Disable during any loading state
-                    className="px-3 py-1 border rounded bg-white hover:bg-gray-50 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
-                    aria-label="Select date range"
-                >
-                    {dateRanges.map(range => (
-                        <option key={range.value} value={range.value}>{range.label}</option>
-                    ))}
-                </select>
-                 {/* Ellipsis Button Placeholder - REMOVED */}
-                 {/* <button className="p-1 text-gray-400 hover:text-gray-600 focus:outline-none">
-                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                     <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z" />
-                   </svg>
-                 </button> */}
-            </div>
+          {/* Right Side: Date Range Picker & Logout */}
+          <div className="flex items-center gap-4 text-sm text-gray-600 flex-shrink-0">
+              {/* Refresh Indicator */}
+              {isRefreshing && <span className="text-xs text-gray-400 animate-pulse">(syncing...)</span>}
+              {/* User Info & Logout */}
+              {user && (
+                <span className="text-xs text-gray-500 hidden sm:inline">
+                  Logged in as: {user.username}
+                </span>
+              )}
+              <Button onClick={logout} variant="outline" size="sm">Logout</Button>
+              {/* Date Range Picker */}
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button
+                    id="date"
+                    variant={"outline"}
+                    className={cn(
+                      "w-[260px] justify-start text-left font-normal",
+                      !selectedRange && "text-muted-foreground"
+                    )}
+                    disabled={isLoading || !selectedSiteId} // Disable if loading or no site selected
+                  >
+                    <CalendarIcon className="mr-2 h-4 w-4" />
+                    {selectedRange?.from ? (
+                      selectedRange.to ? (
+                        <>
+                          {format(selectedRange.from, "LLL dd, y")} -{" "}
+                          {format(selectedRange.to, "LLL dd, y")}
+                        </>
+                      ) : (
+                        format(selectedRange.from, "LLL dd, y")
+                      )
+                    ) : (
+                      <span>Pick a date</span>
+                    )}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="end">
+                  <Calendar
+                    initialFocus
+                    mode="range"
+                    defaultMonth={selectedRange?.from}
+                    selected={selectedRange}
+                    onSelect={setSelectedRange} // Use store action directly
+                    numberOfMonths={2}
+                    disabled={(date) => date > new Date() || date < new Date("2000-01-01")} // Example disabled dates
+                  />
+                </PopoverContent>
+              </Popover>
+          </div>
         </header>
 
         {/* Loading State */}
@@ -662,13 +778,26 @@ export default function AnalyticsDashboard() {
           </div>
         )}
 
-        {/* No Data State */}
-        {noDataFound && (
-          <div className="text-center py-10 text-gray-500">No analytics data found for the selected period {segments.length > 0 ? 'matching the current filters' : ''}.</div>
-        )}
+       {/* No Data State - Updated message */}
+       {isIdle && !error && !selectedSiteId && sites.length > 0 && (
+            <div className="text-center py-10 text-gray-500">Please select a site to view analytics.</div>
+       )}
+       {noDataFound && ( // This covers the case where a site is selected but has no data
+         <div className="text-center py-10 text-gray-500">No analytics data found for '{selectedSite?.name}' in the selected period {segments.length > 0 ? 'matching the current filters' : ''}.</div>
+       )}
 
-        {/* Display content when data is available and status is idle */}
-        {displayDataAvailable && (
+       {/* Display Locked State */}
+       {isLocked && selectedSiteId && (
+         <div className="text-center py-10 text-red-700 bg-red-100 border border-red-300 rounded p-6 mb-6">
+           <h2 className="text-xl font-semibold mb-2">Analytics Paused</h2>
+           <p className="mb-4">Your request allowance for '{selectedSite?.name}' is depleted.</p>
+           <p className="mb-4">Please set up auto-pay to reactivate analytics and ensure uninterrupted service.</p>
+           <Button onClick={handleSetupAutoPay}>Setup Auto-Pay Now</Button>
+         </div>
+       )}
+
+       {/* Display content when data is available, status is idle, and not locked */}
+        {displayDataAvailable && stats && chartData && ( // Added null checks for stats/chartData
           <>
             {/* Stats Overview Section */}
             <section className="mb-6 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
@@ -703,7 +832,7 @@ export default function AnalyticsDashboard() {
             {/* Main Chart Section */}
             <section className="mb-6 p-4 bg-white rounded shadow">
               <h2 className="text-lg font-semibold text-gray-800 mb-4">
-                Visitor Trends (Pageviews {selectedRange === '1d' ? 'per Hour' : 'per Day'})
+                Visitor Trends (Pageviews {chartTitleSuffix}) {/* Use calculated suffix */}
               </h2>
               <div className="h-64">
                 {chartData.length > 0 ? (
@@ -742,12 +871,17 @@ export default function AnalyticsDashboard() {
               ))}
               {/* Rename and pass handler to the new EventsCard */}
               <EventsCard onItemClick={handleItemClick} />
-              {/* Add the new Usage Card */}
-              <UsageCard
-                currentUsage={stats?.totalPageviews ?? 0} // Use pageviews as placeholder
-                usageLimit={500000} // Hardcoded limit
-                hasCreditCard={false} // Placeholder for payment status
-              />
+              {/* Add the new Usage Card with updated props */}
+              {selectedSite && userPreferences && ( // Only render if site and prefs are loaded
+                 <UsageCard
+                   request_allowance={selectedSite.request_allowance}
+                   plan={selectedSite.plan}
+                   is_payment_active={userPreferences.is_payment_active}
+                   stripe_last4={userPreferences.stripe_last4}
+                   onSetupAutoPay={handleSetupAutoPay} // Pass callback
+                   onManagePayment={handleManagePayment} // Pass callback
+                 />
+              )}
               {/* Sankey Card is moved below this grid */}
             </section>
 

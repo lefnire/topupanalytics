@@ -19,10 +19,13 @@ In analytics.tsx, any item in a list can be clicked. This applies a "segment" on
  */
 
 import { create } from "zustand";
-import { persist, createJSONStorage } from 'zustand/middleware';
+import { persist, createJSONStorage, type StateStorage } from 'zustand/middleware';
 import * as duckdb from '@duckdb/duckdb-wasm';
 import * as arrow from 'apache-arrow';
 import { fetchAuthSession } from 'aws-amplify/auth'; // Import fetchAuthSession
+import { api, type Site, type UserPreferences } from '../lib/api'; // Import UserPreferences type
+import { type DateRange } from 'react-day-picker';
+import { subDays, format, startOfDay, endOfDay, isValid, parseISO } from 'date-fns'; // Import date-fns functions
 
 // Import wasm files
 import duckdb_wasm from '@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url';
@@ -30,7 +33,9 @@ import mvp_worker from '@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?ur
 import duckdb_wasm_eh from '@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url';
 import eh_worker from '@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url';
 
-const endpoint = import.meta.env.VITE_APP_URL + '/api/query'
+const queryEndpoint = import.meta.env.VITE_APP_URL + '/api/query';
+const sitesEndpoint = import.meta.env.VITE_APP_URL + '/api/sites';
+const preferencesEndpoint = import.meta.env.VITE_APP_URL + '/api/user/preferences'; // Added
 
 // --- Constants ---
 const isServer = typeof window === 'undefined';
@@ -140,8 +145,10 @@ export interface Segment {
     value: string | number;
     label: string;
     dbColumn?: string;
-    dbValue?: string | number;
+   dbValue?: string | number;
 }
+
+// Site interface is now imported from api.ts
 
 // Define the initial state structure for resetting
 const initialAnalyticsState = {
@@ -153,42 +160,54 @@ const initialAnalyticsState = {
     regionsTab: 'countries',
     devicesTab: 'browsers',
     eventsTab: 'events',
+    selectedRange: { // Default to last 7 days
+        from: subDays(startOfDay(new Date()), 6),
+        to: endOfDay(new Date()),
+    } as DateRange | undefined,
     // Initialize nested structures properly to avoid null issues later
     aggregatedData: {
         stats: null, chartData: null, eventsData: null, sources: null, pages: null, regions: null, devices: null,
         customProperties: { availableKeys: [], aggregatedValues: null }
     },
-    sankeyData: { nodes: [], links: [] }
+   sankeyData: { nodes: [], links: [] },
+   sites: [] as Site[], // Initialize sites state with type
+   selectedSiteId: null as string | null, // Initialize selectedSiteId state with type
+   userPreferences: null as UserPreferences | null, // Added
 };
 
 export interface AnalyticsState {
-    db: duckdb.AsyncDuckDB | null;
+   db: duckdb.AsyncDuckDB | null;
     connection: duckdb.AsyncDuckDBConnection | null;
     status: AnalyticsStatus;
     error: string | null;
-    selectedRange: string;
+    selectedRange: DateRange | undefined; // Updated type
     aggregatedData: AggregatedData | null;
     selectedPropertyKey: string | null;
     sankeyData: SankeyData | null;
     isRefreshing: boolean;
-    segments: Segment[];
+  segments: Segment[];
+  sites: Site[]; // Add sites state
+  selectedSiteId: string | null; // Add selectedSiteId state
+  userPreferences: UserPreferences | null; // Added
 
-    // Card Tab Preferences
-    sourcesTab: string;
+  // Card Tab Preferences
+   sourcesTab: string;
     pagesTab: string;
     regionsTab: string;
     devicesTab: string;
     eventsTab: string;
 
-    resetAnalyticsState: () => Partial<AnalyticsState>;
-    setSelectedRange: (range: string) => void;
-    fetchAndLoadData: () => Promise<void>;
-    runAggregations: () => Promise<void>;
-    runCustomPropertyAggregation: (key: string) => Promise<void>;
+  resetAnalyticsState: () => Partial<AnalyticsState>;
+  setSelectedRange: (range: DateRange | undefined) => void; // Updated type
+  fetchSites: () => Promise<void>; // Add fetchSites action
+  setSelectedSiteId: (siteId: string | null) => void; // Add setSelectedSiteId action
+  fetchAndLoadData: () => Promise<void>;
+   runAggregations: () => Promise<void>;
+   runCustomPropertyAggregation: (key: string) => Promise<void>;
     runSankeyAggregation: () => Promise<void>;
     cleanup: () => Promise<void>;
     _initializeDb: () => Promise<{ db: duckdb.AsyncDuckDB | null; connection: duckdb.AsyncDuckDBConnection | null }>;
-    _fetchData: (range: string) => Promise<{
+    _fetchData: () => Promise<{ // Removed range parameter
         initialEvents: any[];
         events: any[];
         commonSchema: { name: string; type: string }[];
@@ -251,9 +270,9 @@ const mapSchemaToDuckDBType = (schemaType: string): string => {
 };
 
 const toCards = <T extends { name: string; value: number; percentage?: number }>(rows: (T & { type: string })[], type: string): CardDataItem[] =>
-    rows.filter(r => r.type === type).map(({ name, value, percentage }) => ({ name, value, percentage }));
+   rows.filter(r => r.type === type).map(({ name, value, percentage }) => ({ name, value, percentage }));
 
-const timeFmt = (range: string) => range === '1d' ? '%Y-%m-%d %H:00' : '%Y-%m-%d';
+// timeFmt is no longer needed as we use specific dates
 
 const _generateCreateTableSQL = (tableName: string, schema: { name: string; type: string }[]): string => {
     const columns = schema
@@ -338,7 +357,7 @@ export const useStore = create<AnalyticsState>()(
             connection: null,
             status: 'idle',
             isRefreshing: false,
-            selectedRange: '1d',
+            // selectedRange is initialized via initialAnalyticsState
             ...initialAnalyticsState,
 
             resetAnalyticsState: () => {
@@ -358,6 +377,11 @@ export const useStore = create<AnalyticsState>()(
                     sankeyData: { nodes: [], links: [] },
                     segments: [],
                     selectedPropertyKey: currentSelectedKey,
+                    // Keep sites, selectedSiteId, selectedRange, and userPreferences during reset unless explicitly changed elsewhere
+                    sites: get().sites,
+                    selectedSiteId: get().selectedSiteId,
+                    selectedRange: get().selectedRange,
+                    userPreferences: get().userPreferences, // Keep user preferences
                 };
             },
 
@@ -380,8 +404,11 @@ export const useStore = create<AnalyticsState>()(
                 }
             },
 
-            _fetchData: async (range: string) => {
-                if (!endpoint) throw new Error("API endpoint not set.");
+            _fetchData: async () => { // Removed range parameter
+                const { selectedSiteId, selectedRange } = get();
+                if (!queryEndpoint) throw new Error("API query endpoint not set.");
+                if (!selectedSiteId) throw new Error("No site selected for fetching data.");
+                if (!selectedRange?.from || !selectedRange?.to) throw new Error("Date range not selected for fetching data."); // Prevent fetch without range
 
                 // Get Cognito ID token
                 let idToken;
@@ -396,7 +423,13 @@ export const useStore = create<AnalyticsState>()(
                     throw new Error("Failed to get authentication token. Please log in again.");
                 }
 
-                const response = await fetch(`${endpoint}?range=${range}`, {
+                // Format dates for query parameters
+                const startDateParam = format(selectedRange.from, 'yyyy-MM-dd');
+                const endDateParam = format(selectedRange.to, 'yyyy-MM-dd');
+
+                const url = `${queryEndpoint}?siteId=${selectedSiteId}&startDate=${startDateParam}&endDate=${endDateParam}`;
+                console.log(`Fetching query data from: ${url}`);
+                const response = await fetch(url, {
                     headers: {
                         'Authorization': `Bearer ${idToken}` // Add Authorization header
                     }
@@ -417,41 +450,144 @@ export const useStore = create<AnalyticsState>()(
                 return { initialEvents, events, commonSchema, initialOnlySchema };
             },
 
-            setSelectedRange: (range: string) => {
-                if (range === get().selectedRange) return;
+            fetchSites: async () => { // Renamed to fetchSitesAndPreferences, but keeping original name for now to avoid breaking calls
+                if (!sitesEndpoint || !preferencesEndpoint) {
+                    set({ status: 'error', error: 'API endpoints not configured.' });
+                    return;
+                }
+                console.log("Fetching sites and user preferences...");
+                try {
+                    // Fetch sites and preferences concurrently
+                    const [fetchedSites, fetchedPreferences] = await Promise.all([
+                        api.get<Site[]>(sitesEndpoint),
+                        api.get<UserPreferences>(preferencesEndpoint)
+                    ]);
+
+                    console.log(`Fetched ${fetchedSites.length} sites and user preferences.`);
+                    set(state => {
+                        const currentSelectedId = state.selectedSiteId;
+                        // If no site is selected OR the selected site is no longer valid, select the first one
+                        const newSelectedSiteId = (!currentSelectedId || !fetchedSites.some(s => s.site_id === currentSelectedId)) && fetchedSites.length > 0
+                            ? fetchedSites[0].site_id
+                            : currentSelectedId;
+
+                        return {
+                            sites: fetchedSites,
+                            userPreferences: fetchedPreferences, // Store preferences
+                            selectedSiteId: newSelectedSiteId,
+                            // Trigger data load only if a site is now selected
+                            status: newSelectedSiteId ? state.status : 'idle',
+                            error: null // Clear previous errors
+                        };
+                    });
+                    // If a site is now selected, trigger data fetch
+                    if (get().selectedSiteId) {
+                        get().fetchAndLoadData();
+                    } else if (fetchedSites.length === 0) {
+                         set({ status: 'idle', error: 'No sites found for this user.', aggregatedData: null }); // Handle no sites case
+                    }
+                } catch (err: any) {
+                    console.error("Failed to fetch sites or preferences:", err);
+                    // Set specific error messages if possible, otherwise generic
+                    const errorMessage = err.message || 'Failed to fetch initial data.';
+                    set({ status: 'error', error: errorMessage, sites: [], userPreferences: null, selectedSiteId: null, aggregatedData: null });
+                }
+            },
+
+            setSelectedSiteId: (siteId: string | null) => {
+                if (siteId === get().selectedSiteId) return;
+                console.log(`Setting selected site ID to: ${siteId}`);
                 set({
-                    selectedRange: range,
-                    ...get().resetAnalyticsState(),
-                    segments: []
+                    selectedSiteId: siteId,
+                    ...get().resetAnalyticsState(), // Reset analytics data, keep site selection
+                    segments: [] // Clear segments when site changes
                  });
-                get().fetchAndLoadData();
+                 if (siteId) {
+                    get().fetchAndLoadData(); // Fetch data for the new site
+                 } else {
+                    // Handle case where selection is cleared (e.g., show a message)
+                    set({ aggregatedData: null, status: 'idle', error: 'Please select a site.' });
+                 }
+            },
+
+            setSelectedRange: (range: DateRange | undefined) => {
+                // Basic comparison, might need deep compare if objects cause issues
+                if (JSON.stringify(range) === JSON.stringify(get().selectedRange)) return;
+                 set({
+                     selectedRange: range,
+                     ...get().resetAnalyticsState(), // Reset analytics, keep range
+                     segments: [] // Clear segments when range changes
+                 });
+                 get().fetchAndLoadData(); // Fetch data for the new range
             },
 
             fetchAndLoadData: async () => {
                 if (get().isRefreshing) return; // Prevent multiple refreshes
 
-                const {selectedRange, status} = get();
+                const { status, selectedSiteId, db, selectedRange } = get(); // Get selectedRange here
 
-                if (status === 'loading_data' || status === 'initializing') return;
+                // Initialize DB and fetch sites if not already done
+                if (!db) {
+                    console.log("DB not initialized, initializing and fetching sites...");
+                    set({ status: 'initializing' });
+                    try {
+                        const dbResult = await get()._initializeDb(); // Get result to set state
+                        set({ db: dbResult.db, connection: dbResult.connection }); // Set DB state
+                        await get().fetchSites(); // Fetch sites after DB init
+                        // fetchSites will trigger fetchAndLoadData again if a site is selected
+                        return; // Exit here, let the triggered call handle data fetching
+                    } catch (initError: any) {
+                        console.error("Initialization or site fetch failed:", initError);
+                        set({ status: 'error', error: initError.message || 'Initialization failed', isRefreshing: false });
+                        return;
+                    }
+                }
 
-                console.log(`Fetching data for range: ${selectedRange}`);
-                set({ isRefreshing: true, status: 'loading_data', ...get().resetAnalyticsState() });
+                // If DB is ready but no site is selected, wait. fetchSites should handle this.
+                if (!selectedSiteId) {
+                    console.log("No site selected, waiting for site selection.");
+                    // Check if sites have been fetched, if not, fetch them.
+                    if (get().sites.length === 0 && status !== 'error') {
+                        console.log("No sites loaded, attempting to fetch sites.");
+                        await get().fetchSites();
+                    } else if (get().sites.length === 0 && status === 'idle') {
+                         set({ status: 'idle', error: 'No sites found. Please create a site first.' });
+                    }
+                    return; // Don't proceed without a site ID
+                }
+
+                // Check if date range is valid before fetching
+                if (!selectedRange?.from || !selectedRange?.to) {
+                    console.log("Date range not fully selected, skipping data fetch.");
+                    // Optionally set an error or specific status
+                    // set({ status: 'idle', error: 'Please select a valid date range.' });
+                    return;
+                }
+
+                if (status === 'loading_data' || status === 'initializing' || status === 'aggregating') return;
+
+                console.log(`Fetching data for site ${selectedSiteId}, range: ${format(selectedRange.from, 'P')} - ${format(selectedRange.to, 'P')}`);
+                // Reset analytics state but keep site selection and site list
+                set(state => ({
+                    isRefreshing: true,
+                    status: 'loading_data',
+                    ...state.resetAnalyticsState(), // Resets data/segments/error etc.
+                    sites: state.sites, // Keep existing sites list
+                    selectedSiteId: state.selectedSiteId, // Keep current site selection
+                    selectedRange: state.selectedRange // Keep current range selection
+                }));
 
 
                 try {
-                    const [dbResult, fetchedData] = await Promise.all([
-                        get()._initializeDb(),
-                        get()._fetchData(selectedRange)
-                    ]);
+                    // Fetch data only, DB is already initialized
+                    const fetchedData = await get()._fetchData(); // _fetchData uses range from state
 
                     const { initialEvents, events, commonSchema, initialOnlySchema } = fetchedData;
                     const fullInitialSchema = [...commonSchema, ...initialOnlySchema];
 
-                    if (dbResult.db !== get().db) {
-                        set({ db: dbResult.db, connection: dbResult.connection });
-                    }
-                    const { db, connection } = dbResult;
-                    if (!db || !connection) throw new Error("Database initialization failed");
+                    // DB and connection should already be set by the time we get here
+                    const { db: currentDb, connection } = get(); // Renamed db to currentDb to avoid conflict
+                    if (!currentDb || !connection) throw new Error("Database connection lost"); // Check again just in case
 
                     // --- Register Data Buffers ---
                     const initialEventsBuffer = new TextEncoder().encode(JSON.stringify(initialEvents));
@@ -459,8 +595,8 @@ export const useStore = create<AnalyticsState>()(
                     const initialEventsFileName = 'initial_events.json';
                     const eventsFileName = 'events.json';
                     await Promise.all([
-                        db.registerFileBuffer(initialEventsFileName, initialEventsBuffer),
-                        db.registerFileBuffer(eventsFileName, eventsBuffer)
+                        currentDb.registerFileBuffer(initialEventsFileName, initialEventsBuffer),
+                        currentDb.registerFileBuffer(eventsFileName, eventsBuffer)
                     ]);
                     console.log(`Registered ${initialEventsFileName} and ${eventsFileName}`);
 
@@ -505,7 +641,7 @@ export const useStore = create<AnalyticsState>()(
                         if (events.length > 0) insertPromises.push(connection.query(insertEventsSql));
                         if (insertPromises.length > 0) await Promise.all(insertPromises);
 
-                        await Promise.all([ db.dropFile(initialEventsFileName), db.dropFile(eventsFileName) ]);
+                        await Promise.all([ currentDb.dropFile(initialEventsFileName), currentDb.dropFile(eventsFileName) ]);
                         await connection.query(createAnalyticsViewSql);
 
                         const countResult = await connection.query(`SELECT COUNT(*) AS count FROM analytics`);
@@ -527,8 +663,9 @@ export const useStore = create<AnalyticsState>()(
             },
 
             runAggregations: async () => {
-                const {connection, status, selectedRange, segments} = get();
-                if (!connection || status === 'aggregating' || status === 'error' || status === 'loading_data') {
+                const {connection, status, selectedRange, segments} = get(); // selectedRange is now DateRange | undefined
+                if (!connection || status === 'aggregating' || status === 'error' || status === 'loading_data' || !selectedRange?.from || !selectedRange?.to) {
+                    console.log("Skipping aggregations - invalid state or range", { status, selectedRange });
                     return;
                 }
 
@@ -573,9 +710,13 @@ export const useStore = create<AnalyticsState>()(
                         };
                     });
 
-                    // Chart Data Query
+                    // Chart Data Query - Group by hour if range is 1 day or less, else by day
+                    const daysDiff = selectedRange.to.getTime() - selectedRange.from.getTime();
+                    const oneDayMs = 24 * 60 * 60 * 1000;
+                    const timeFormat = daysDiff <= oneDayMs ? '%Y-%m-%d %H:00' : '%Y-%m-%d';
+
                     const chartDataQuery = `
-                        SELECT strftime(timestamp, '${timeFmt(selectedRange)}') AS date, COUNT(*) AS views
+                        SELECT strftime(timestamp, '${timeFormat}') AS date, COUNT(*) AS views
                         FROM analytics ${whereClause} AND event = 'page_view'
                         GROUP BY date ORDER BY date;
                     `;
@@ -853,7 +994,7 @@ export const useStore = create<AnalyticsState>()(
                 const {connection, db} = get();
                 try { await connection?.close(); } catch (e) { console.error("Error closing connection:", e); }
                 try { await db?.terminate(); } catch (e) { console.error("Error terminating DB:", e); }
-                set({connection: null, db: null, status: 'idle'});
+                set({ connection: null, db: null, status: 'idle' });
             },
 
             // Setters for Card Tab Preferences
@@ -889,14 +1030,56 @@ export const useStore = create<AnalyticsState>()(
             name: 'analytics-store-preferences',
             storage: createJSONStorage(() => localStorage),
             partialize: (state) => ({
-                selectedRange: state.selectedRange,
+                // Persist date range as ISO strings
+                selectedRange: state.selectedRange
+                    ? { from: state.selectedRange.from?.toISOString(), to: state.selectedRange.to?.toISOString() }
+                    : undefined,
                 selectedPropertyKey: state.selectedPropertyKey,
                 sourcesTab: state.sourcesTab,
                 pagesTab: state.pagesTab,
                 regionsTab: state.regionsTab,
                 devicesTab: state.devicesTab,
                 eventsTab: state.eventsTab,
+                selectedSiteId: state.selectedSiteId, // Persist selected site
+                // Do not persist sites list, fetch fresh on load
             }),
+            // Rehydrate persisted dates from ISO strings
+            onRehydrateStorage: () => { // Changed signature
+                console.log("Rehydrating state...");
+                return (state, error) => {
+                    if (error) {
+                        console.error("Failed to rehydrate state:", error);
+                    }
+                    if (state?.selectedRange?.from && state.selectedRange.to) {
+                        try {
+                            const fromDate = parseISO(state.selectedRange.from as unknown as string); // Cast to string first
+                            const toDate = parseISO(state.selectedRange.to as unknown as string); // Cast to string first
+                            if (isValid(fromDate) && isValid(toDate)) {
+                                state.selectedRange = { from: fromDate, to: toDate };
+                                console.log("Rehydrated date range:", state.selectedRange);
+                            } else {
+                                throw new Error("Invalid date string parsed");
+                            }
+                        } catch (dateError) {
+                             console.error("Error parsing persisted dates:", dateError);
+                             // Fallback to default if parsing fails
+                             state.selectedRange = {
+                                from: subDays(startOfDay(new Date()), 6),
+                                to: endOfDay(new Date()),
+                             };
+                        }
+                    } else {
+                         // Set default if persisted range is incomplete or missing
+                         if (state) { // Ensure state exists before modifying
+                            state.selectedRange = {
+                               from: subDays(startOfDay(new Date()), 6),
+                               to: endOfDay(new Date()),
+                            };
+                            console.log("Setting default date range during rehydration.");
+                         }
+                    }
+                };
+            }
         }
     )
 );

@@ -4,66 +4,82 @@ import React from 'react';
 const formatNumber = (num: number) => num.toLocaleString();
 
 interface UsageCardProps {
-  currentUsage: number;
-  usageLimit: number;
-  hasCreditCard: boolean; // Placeholder for payment status
+  request_allowance: number;
+  plan: string; // Assuming plan is a string like 'free', 'paid', etc. - adjust if needed
+  is_payment_active: boolean;
+  stripe_last4?: string | null; // Optional, only present if payment is active
+  onSetupAutoPay: () => void; // Callback to trigger Stripe Setup Intent flow
+  onManagePayment: () => void; // Callback to link to Stripe Customer Portal (implement later)
 }
 
 export const UsageCard: React.FC<UsageCardProps> = ({
-  currentUsage,
-  usageLimit,
-  hasCreditCard,
+  request_allowance,
+  plan, // plan might be used for future display logic, keeping it for now
+  is_payment_active,
+  stripe_last4,
+  onSetupAutoPay,
+  onManagePayment,
 }) => {
-  const usagePercentage = Math.min((currentUsage / usageLimit) * 100, 100); // Cap at 100%
-  const limitReached = currentUsage >= usageLimit;
-  const showAd = !hasCreditCard || limitReached;
-
-  // Determine progress bar color
-  let progressBarColor = 'bg-blue-500'; // Default blue
-  if (usagePercentage > 80) progressBarColor = 'bg-yellow-500'; // Yellow warning
-  if (limitReached) progressBarColor = 'bg-red-500'; // Red limit reached
+  const allowanceDepleted = request_allowance <= 0;
+  const showSetupPrompt = !is_payment_active;
+  const showDepletedWarning = allowanceDepleted && !is_payment_active;
 
   return (
     <div className="p-4 bg-white rounded shadow flex flex-col h-full">
-      <h2 className="text-lg font-semibold text-gray-800 mb-3">Usage</h2>
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">Usage Allowance</h2>
 
       <div className="mb-4">
         <div className="flex justify-between items-baseline mb-1 text-sm">
-          <span className="font-medium text-gray-700">Requests</span>
-          <span className={`font-semibold ${limitReached ? 'text-red-600' : 'text-gray-900'}`}>
-            {formatNumber(currentUsage)} / {formatNumber(usageLimit)}
+          <span className="font-medium text-gray-700">Remaining Requests</span>
+          <span className={`font-semibold ${allowanceDepleted ? 'text-red-600' : 'text-gray-900'}`}>
+            {formatNumber(request_allowance)}
           </span>
         </div>
-        <div className="w-full bg-gray-200 rounded-full h-2.5 dark:bg-gray-700">
-          <div
-            className={`${progressBarColor} h-2.5 rounded-full transition-all duration-500 ease-out`}
-            style={{ width: `${usagePercentage}%` }}
-            title={`${usagePercentage.toFixed(1)}% Used`}
-          ></div>
-        </div>
-        <p className="text-xs text-gray-500 mt-1 text-right">
-          {limitReached ? 'Limit reached. Top-up required.' : `${formatNumber(usageLimit - currentUsage)} remaining`}
-        </p>
+        {/* Progress bar removed as it's less relevant for a depleting balance model */}
       </div>
 
       <div className="text-sm text-gray-600 mb-4 flex-grow">
-        <p>Your plan includes {formatNumber(usageLimit)} requests per cycle.</p>
-        <p>Additional usage is billed at $5 per 500k requests.</p>
-        {/* Placeholder links/buttons for future functionality */}
+        <p>Includes 1k free requests.</p>
+        <p>Auto-pay enabled ($5 per 500k requests) when payment method is active.</p>
         <div className="mt-2 space-x-2">
-           <button className="text-xs text-blue-600 hover:underline focus:outline-none" disabled>Set up Auto Top-up</button>
-           <button className="text-xs text-blue-600 hover:underline focus:outline-none" disabled>Top-up Manually</button>
+          {is_payment_active ? (
+            stripe_last4 ? (
+              <span className="text-xs text-green-700 font-medium">
+                Auto-Pay Active (Card ending in {stripe_last4})
+                <button onClick={onManagePayment} className="ml-2 text-xs text-blue-600 hover:underline focus:outline-none">(Manage)</button>
+              </span>
+            ) : (
+               // Fallback if last4 isn't available for some reason
+               <span className="text-xs text-green-700 font-medium">
+                 Auto-Pay Active
+                 <button onClick={onManagePayment} className="ml-2 text-xs text-blue-600 hover:underline focus:outline-none">(Manage)</button>
+               </span>
+            )
+          ) : (
+            <button onClick={onSetupAutoPay} className="text-xs text-blue-600 hover:underline focus:outline-none">
+              Setup Auto-Pay
+            </button>
+          )}
+          {/* "Top-up Manually" button removed */}
         </div>
       </div>
 
-      {showAd && (
+      {(showSetupPrompt || showDepletedWarning) && (
         <div className="mt-auto border-t border-gray-200 pt-3">
-          <div className="bg-gray-100 p-3 rounded text-center text-sm text-gray-700">
-            <p className="font-medium mb-1">Advertisement Placeholder</p>
-            <p className="text-xs">This space can show relevant offers or integrations.</p>
-            <button className="mt-2 text-xs text-blue-600 hover:underline focus:outline-none">
-              {limitReached ? 'Top-up Now to Remove Ad' : 'Add Credit Card to Remove Ad'}
-            </button>
+          <div className={`p-3 rounded text-center text-sm ${showDepletedWarning ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
+            {showDepletedWarning ? (
+              <>
+                <p className="font-medium mb-1">Allowance Depleted</p>
+                <p className="text-xs">Setup Auto-Pay to continue service and ensure uninterrupted analytics.</p>
+              </>
+            ) : (
+              <p className="font-medium mb-1">Enable Auto-Pay</p>
+            )}
+            {!is_payment_active && (
+               <button onClick={onSetupAutoPay} className="mt-2 text-xs text-blue-600 hover:underline focus:outline-none">
+                 Setup Auto-Pay Now
+               </button>
+            )}
           </div>
         </div>
       )}

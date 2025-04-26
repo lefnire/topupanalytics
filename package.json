@@ -21,6 +21,7 @@
     "@aws-sdk/lib-dynamodb": "^3.797.0",
     "date-fns": "^4.1.0",
     "sst": "3.13.19",
+    "stripe": "^18.0.0",
     "ua-parser-js": "^2.0.3"
   },
   "devDependencies": {

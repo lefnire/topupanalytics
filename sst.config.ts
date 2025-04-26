@@ -7,34 +7,7 @@ The primary goal of this data pipeline is extreme cost-effectiveness and scalabi
 
 ## Next Steps / Missing Components
 
-This IaC configures the core data pipeline and basic routing, but several components are needed to realize the full web analytics product:
-
-1.  **API Gateway Routes (for Management):**
-    *   Define authenticated routes within the `ManagementApi` (`ApiGatewayV2`) for user/site management (these are lower volume and protected, justifying API Gateway cost):
-        *   `POST /api/sites`: Create a new site entry in `sitesTable` linked to the authenticated Cognito user.
-        *   `GET /api/sites`: List sites belonging to the user.
-        *   `GET /api/sites/{site_id}`: Get details for a specific site (including configuration).
-        *   `PUT /api/sites/{site_id}`: Update site configuration (e.g., domains, allowed fields for GDPR).
-        *   `GET /api/sites/{site_id}/script`: Generate the JS embed script tag.
-    *   Define routes for user preferences (`userPreferencesTable`).
-    *   Stripe integration endpoints (webhook for payment confirmation, initiating checkout).
-    *   **Note:** The `/api/query` route is already configured on this API Gateway.
-2.  **Lambda Function Logic:**
-    *   Implement logic within backend functions (new Lambdas or potentially adding logic to `queryFn`) to handle the management API routes (CRUD for `sitesTable`, `userPreferencesTable`, Stripe interactions). These new functions will need linking to the `ManagementApi`.
-    *   `ingestFn`: Modify to:
-        *   Extract `site_id` (e.g., from a query param or header specified in the embed script).
-        *   Validate `site_id` against `sitesTable` (ensure it exists and potentially check allowed domains against `Referer`).
-        *   Fetch site config (e.g., GDPR field preferences) from `sitesTable`.
-        *   Extract relevant data points from the request body and the headers forwarded by CloudFront (via the Router).
-        *   Filter event fields based on site config *before* sending to Firehose.
-        *   Send the processed record to the appropriate Firehose stream.
-    *   `queryFn`: Ensure queries are correctly scoped to the `site_id`(s) owned by the authenticated user (using the `ownerSubIndex` on `sitesTable`). Implement pagination/filtering.
-    *   Script Generation Logic: Function (invoked by `GET /api/sites/{site_id}/script`) to create the JS snippet embedding the `site_id` and the public Router ingest endpoint URL (`/api/event`).
-3.  **Frontend Dashboard (`Dashboard` React App):**
-    *   Implement UI flows for user authentication (sign up, login, etc. using Cognito).
-    *   Build UI for site management (create, list, configure fields, get script tag) interacting with the `ManagementApi` endpoints.
-    *   Integrate Stripe Elements/Checkout for payments.
-    *   Develop analytics visualizations: Fetch data from `/api/query` (via `ManagementApi`), perform client-side processing/joining (DuckDB WASM), display charts/tables.
+Core components implemented. See 'Potential Architectural Improvements' below for further enhancements.
 
 ## Potential Architectural Improvements
 
@@ -135,6 +108,11 @@ export default $config({
 
     // === Configuration ===
     const baseName = `${$app.name}-${$app.stage}`;
+
+    // === Secrets ===
+    const STRIPE_SECRET_KEY = new sst.Secret("StripeSecretKey");
+    const STRIPE_WEBHOOK_SECRET = new sst.Secret("StripeWebhookSecret");
+    const STRIPE_PUBLISHABLE_KEY = new sst.Secret("StripePublishableKey"); // For frontend
 
     // === S3 Buckets ===
     const eventsBucket = new sst.aws.Bucket("EventData", {});
@@ -350,15 +328,35 @@ export default $config({
 
     // === DynamoDB Tables ===
     const sitesTable = new sst.aws.Dynamo("SitesTable", {
-      fields: { site_id: "string", owner_sub: "string", domains: "string", plan: "string" },
+      fields: {
+        site_id: "string", // PK
+        owner_sub: "string", // GSI PK
+        domains: "string", // JSON stringified list of allowed referer domains
+        plan: "string", // 'free_tier', 'active_paid', 'payment_failed', 'cancelled', 'needs_payment' // Added 'needs_payment'
+        // stripe_subscription_id: "string", // Removed - Replaced by payment method on user
+        request_allowance: "number", // Added - Usage-based billing allowance
+        is_active: "number", // 0 or 1: Is the site allowed to ingest data?
+        allowed_fields: "string", // JSON stringified list of event fields allowed (for GDPR/filtering)
+      },
       primaryIndex: { hashKey: "site_id" },
       globalIndexes: {
         // GSI for querying sites by owner
-        ownerSubIndex: { hashKey: "owner_sub", projection: ["site_id"] }, // Corrected: Use hashKey
+        ownerSubIndex: { hashKey: "owner_sub", projection: ["site_id"] },
+        // GSI for querying sites needing payment
+        planIndex: { hashKey: "plan", projection: "all" }, // NEW GSI
       },
     });
     const userPreferencesTable = new sst.aws.Dynamo("UserPreferencesTable", {
-      fields: { cognito_sub: "string", theme: "string", email_notifications: "string", plan_tier: "string" },
+      // ... existing fields ...
+      fields: {
+        cognito_sub: "string", // PK
+        theme: "string",
+        email_notifications: "string",
+        stripe_customer_id: "string",
+        stripe_payment_method_id: "string",
+        stripe_last4: "string",
+        is_payment_active: "number",
+      },
       primaryIndex: { hashKey: "cognito_sub" },
     });
 
@@ -383,12 +381,17 @@ export default $config({
         link: [
           eventsFirehoseStream,
           initialEventsFirehoseStream,
-          sitesTable
+          sitesTable,
+          userPreferencesTable // Link the user preferences table
         ],
         permissions: [
           // Permission to query sitesTable is needed for validation
           { actions: ["dynamodb:GetItem"], resources: [sitesTable.arn] },
-          { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] } // Keep query if needed elsewhere? Revisit. GetItem is likely sufficient for site validation.
+          // Permission to update request_allowance on sitesTable
+          { actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn] },
+          // Permission to get user preferences for payment status check
+          { actions: ["dynamodb:GetItem"], resources: [userPreferencesTable.arn] },
+          // { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] } // Keep query if needed elsewhere? Revisit. GetItem is likely sufficient for site validation.
         ],
     });
 
@@ -420,6 +423,60 @@ export default $config({
     });
 
 
+// === Management API Functions ===
+    const sitesFn = new sst.aws.Function("SitesFn", {
+        handler: "functions/api/sites.handler",
+        timeout: "10 second",
+        memory: "128 MB",
+        link: [sitesTable], // Link sites table for CRUD
+        permissions: [
+            // Allow CRUD operations on sitesTable
+            { actions: ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:Query"], resources: [sitesTable.arn] },
+            // Allow querying the owner index
+            { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] },
+        ],
+        environment: {
+            // Pass the public ingest URL needed for script generation
+            // Note: We need to access the output value of publicIngestUrl later
+            // This will be handled by SST automatically when linking the function to the route
+        },
+        nodejs: {
+          install: ["ulid"], // Add ulid dependency
+        }
+    });
+
+    const preferencesFn = new sst.aws.Function("PreferencesFn", {
+        handler: "functions/api/preferences.handler",
+        timeout: "10 second",
+        memory: "128 MB",
+        link: [userPreferencesTable], // Link preferences table
+        permissions: [
+            // Allow CRUD operations on userPreferencesTable
+            { actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], resources: [userPreferencesTable.arn] },
+        ]
+    });
+
+    const stripeFn = new sst.aws.Function("StripeFn", {
+        handler: "functions/api/stripe.handler",
+        timeout: "10 second",
+        memory: "128 MB",
+        link: [
+          STRIPE_SECRET_KEY,
+          STRIPE_WEBHOOK_SECRET,
+          userPreferencesTable, // Link for customer ID lookup/storage
+          sitesTable,           // Link for subscription ID/plan update
+        ],
+        permissions: [
+          // Permissions to read/write stripe_customer_id in userPreferencesTable
+          { actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [userPreferencesTable.arn] },
+          // Permissions to update stripe_subscription_id and plan in sitesTable
+          { actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn] },
+          // Note: Query permissions might be needed if searching by subscription ID, add later if required.
+        ],
+        nodejs: {
+          install: ["stripe"], // Ensure stripe SDK is bundled if not already in root package.json
+        }
+    });
     // === API Gateway (for Authenticated Endpoints like /api/query) ===
     const api = new sst.aws.ApiGatewayV2("ManagementApi", { // Renamed for clarity
       domain: isProd ? {
@@ -461,6 +518,36 @@ export default $config({
       }
     );
 
+    // === Management API Routes ===
+    const commonAuth = { auth: { jwt: { authorizer: jwtAuthorizer.id } } };
+
+    // --- Sites Routes ---
+    api.route("POST /api/sites", { handler: "functions/api/sites.handler", ...commonAuth });
+    api.route("GET /api/sites", { handler: "functions/api/sites.handler", ...commonAuth });
+    api.route("GET /api/sites/{site_id}", { handler: "functions/api/sites.handler", ...commonAuth });
+    api.route("PUT /api/sites/{site_id}", { handler: "functions/api/sites.handler", ...commonAuth });
+    api.route("GET /api/sites/{site_id}/script", {
+      handler: "functions/api/sites.handler", // Corrected handler path
+      ...commonAuth,
+      // Pass the public ingest URL to the script generation endpoint
+      environment: { PUBLIC_INGEST_URL: $interpolate`${router.url}/api/event` }
+    });
+
+    // --- User Preferences Routes ---
+    api.route("GET /api/user/preferences", { handler: "functions/api/preferences.handler", ...commonAuth });
+    api.route("PUT /api/user/preferences", { handler: "functions/api/preferences.handler", ...commonAuth });
+
+    // --- Stripe Routes ---
+    api.route("POST /api/stripe/webhook", {
+      handler: "functions/api/stripe.handler",
+      // NO auth: This endpoint is called by Stripe servers
+    });
+    api.route("POST /api/stripe/checkout", {
+      handler: "functions/api/stripe.handler",
+      ...commonAuth // Requires JWT auth
+    });
+
+
     // === Dashboard (React Frontend) ===
     const dashboard = new sst.aws.React("Dashboard", {
       path: "dashboard/",
@@ -480,6 +567,7 @@ export default $config({
         VITE_API_URL: api.url,
         // Pass the Router URL/domain for context if needed, though ingest URL comes from script tag
         VITE_APP_URL: router.url,
+        VITE_STRIPE_PUBLISHABLE_KEY: STRIPE_PUBLISHABLE_KEY.value, // Add Stripe publishable key
       },
     });
 
@@ -522,6 +610,39 @@ export default $config({
       function: compactionFn.arn // Use the ARN of the existing compactionFn
     });
 
+    // === Charge Processor Function ===
+    const chargeProcessorFn = new sst.aws.Function("ChargeProcessorFn", {
+        handler: "functions/billing/chargeProcessor.handler",
+        timeout: "60 second", // Allow time for Stripe API calls and DB updates
+        memory: "256 MB",
+        architecture: "arm64",
+        link: [
+            sitesTable,
+            userPreferencesTable,
+            STRIPE_SECRET_KEY,
+        ],
+        permissions: [
+            // Query sites needing payment using the GSI
+            { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/planIndex`] },
+            // Get user preferences to find payment details
+            { actions: ["dynamodb:GetItem"], resources: [userPreferencesTable.arn] },
+            // Update site allowance/plan after successful charge
+            { actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn] },
+            // Update user payment status after failed charge
+            { actions: ["dynamodb:UpdateItem"], resources: [userPreferencesTable.arn] },
+        ],
+        nodejs: {
+            install: ["stripe", "@aws-sdk/client-dynamodb"], // Add necessary SDKs
+        }
+    });
+
+    // === Charge Cron Job ===
+    new sst.aws.Cron("ChargeCron", {
+      schedule: "rate(5 minutes)", // Run every 5 minutes
+      function: chargeProcessorFn.arn // Trigger the charge processor function
+    });
+
+
     // === Outputs ===
     return {
       appName: $app.name,
@@ -551,6 +672,7 @@ export default $config({
       isProd,
       icebergInitFunctionName: icebergInitFn.name, // Export new function name
       routerDistributionId: router.distributionID, // Export router ID
+      chargeProcessorFunctionName: chargeProcessorFn.name, // Add new function name
     }
   },
 });

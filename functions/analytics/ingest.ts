@@ -1,8 +1,16 @@
 import {UAParser} from 'ua-parser-js';
 import { APIGatewayProxyHandlerV2 } from "aws-lambda"; // Use V2 event type
 import { FirehoseClient, PutRecordCommand } from "@aws-sdk/client-firehose";
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBClient,
+  ConditionalCheckFailedException, // Import the exception
+  ReturnValue, // Import ReturnValue enum
+} from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  UpdateCommand, // Import UpdateCommand
+} from "@aws-sdk/lib-dynamodb";
 import {
   colsCompliant,
   colsAll as colsAll_, 
@@ -25,7 +33,7 @@ const docClient = DynamoDBDocumentClient.from(dynamoClient);
 const EVENTS_FIREHOSE_STREAM_NAME = process.env.EVENTS_FIREHOSE_STREAM_NAME;
 const INITIAL_EVENTS_FIREHOSE_STREAM_NAME = process.env.INITIAL_EVENTS_FIREHOSE_STREAM_NAME;
 const SITES_TABLE_NAME = process.env.SITES_TABLE_NAME;
-
+const USER_PREFERENCES_TABLE_NAME = process.env.USER_PREFERENCES_TABLE_NAME; // Add this
 
 // POST /api/events
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
@@ -56,8 +64,126 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       log(`Invalid site_id received: ${siteId}`);
       return { statusCode: 403, body: JSON.stringify({ message: 'Forbidden: Invalid site identifier' }) };
     }
-    // Optional: Add checks here if the site has an 'isActive' flag, etc.
+    // --- Site Status and Domain Validation ---
+    // Expecting is_active to be 1 (true) or 0 (false) from DynamoDB
+    if (Item.is_active !== 1) {
+      log(`Site ${siteId} is not active.`);
+      return { statusCode: 403, body: JSON.stringify({ message: 'Forbidden: Site inactive' }) };
+    }
+
+    // Optional: Referer validation
+    const refererHeader = event.headers?.referer;
+    // Expecting domains to be a JSON stringified array from DynamoDB
+    const allowedDomainsString = Item.domains as string | undefined;
+    if (refererHeader && allowedDomainsString) {
+      try {
+        const allowedDomains: string[] = JSON.parse(allowedDomainsString);
+        if (allowedDomains.length > 0) { // Only validate if domains are configured
+          const refererUrl = new URL(refererHeader);
+          const refererHostname = refererUrl.hostname;
+          if (!allowedDomains.includes(refererHostname)) {
+            log(`Referer ${refererHostname} not allowed for site ${siteId}. Allowed: ${allowedDomains.join(', ')}`);
+            return { statusCode: 403, body: JSON.stringify({ message: 'Forbidden: Invalid referer' }) };
+          }
+          log(`Referer ${refererHostname} validated for site ${siteId}.`);
+        }
+      } catch (e) {
+        console.error(`Error parsing domains for site ${siteId}: ${allowedDomainsString}`, e);
+        // Fail open or closed? Failing closed for security.
+        return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error: Cannot parse site domains' }) };
+      }
+    }
+
     log(`Validated site_id: ${siteId}`);
+
+      // --- Fetch User Payment Status ---
+      const ownerSub = Item.owner_sub; // Assuming owner_sub is available on the site item
+      let is_payment_active = 0; // Default to inactive
+
+      if (!USER_PREFERENCES_TABLE_NAME) {
+        console.error("USER_PREFERENCES_TABLE_NAME environment variable is not set.");
+        // Decide how to handle this - fail open (allow request) or closed (block request)?
+        // Failing open for now, but log an error. Consider implications.
+        // return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error' }) };
+      } else if (ownerSub) {
+        try {
+          const getPrefParams = {
+            TableName: USER_PREFERENCES_TABLE_NAME,
+            Key: { sub: ownerSub }, // Assuming 'sub' is the key for user preferences
+          };
+          const getPrefCommand = new GetCommand(getPrefParams);
+          const { Item: userPrefItem } = await docClient.send(getPrefCommand);
+
+          if (userPrefItem && userPrefItem.is_payment_active === 1) {
+            is_payment_active = 1;
+            log(`User ${ownerSub} has active payment.`);
+          } else {
+            log(`User ${ownerSub} does not have active payment or preferences not found.`);
+          }
+        } catch (prefError) {
+          console.error(`Error fetching user preferences for ${ownerSub}:`, prefError);
+          // Decide how to handle this - fail open or closed? Failing open for now.
+        }
+      } else {
+        console.warn(`Site ${siteId} does not have an owner_sub defined. Cannot check payment status.`);
+        // Decide how to handle this - fail open or closed? Failing open for now.
+      }
+
+
+      // --- Decrement Request Allowance ---
+      try {
+        const updateParams = {
+          TableName: SITES_TABLE_NAME,
+          Key: { site_id: siteId },
+          ConditionExpression: "attribute_exists(site_id) AND (request_allowance > :zero OR :payment_active = :one)",
+          UpdateExpression: "SET request_allowance = request_allowance - :one",
+          ExpressionAttributeValues: {
+            ":zero": 0,
+            ":one": 1,
+            ":payment_active": is_payment_active,
+          },
+          ReturnValues: ReturnValue.NONE, // Use the enum value
+        };
+        const updateCommand = new UpdateCommand(updateParams);
+        await docClient.send(updateCommand);
+        log(`Successfully decremented request_allowance for site ${siteId}.`);
+
+      } catch (error: any) {
+        if (error.name === 'ConditionalCheckFailedException') {
+          log(`Blocking request for site ${siteId}: Allowance exhausted and no active payment.`);
+          return {
+            statusCode: 402, // Payment Required
+            body: JSON.stringify({ message: 'Payment Required: Request allowance exceeded.' }),
+          };
+        } else {
+          // Handle other potential errors during the update
+          console.error(`Error decrementing allowance for site ${siteId}:`, error);
+          return {
+            statusCode: 500,
+            body: JSON.stringify({ message: 'Internal Server Error during allowance update' }),
+          };
+        }
+      }
+
+    // --- Fetch Site Configuration ---
+    // Expecting allowed_fields to be a JSON stringified array from DynamoDB
+    const allowedFieldsString = Item.allowed_fields as string | undefined;
+    let allowedFields: string[] = [];
+    if (allowedFieldsString) {
+        try {
+            allowedFields = JSON.parse(allowedFieldsString);
+            log(`Fetched allowed_fields for site ${siteId}: ${allowedFields.join(', ')}`);
+        } catch (e) {
+            console.error(`Error parsing allowed_fields for site ${siteId}: ${allowedFieldsString}`, e);
+            // Fail open or closed? Failing closed to prevent data leakage.
+            return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error: Cannot parse site configuration' }) };
+        }
+    } else {
+        log(`No allowed_fields configured for site ${siteId}, allowing all.`);
+        // If no config, allow all fields (or define a default minimal set)
+        // For now, allowing all if not specified. Consider changing this default.
+        allowedFields = Object.keys(colsAll); // Allow all known fields if not specified
+    }
 
     // --- Event Body Processing ---
     if (!event.body) {
@@ -181,13 +307,26 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     log("Raw dataToSend", dataToSend);
 
-    // --- Common Cleanup ---
+    // --- Field Filtering based on Site Configuration ---
+    const essentialFields = new Set(['site_id', 'timestamp', 'event', 'session_id', 'pathname']); // Fields always kept
+    const allowedFieldsSet = new Set(allowedFields);
+    const filteredDataToSend: Record<string, any> = {};
+
+    for (const key in dataToSend) {
+        if (essentialFields.has(key) || allowedFieldsSet.has(key)) {
+            filteredDataToSend[key] = dataToSend[key];
+        }
+    }
+    log("Data after site-specific field filtering", filteredDataToSend);
+    dataToSend = filteredDataToSend; // Replace original data with filtered data
+
+    // --- Common Cleanup (Null/Undefined Removal) ---
     Object.keys(dataToSend).forEach(key => {
-      // Apply compliance filter
-      if (ONLY_COMPLIANT && !isCompliant[key]) {
-        delete dataToSend[key]; // Remove non-compliant fields directly
-        return; // Continue to next key
-      }
+      // // Compliance filter removed - handled by allowed_fields now
+      // if (ONLY_COMPLIANT && !isCompliant[key]) {
+      //   delete dataToSend[key]; // Remove non-compliant fields directly
+      //   return; // Continue to next key
+      // }
 
       // Remove null or undefined values (except for properties object itself)
       if ((dataToSend[key] === undefined || dataToSend[key] === null) && key !== 'properties') {
