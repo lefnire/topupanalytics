@@ -52,13 +52,13 @@ export async function handler(event: any): Promise<{ status: string; message?: s
     }
 
     const queries = [
-        `OPTIMIZE ${ATHENA_DATABASE}.${ATHENA_INITIAL_EVENTS_ICEBERG_TABLE}
-         WHERE dt < cast(current_date as varchar)
-           AND dt >= cast(date_add('day', -7, current_date) as varchar)
+        `OPTIMIZE "${ATHENA_DATABASE}"."${ATHENA_INITIAL_EVENTS_ICEBERG_TABLE}"
+         WHERE dt < current_date
+           AND dt >= date_add('day', -7, current_date)
          REWRITE DATA USING BIN_PACK`,
-        `OPTIMIZE ${ATHENA_DATABASE}.${ATHENA_EVENTS_ICEBERG_TABLE}
-         WHERE dt < cast(current_date as varchar)
-           AND dt >= cast(date_add('day', -7, current_date) as varchar)
+        `OPTIMIZE "${ATHENA_DATABASE}"."${ATHENA_EVENTS_ICEBERG_TABLE}"
+         WHERE dt < current_date
+           AND dt >= date_add('day', -7, current_date)
          REWRITE DATA USING BIN_PACK`
     ];
 

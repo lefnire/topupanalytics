@@ -1,37 +1,37 @@
 /// <reference path="./.sst/platform/config.d.ts" />
 
 /*
-## Data Pipeline
+## Data Pipeline: Cost-Optimized & Scalable Analytics
 
-The data storage & retrieval is meant to be the cheapest, most scalable solution possible. The goal is to offer this tool to the whole internet for free (or at least extremely cheap, like $5 per million queries) so cost & scalability vastly outweigh simplicity or elegance. To wit, the current implemntation is: Kinesis Firehose, S3, Glue, and Athena - found in /sst.config.ts. If you, agent, ever see room for high-level cost/scale architectural improvement or overhauls, please (a) make the improvements if it's low-hanging fruit; or (b) tell me what needs doing, if it's a larger overhaul project. Even so far as a total system redesign, starting from scratch, - it's that important to get cost/scale down.
+The primary goal of this data pipeline is extreme cost-effectiveness and scalability, aiming to support a high volume of events and queries affordably. The core AWS services used are Kinesis Firehose, S3, Glue, Athena, and Lambda.
 
-#### 1. Ingest: Lambda -> Firehose -> S3 + Glue
+#### 1. Ingest: API -> Lambda -> Firehose -> S3 (Parquet)
 
-Customers submit events to `POST /event` - file /functions/analytics/ingest.ts - a Lambda behind APIG (plus CloudFront to add extra headers like country, region, etc). This submits events to Kinesis Firehose, which stores data as .parquet files in S3, in two Glue tables. `initial_events` and `events`. When the user first lands on a site (initiating a session), a single page_view is sent to `POST /event` with as much info as possible:
-```
-event, pathname, session_id, timestamp, properties, distinct_id, city, region, country, timezone, device, browser, browser_version, os, os_version, model, manufacturer, referer, referer_domain, screen_height, screen_width, utm_source, utm_campaign, utm_medium, utm_content, utm_term
-```
-This is saved to `s3://events-bucket/initial_events`. Then all subsequent events within the browsing session send the bare necessities:
-```
-event, pathname, session_id, timestamp, properties
-```
-These are saved to `s3://events-bucket/events`. Later when sessions are sliced and diced via the analytics tool, `events` are "hydrated" with all the properties of the `initial_event` associated by session_id.
+- **Entrypoint:** Events are sent to an API Gateway endpoint (`POST /event` via `ingestFn`). CloudFront might add geographic headers before hitting the API.
+- **Processing:** The `ingestFn` Lambda receives the event payload. It distinguishes between an initial event for a session (containing full details like device, UTMs, referer) and subsequent events (minimal data: event, pathname, session_id, timestamp).
+- **Delivery:** The Lambda sends the data to one of two Kinesis Firehose streams: `initial-events-stream` or `events-stream`.
+- **Firehose to S3:** Firehose uses **dynamic partitioning** based on `site_id` (extracted from the payload) and `dt` (event timestamp) to write data directly into the `eventsBucket` S3 bucket. It handles JSON parsing and converts data to **Parquet** format (SNAPPY compressed) automatically, landing files under prefixes like `s3://events-bucket/initial_events/site_id=.../dt=yyyy-MM-dd/`. This avoids the need for an intermediate processing Lambda. S3 buckets utilize **Intelligent Tiering** for cost optimization.
 
-**Partitioning**: Events are partitioned by `dt=yyyy-MM-dd`. I was told this makes for faster lookup via Athena than `year=yyyy/month=MM/day=dd` due to reduced scans, and the fact Athena can prune partitions early using date SQL.
+#### 2. Storage & Catalog: S3 -> Glue (Hive + Iceberg)
 
-#### 2. Query: Lambda -> Athena
+- **Raw Data:** Parquet files reside in the `eventsBucket`.
+- **Glue Hive Tables:** Two traditional Glue external tables (`initial_events`, `events`) are defined over the S3 paths. They use **partition projection** based on `site_id` and `dt` for efficient partition discovery by Athena without needing `MSCK REPAIR TABLE`.
+- **Glue Iceberg Tables:** Upon deployment, an `IcebergInitFn` Lambda runs via `aws.lambda.Invocation`. It executes Athena `CREATE TABLE AS SELECT` (CTAS) queries to create **Apache Iceberg** tables (`initial_events_iceberg`, `events_iceberg`) based on the data in the original Hive tables. Iceberg manages its own metadata/manifest files within the `eventsBucket`, offering benefits like atomic commits, time travel, and schema evolution, and improved query performance over many small files.
 
-When customers view their analytics dashboard `GET /query` - file /functions/analytics/query.ts - Athena queries the two tables based on the date range requested. Joining `initial_events` and `events` by session_id will happen client-side, to save on Athena query time (crucial), Lambda RAM requirements, and network latency. The client uses DuckDB WASM SQL, so it's fully capable of slicing and dicing.
+#### 3. Query: API -> Lambda -> Athena (Querying Iceberg)
 
-#### 3. Compression Cron
+- **Entrypoint:** Users query data via the dashboard, hitting `GET /api/query`.
+- **Execution:** The `queryFn` Lambda receives the request, constructs an Athena query, and executes it.
+- **Target Tables:** Queries primarily target the **Iceberg tables** (`initial_events_iceberg`, `events_iceberg`) for better performance and data consistency. Athena queries these tables using the Glue Data Catalog.
+- **Client-Side Join:** Similar to the original design, joining the `initial_events` data (session details) with the `events` data (actions within the session) is intended to happen **client-side** (using DuckDB WASM). This minimizes Athena scan costs/time, Lambda execution time/memory, and network transfer. The Lambda likely fetches raw data from both Iceberg tables for the requested `site_id` and date range.
 
-The .parquet files in S3 are flushed from Firehose frequently, so that users can see today's data in as close to real time as possible. The result is many tiny .parquet files, which hurts Athena query performance. So a cron job compacts those little parquet files in to larger chunks.
+#### 4. Maintenance: Cron -> Lambda -> Athena (Iceberg Compaction)
+
+- **Problem:** Firehose's frequent data delivery creates many small Parquet files, which can degrade Athena query performance, even with Iceberg.
+- **Solution:** A `CompactionCron` triggers the `CompactionFn` Lambda hourly.
+- **Action:** This Lambda executes Athena `OPTIMIZE` commands (or potentially other maintenance operations like `VACUUM`) on the **Iceberg tables**. This process compacts small files into larger, optimally sized ones, improving subsequent query speed and efficiency. It also manages Iceberg metadata updates within Glue and S3.
  */
 
-import { AthenaClient, StartQueryExecutionCommand } from "@aws-sdk/client-athena"; // SDK for dynamic resource
-
-// Removed incorrect imports for aws, sst, cr, iam as they are globals or incorrect
-// Removed incorrect import for pulumi
 
 const domain = "topupanalytics.com"
 export default $config({
@@ -48,31 +48,69 @@ export default $config({
     const accountId = aws.getCallerIdentityOutput({}).accountId
     const region = aws.getRegionOutput().name
 
+    // === Linkable Wrappers (using global sst) ===
+    // Wrap Kinesis Firehose Delivery Stream
+    sst.Linkable.wrap(aws.kinesis.FirehoseDeliveryStream, (stream) => ({
+      properties: { name: stream.name },
+      include: [
+        sst.aws.permission({ // Use global sst.aws.permission
+          actions: ["firehose:PutRecord", "firehose:PutRecordBatch"],
+          resources: [stream.arn],
+        }),
+      ],
+    }));
+
+    // Wrap Glue Catalog Database
+    sst.Linkable.wrap(aws.glue.CatalogDatabase, (db) => ({
+      properties: { name: db.name, arn: db.arn },
+      include: [
+        sst.aws.permission({ // Use global sst.aws.permission
+          actions: ["glue:GetDatabase"],
+          resources: [db.arn],
+        }),
+      ],
+    }));
+
+    // Wrap Glue Catalog Table
+    sst.Linkable.wrap(aws.glue.CatalogTable, (table) => ({
+      properties: { name: table.name, arn: table.arn, databaseName: table.databaseName },
+      include: [
+        sst.aws.permission({ // Use global sst.aws.permission
+          actions: ["glue:GetTable", "glue:GetTableVersion", "glue:GetTableVersions", "glue:GetPartition", "glue:GetPartitions"], // Read actions
+          resources: [table.arn, $interpolate`arn:aws:glue:${region}:${accountId}:catalog`, $interpolate`arn:aws:glue:${region}:${accountId}:database/${table.databaseName}`], // Include DB ARN
+        }),
+      ],
+    }));
 
     // === Configuration ===
     const baseName = `${$app.name}-${$app.stage}`;
 
     // === S3 Buckets ===
-    const eventsBucket = new sst.aws.Bucket("EventData", {
-      transform: {
-        bucket: (args) => {
-          args.lifecycleRules = [
-            {
-              id: "IntelligentTieringRule",
-              enabled: true, // Use 'enabled' instead of 'status' for BucketV2
-              transitions: [
-                {
-                  days: 0,
-                  storageClass: "INTELLIGENT_TIERING",
-                },
-              ],
-              // No filter needed, applies to the whole bucket
-            },
-          ];
-        },
-      }
-    })
-    const queryResultsBucket = new sst.aws.Bucket("AthenaResults", {})
+    const eventsBucket = new sst.aws.Bucket("EventData", {});
+    const queryResultsBucket = new sst.aws.Bucket("AthenaResults", {});
+
+    // === Common S3 Lifecycle Rule for Intelligent Tiering ===
+    const intelligentTieringRule: aws.types.input.s3.BucketLifecycleConfigurationV2Rule[] = [{
+        id: "IntelligentTieringRule",
+        status: "Enabled",
+        filter: {}, // Apply rule to all objects
+        transitions: [{
+            days: 0,
+            storageClass: "INTELLIGENT_TIERING",
+        }],
+    }];
+
+    // Apply lifecycle rule to Events Bucket
+    new aws.s3.BucketLifecycleConfigurationV2(`${baseName}-event-data-lifecycle`, {
+        bucket: eventsBucket.name,
+        rules: intelligentTieringRule,
+    });
+
+    // Apply lifecycle rule to Athena Results Bucket
+    new aws.s3.BucketLifecycleConfigurationV2(`${baseName}-athena-results-lifecycle`, {
+        bucket: queryResultsBucket.name,
+        rules: intelligentTieringRule,
+    });
 
     // === Glue Data Catalog ===
     const analyticsDatabase = new aws.glue.CatalogDatabase(`${baseName}-db`, {
@@ -130,79 +168,69 @@ export default $config({
       partitionKeys: commonPartitionKeys,
     });
 
-    // === Iceberg Tables (Created via Custom Resource below) ===
-    // Placeholder Glue tables removed in Phase 4.A
+    // === Iceberg Tables (Created via Invoked Lambda below) ===
+    // Custom Resource / dynamic.Resource removed
+    // class AthenaQueryExecutorProvider implements dynamic.ResourceProvider { /* ... removed ... */ }
+    // new dynamic.Resource(`${baseName}-InitialEventsIcebergInit`, { /* ... removed ... */ });
+    // new dynamic.Resource(`${baseName}-EventsIcebergInit`, { /* ... removed ... */ });
 
-    // === Custom Resource for Iceberg Table Creation (Phase 4.A) ===
-    class AthenaQueryExecutorProvider implements pulumi.dynamic.ResourceProvider { // Revert to pulumi.dynamic
-      async create(inputs: any): Promise<pulumi.dynamic.CreateResult> { // Revert to pulumi.dynamic
-        const athena = new AthenaClient({});
-        try {
-          const command = new StartQueryExecutionCommand({
-            QueryString: inputs.queryString,
-            WorkGroup: inputs.workgroup, // Use default workgroup or specify one
-            ResultConfiguration: {
-              OutputLocation: inputs.outputLocation,
-            },
-            QueryExecutionContext: {
-              Database: inputs.databaseName,
-            },
-          });
-          await athena.send(command);
-          // We don't wait for completion, just trigger it.
-          // Use a fixed ID to ensure it runs only once per stack create/update.
-          return { id: inputs.physicalId, outs: {} };
-        } catch (error) {
-          console.error("Athena query execution failed:", error);
-          throw error;
-        }
+    // === Iceberg Table Initialization Function ===
+    const icebergInitFn = new sst.aws.Function("IcebergInitFn", {
+      handler: "functions/infra/iceberg-init.handler", // New handler path
+      timeout: "5 minutes", // Might take time
+      memory: "256 MB",
+      architecture: "arm64",
+      link: [
+        analyticsDatabase,
+        initialEventsTable,
+        eventsTable,
+        eventsBucket,
+        queryResultsBucket
+      ],
+      environment: { // Only pass values not available via linked resources
+        INITIAL_EVENTS_ICEBERG_TABLE_NAME: "initial_events_iceberg", // String constant
+        EVENTS_ICEBERG_TABLE_NAME: "events_iceberg",           // String constant
+        ATHENA_WORKGROUP: "primary", // String constant
+      },
+      permissions: [
+        { actions: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:GetWorkGroup"], resources: ["*"] }, // Specific Athena actions
+        { actions: ["glue:CreateTable", "glue:GetTable", "glue:GetDatabase"], resources: [ // Specific Glue actions
+            analyticsDatabase.arn, // Database ARN from link
+            initialEventsTable.arn, // Source Table ARN from link
+            eventsTable.arn,        // Source Table ARN from link
+            $interpolate`arn:aws:glue:${region}:${accountId}:catalog`, // Catalog access often needed
+            $interpolate`arn:aws:glue:${region}:${accountId}:table/${analyticsDatabase.name}/*`, // Access to tables within the DB
+          ]
+        },
+        { actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"], resources: [ // S3 permissions for Athena/Iceberg
+            eventsBucket.arn,
+            $interpolate`${eventsBucket.arn}/*`,
+            queryResultsBucket.arn, // Athena needs access to results bucket too
+            $interpolate`${queryResultsBucket.arn}/*`
+          ]
+        },
+      ],
+      nodejs: {
+        install: ["@aws-sdk/client-athena"],
       }
-      // Define update and delete if needed, otherwise they default to no-op
-      // async update(id: string, olds: any, news: any): Promise<pulumi.dynamic.UpdateResult> { ... }
-      // async delete(id: string, props: any): Promise<void> { ... }
-    }
+    });
 
-    // Assuming default workgroup 'primary' is sufficient
-    // const athenaWorkgroup = aws.athena.getWorkgroupOutput({ name: "primary" }); // Incorrect function
+    // === Invoke Iceberg Initialization Function ===
+    // Only pass data not available via linked resources as input
+    const icebergInitInput ={
+        INITIAL_EVENTS_ICEBERG_TABLE_NAME: "initial_events_iceberg",
+        EVENTS_ICEBERG_TABLE_NAME: "events_iceberg",
+        ATHENA_WORKGROUP: "primary",
+    };
 
-    // Custom Resource Instance for initial_events_iceberg
-    new pulumi.dynamic.Resource(`${baseName}-InitialEventsIcebergInit`, { // Revert to pulumi.dynamic
-        physicalId: `${baseName}-initial_events_iceberg_init`, // Fixed ID
-        queryString: $interpolate`
-          CREATE TABLE IF NOT EXISTS "${analyticsDatabase.name}"."initial_events_iceberg"
-          WITH (
-            table_type='ICEBERG',
-            format='PARQUET',
-            external_location='s3://${eventsBucket.name}/initial_events/',
-            partitioning=ARRAY['site_id','dt']
-          ) AS
-          SELECT * FROM "${analyticsDatabase.name}"."initial_events"
-        `,
-        databaseName: analyticsDatabase.name,
-        workgroup: "primary", // Use default workgroup name directly
-        outputLocation: $interpolate`s3://${queryResultsBucket.name}/iceberg-init-ddl/`,
-      }, { provider: new AthenaQueryExecutorProvider(), dependsOn: [initialEventsTable] } // Depends on the source Glue table
+    new aws.lambda.Invocation(`${baseName}-IcebergInitInvocation`, {
+        functionName: icebergInitFn.name,
+        input: $util.jsonStringify(icebergInitInput),
+        triggers: {
+           redeployment: Date.now().toString(),
+        },
+      }, { dependsOn: [icebergInitFn, initialEventsTable, eventsTable] }
     );
-
-    // Custom Resource Instance for events_iceberg
-    new pulumi.dynamic.Resource(`${baseName}-EventsIcebergInit`, { // Revert to pulumi.dynamic
-        physicalId: `${baseName}-events_iceberg_init`, // Fixed ID
-        queryString: $interpolate`
-          CREATE TABLE IF NOT EXISTS "${analyticsDatabase.name}"."events_iceberg"
-          WITH (
-            table_type='ICEBERG',
-            format='PARQUET',
-            external_location='s3://${eventsBucket.name}/events/',
-            partitioning=ARRAY['site_id','dt']
-          ) AS
-          SELECT * FROM "${analyticsDatabase.name}"."events"
-        `,
-        databaseName: analyticsDatabase.name,
-        workgroup: "primary", // Use default workgroup name directly
-        outputLocation: $interpolate`s3://${queryResultsBucket.name}/iceberg-init-ddl/`,
-      }, { provider: new AthenaQueryExecutorProvider(), dependsOn: [eventsTable] } // Depends on the source Glue table
-    );
-
 
     // === IAM Role for Firehose ===
     const firehoseRole = new aws.iam.Role(`${baseName}-firehose-role`, {
@@ -212,7 +240,7 @@ export default $config({
     // === Firehose Processor Function (DELETED in Phase 3.1) ===
     // const firehoseProcessorFn = new sst.aws.Function("FirehoseProcessorFn", { ... });
 
-    // Allow Firehose to write to S3 and access Glue (Processor policy DELETED in Phase 3.1)
+    // Allow Firehose to write to S3 and access Glue
     new aws.iam.RolePolicy(`${baseName}-firehose-policy`, {
       role: firehoseRole.id,
       policy: $interpolate`{
@@ -221,7 +249,6 @@ export default $config({
           { "Effect": "Allow", "Action": ["s3:AbortMultipartUpload", "s3:GetBucketLocation", "s3:GetObject", "s3:ListBucket", "s3:ListBucketMultipartUploads", "s3:PutObject"], "Resource": ["${eventsBucket.arn}", "${eventsBucket.arn}/*"] },
           { "Effect": "Allow", "Action": ["glue:GetTable", "glue:GetTableVersion", "glue:GetTableVersions"], "Resource": ["${analyticsDatabase.arn}", "${eventsTable.arn}", "${initialEventsTable.arn}", "arn:aws:glue:${region}:${accountId}:catalog"] },
           { "Effect": "Allow", "Action": [ "logs:PutLogEvents" ], "Resource": "arn:aws:logs:*:*:log-group:/aws/kinesisfirehose/*:*" }
-          // { "Effect": "Allow", "Action": [ "lambda:InvokeFunction" ], "Resource": "..." } // Removed processor permission (and reference)
         ]
       }`,
     });
@@ -289,16 +316,14 @@ export default $config({
         handler: "functions/analytics/ingest.handler",
         timeout: '10 second',
         memory: "128 MB",
-        url: true, // Phase 2.1: Enable Function URL (Try simple boolean first)
-        // TODO: Revisit URL config (authType, cors) if needed after type errors resolved
-        environment: {
-          EVENTS_FIREHOSE_STREAM_NAME: eventsFirehoseStream.name,
-          INITIAL_EVENTS_FIREHOSE_STREAM_NAME: initialEventsFirehoseStream.name,
-          SITES_TABLE_NAME: sitesTable.name,
-        },
+        url: true,
+        link: [
+          eventsFirehoseStream,
+          initialEventsFirehoseStream,
+          sitesTable
+        ],
         permissions: [
-          { actions: ["firehose:PutRecord", "firehose:PutRecordBatch"], resources: [eventsFirehoseStream.arn, initialEventsFirehoseStream.arn] },
-          { actions: ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"], resources: [sitesTable.arn] }
+          { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] }
         ],
     });
 
@@ -328,24 +353,21 @@ export default $config({
         handler: "functions/analytics/query.handler",
         timeout: "60 second",
         memory: "512 MB",
-        // url property removed - will be configured via api.route()
-        environment: {
-          ATHENA_DATABASE: analyticsDatabase.name,
-          ATHENA_INITIAL_EVENTS_ICEBERG_TABLE: "initial_events_iceberg", // Phase 4.B: Use Iceberg table name string
-          ATHENA_EVENTS_ICEBERG_TABLE: "events_iceberg",           // Phase 4.B: Use Iceberg table name string
-          ATHENA_OUTPUT_LOCATION: $interpolate`s3://${queryResultsBucket.name}/`,
-          SITES_TABLE_NAME: sitesTable.name,
-          USER_PREFERENCES_TABLE_NAME: userPreferencesTable.name,
+        link: [
+           analyticsDatabase,
+           queryResultsBucket,
+           eventsBucket,
+           sitesTable,
+           userPreferencesTable
+        ],
+        environment: { // Only pass values not available via linked resources
+            ATHENA_INITIAL_EVENTS_ICEBERG_TABLE: "initial_events_iceberg", // String constant
+            ATHENA_EVENTS_ICEBERG_TABLE: "events_iceberg",           // String constant
         },
         permissions: [
-          // { actions: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:StopQueryExecution"], resources: ["*"] }, // Replaced by broader permission below
-          { actions: ["athena:*"], resources: ["*"] }, // Phase 4.B: Add Athena permissions
-          { actions: ["glue:GetDatabase", "glue:GetTable", "glue:GetPartitions", "glue:GetPartition"],
-            resources: [ analyticsDatabase.arn, initialEventsTable.arn, eventsTable.arn, /* initialEventsIcebergTable.arn, eventsIcebergTable.arn, */ $interpolate`arn:aws:glue:${region}:${accountId}:catalog` ] }, // Removed Iceberg table ARNs as they are created dynamically
-          { actions: ["s3:GetObject", "s3:ListBucket", "s3:PutObject", "s3:AbortMultipartUpload", "s3:GetBucketLocation"],
-            resources: [ queryResultsBucket.arn, $interpolate`${queryResultsBucket.arn}/*`, eventsBucket.arn, $interpolate`${eventsBucket.arn}/*` ] },
-          { actions: ["dynamodb:Query"], resources: [sitesTable.arn, $interpolate`${sitesTable.arn}/index/ownerSubIndex`] },
-          { actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan"], resources: [userPreferencesTable.arn] }
+          { actions: ["athena:*"], resources: ["*"] },
+          { actions: ["s3:ListBucket"], resources: [ queryResultsBucket.arn, eventsBucket.arn ] },
+          { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] },
         ],
     });
 
@@ -365,14 +387,11 @@ export default $config({
     // === Dashboard (React Frontend) ===
     const dashboard = new sst.aws.React("Dashboard", {
       path: "dashboard/",
-      // router property removed - React component doesn't link directly to ApiGatewayV2
+      link: [api, userPool, userPoolClient, ingestFn],
       environment: {
-        VITE_APP_URL: api.url, // Use ApiGatewayV2 URL
-        VITE_API_PATH: "", // API path is now part of the full URL, not separate
         VITE_COGNITO_USER_POOL_ID: userPool.id,
         VITE_COGNITO_CLIENT_ID: userPoolClient.id,
-        VITE_AWS_REGION: region, // Phase 0 & 1.2: Add region
-        VITE_INGEST_URL: ingestFn.url, // Phase 2.3 (Infrastructure side): Expose ingest function URL
+        VITE_AWS_REGION: region,
       },
     });
 
@@ -380,33 +399,51 @@ export default $config({
     const compactionFn = new sst.aws.Function("CompactionFn", {
       handler: "functions/analytics/compact.handler",
       timeout: "15 minutes", memory: "512 MB", architecture: "arm64",
-      environment: { // Phase 4.B: Update env vars
-        ATHENA_DATABASE: analyticsDatabase.name,
-        ATHENA_INITIAL_EVENTS_ICEBERG_TABLE: "initial_events_iceberg", // Use table name string
-        ATHENA_EVENTS_ICEBERG_TABLE: "events_iceberg",           // Use table name string
-        EVENTS_BUCKET_NAME: eventsBucket.name,
-        ATHENA_OUTPUT_LOCATION: $interpolate`s3://${queryResultsBucket.name}/athena_compaction_results/`,
-      },
-      permissions: [ // Phase 4.B: Update permissions
-        // { actions: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:StopQueryExecution"], resources: ["*"] }, // Replaced by broader permission below
-        { actions: ["athena:*"], resources: ["*"] }, // Add Athena permissions
-        { actions: ["glue:GetDatabase", "glue:GetTable", "glue:GetPartitions", "glue:CreatePartition", "glue:UpdatePartition", "glue:CreateTable", "glue:DeleteTable", "glue:GetPartition"],
-          resources: [ analyticsDatabase.arn, initialEventsTable.arn, eventsTable.arn, /* initialEventsIcebergTable.arn, eventsIcebergTable.arn, */ $interpolate`arn:aws:glue:${region}:${accountId}:catalog`, $interpolate`arn:aws:glue:${region}:${accountId}:table/${analyticsDatabase.name}/*` ] }, // Removed Iceberg table ARNs
-        { actions: ["s3:GetObject", "s3:ListBucket", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:GetBucketLocation"],
-          resources: [ queryResultsBucket.arn, $interpolate`${queryResultsBucket.arn}/*`, eventsBucket.arn, $interpolate`${eventsBucket.arn}/*` ] }
+      link: [
+        analyticsDatabase,
+        eventsBucket,
+        queryResultsBucket
       ],
+       environment: { // Only pass values not available via linked resources
+            ATHENA_INITIAL_EVENTS_ICEBERG_TABLE: "initial_events_iceberg", // String constant
+            ATHENA_EVENTS_ICEBERG_TABLE: "events_iceberg",           // String constant
+        },
+      permissions: [
+        { actions: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:GetWorkGroup"], resources: ["*"] }, // Specific Athena actions for OPTIMIZE/CTAS
+        { actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetBucketLocation", "s3:ListBucketMultipartUploads", "s3:AbortMultipartUpload"], resources: [ // Broad S3 access needed for compaction/manifests
+            eventsBucket.arn,
+            $interpolate`${eventsBucket.arn}/*`,
+            queryResultsBucket.arn, // Access results bucket too
+            $interpolate`${queryResultsBucket.arn}/*`
+          ]
+        },
+        { actions: ["glue:GetDatabase", "glue:GetTable", "glue:GetPartitions", "glue:UpdateTable", "glue:UpdatePartition", "glue:BatchUpdatePartition"], resources: [ // Glue Read/Update for compaction metadata
+            analyticsDatabase.arn, // Database ARN from link
+            $interpolate`arn:aws:glue:${region}:${accountId}:catalog`, // Catalog access
+            $interpolate`arn:aws:glue:${region}:${accountId}:table/${analyticsDatabase.name}/*`, // Access to manage tables within the DB (incl. Iceberg)
+            initialEventsTable.arn, // Grant access to original tables too if needed
+            eventsTable.arn,
+          ]
+        },
+      ],
+    });
+
+    // Phase 4.C: Add Cron job for compaction
+    new sst.aws.Cron("CompactionCron", {
+      schedule: "cron(5 * * * ? *)", // Hourly at 5 past the hour
+      function: compactionFn.arn // Use the ARN of the existing compactionFn
     });
 
     // === Outputs ===
     return {
       appName: $app.name,
       accountId: accountId,
-      compactionFn: $interpolate`AWS_PROFILE=diyadmin AWS_REGION=us-east-1 aws lambda invoke --function-name ${compactionFn.name} --cli-binary-format raw-in-base64-out /dev/stdout`,
+      compactionFunctionName: compactionFn.name,
       dashboardUrl: dashboard.url,
-      apiUrl: api.url, // Export the ApiGatewayV2 URL
-      ingestFunctionUrl: ingestFn.url, // Export the direct ingest Function URL
-      ingestFunctionName: ingestFn.name, // Export function name
-      queryFunctionName: queryFn.name,   // Export function name
+      apiUrl: api.url,
+      ingestFunctionUrl: ingestFn.url,
+      ingestFunctionName: ingestFn.name,
+      queryFunctionName: queryFn.name,
       dataBucketName: eventsBucket.name,
       queryResultsBucketName: queryResultsBucket.name,
       eventsFirehoseStreamName: eventsFirehoseStream.name,
@@ -414,13 +451,14 @@ export default $config({
       glueDatabaseName: analyticsDatabase.name,
       eventsTableName: eventsTable.name,
       initialEventsTableName: initialEventsTable.name,
-      initialEventsIcebergTableName: "initial_events_iceberg", // Output table name string
-      eventsIcebergTableName: "events_iceberg",           // Output table name string
+      initialEventsIcebergTableName: "initial_events_iceberg",
+      eventsIcebergTableName: "events_iceberg",
       userPoolId: userPool.id,
       userPoolClientId: userPoolClient.id,
       sitesTableName: sitesTable.name,
       userPreferencesTableName: userPreferencesTable.name,
       isProd,
+      icebergInitFunctionName: icebergInitFn.name, // Export new function name
     }
   },
 });
