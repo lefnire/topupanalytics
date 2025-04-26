@@ -1,5 +1,7 @@
 import React from 'react';
 
+const useStripe = import.meta.env.VITE_USE_STRIPE === 'true';
+
 // Helper function (can be moved to a utils file later if needed)
 const formatNumber = (num: number) => num.toLocaleString();
 
@@ -38,49 +40,58 @@ export const UsageCard: React.FC<UsageCardProps> = ({
         {/* Progress bar removed as it's less relevant for a depleting balance model */}
       </div>
 
-      <div className="text-sm text-gray-600 mb-4 flex-grow">
-        <p>Includes 1k free requests.</p>
-        <p>Auto-pay enabled ($5 per 500k requests) when payment method is active.</p>
-        <div className="mt-2 space-x-2">
-          {is_payment_active ? (
-            stripe_last4 ? (
-              <span className="text-xs text-green-700 font-medium">
-                Auto-Pay Active (Card ending in {stripe_last4})
-                <button onClick={onManagePayment} className="ml-2 text-xs text-blue-600 hover:underline focus:outline-none">(Manage)</button>
-              </span>
-            ) : (
-               // Fallback if last4 isn't available for some reason
-               <span className="text-xs text-green-700 font-medium">
-                 Auto-Pay Active
-                 <button onClick={onManagePayment} className="ml-2 text-xs text-blue-600 hover:underline focus:outline-none">(Manage)</button>
-               </span>
-            )
-          ) : (
-            <button onClick={onSetupAutoPay} className="text-xs text-blue-600 hover:underline focus:outline-none">
-              Setup Auto-Pay
-            </button>
-          )}
-          {/* "Top-up Manually" button removed */}
-        </div>
-      </div>
-
-      {(showSetupPrompt || showDepletedWarning) && (
-        <div className="mt-auto border-t border-gray-200 pt-3">
-          <div className={`p-3 rounded text-center text-sm ${showDepletedWarning ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
-            {showDepletedWarning ? (
-              <>
-                <p className="font-medium mb-1">Allowance Depleted</p>
-                <p className="text-xs">Setup Auto-Pay to continue service and ensure uninterrupted analytics.</p>
-              </>
-            ) : (
-              <p className="font-medium mb-1">Enable Auto-Pay</p>
-            )}
-            {!is_payment_active && (
-               <button onClick={onSetupAutoPay} className="mt-2 text-xs text-blue-600 hover:underline focus:outline-none">
-                 Setup Auto-Pay Now
-               </button>
-            )}
+      {useStripe ? (
+        <>
+          <div className="text-sm text-gray-600 mb-4 flex-grow">
+            <p>Includes 1k free requests.</p>
+            <p>Auto-pay enabled ($5 per 500k requests) when payment method is active.</p>
+            <div className="mt-2 space-x-2">
+              {is_payment_active ? (
+                stripe_last4 ? (
+                  <span className="text-xs text-green-700 font-medium">
+                    Auto-Pay Active (Card ending in {stripe_last4})
+                    <button onClick={onManagePayment} className="ml-2 text-xs text-blue-600 hover:underline focus:outline-none">(Manage)</button>
+                  </span>
+                ) : (
+                  // Fallback if last4 isn't available for some reason
+                  <span className="text-xs text-green-700 font-medium">
+                    Auto-Pay Active
+                    <button onClick={onManagePayment} className="ml-2 text-xs text-blue-600 hover:underline focus:outline-none">(Manage)</button>
+                  </span>
+                )
+              ) : (
+                <button onClick={onSetupAutoPay} className="text-xs text-blue-600 hover:underline focus:outline-none">
+                  Setup Auto-Pay
+                </button>
+              )}
+              {/* "Top-up Manually" button removed */}
+            </div>
           </div>
+
+          {(showSetupPrompt || showDepletedWarning) && (
+            <div className="mt-auto border-t border-gray-200 pt-3">
+              <div className={`p-3 rounded text-center text-sm ${showDepletedWarning ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                {showDepletedWarning ? (
+                  <>
+                    <p className="font-medium mb-1">Allowance Depleted</p>
+                    <p className="text-xs">Setup Auto-Pay to continue service and ensure uninterrupted analytics.</p>
+                  </>
+                ) : (
+                  <p className="font-medium mb-1">Enable Auto-Pay</p>
+                )}
+                {!is_payment_active && (
+                  <button onClick={onSetupAutoPay} className="mt-2 text-xs text-blue-600 hover:underline focus:outline-none">
+                    Setup Auto-Pay Now
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="text-sm text-gray-600 mb-4 flex-grow">
+          <p>Includes 1k free requests.</p>
+          <p className="mt-2 text-xs text-gray-500 italic">Billing is managed externally or disabled for this instance.</p>
         </div>
       )}
     </div>

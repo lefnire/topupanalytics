@@ -18,6 +18,7 @@ const createResponse = (statusCode: number, body: any) => ({
 });
 
 export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) => {
+  const useStripe = process.env.USE_STRIPE === 'true';
   const method = event.requestContext.http.method;
   const routeKey = event.routeKey;
   const claims = event.requestContext.authorizer?.jwt.claims;
@@ -39,7 +40,14 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
       const { Item } = await docClient.send(getParams);
       if (!Item) {
         // Return default preferences if none exist? Or 404? Let's return defaults.
-        return createResponse(200, { cognito_sub: userSub, theme: 'light', email_notifications: 'daily', plan_tier: 'free' });
+        return createResponse(200, { cognito_sub: userSub, theme: 'light', email_notifications: 'daily' }); // Removed plan_tier default, not managed here
+      }
+      // If Stripe is disabled, remove Stripe-specific fields before returning
+      if (!useStripe) {
+          delete Item.stripe_customer_id;
+          delete Item.stripe_payment_method_id;
+          delete Item.stripe_last4;
+          delete Item.is_payment_active;
       }
       return createResponse(200, Item);
     }
@@ -47,31 +55,42 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
     // --- Update User Preferences ---
     if (routeKey === "PUT /api/user/preferences") {
       const body = event.body ? JSON.parse(event.body) : {};
-      const { theme, email_notifications, plan_tier } = body; // Allow updating specific fields
+      // Define allowed non-Stripe fields for update
+      const allowedUpdateFields = ['theme', 'email_notifications'];
+      const stripeFields = ['stripe_customer_id', 'stripe_payment_method_id', 'stripe_last4', 'is_payment_active'];
 
-      if (!theme && !email_notifications && !plan_tier) {
-        return createResponse(400, { error: "Bad Request: Requires 'theme', 'email_notifications', or 'plan_tier' in body." });
+      // Check if any fields are provided for update
+      const providedFields = Object.keys(body).filter(key => allowedUpdateFields.includes(key));
+      if (providedFields.length === 0) {
+          return createResponse(400, { error: `Bad Request: Requires one of the following fields in body: ${allowedUpdateFields.join(', ')}.` });
       }
 
+      // If Stripe is disabled, explicitly reject updates containing Stripe fields
+      if (!useStripe) {
+          const providedStripeFields = Object.keys(body).filter(key => stripeFields.includes(key));
+          if (providedStripeFields.length > 0) {
+              console.warn(`User ${userSub} attempted to update Stripe fields (${providedStripeFields.join(', ')}) while USE_STRIPE=false.`);
+              return createResponse(400, { error: `Bad Request: Cannot update Stripe-related fields (${providedStripeFields.join(', ')}) when Stripe integration is disabled.` });
+          }
+      }
+
+      // Build update expression only for allowed fields provided in the body
       let updateExpression = "SET updated_at = :now";
       const expressionAttributeValues: Record<string, any> = { ":now": new Date().toISOString() };
-      const expressionAttributeNames: Record<string, string> = {}; // Needed if using reserved words
+      const expressionAttributeNames: Record<string, string> = {};
 
-      if (theme) {
-        updateExpression += ", #theme = :theme";
-        expressionAttributeValues[":theme"] = theme;
-        expressionAttributeNames["#theme"] = "theme";
+      // Add only the allowed fields that are present in the body to the update expression
+      if (body.theme !== undefined) {
+          updateExpression += ", #theme = :theme";
+          expressionAttributeValues[":theme"] = body.theme;
+          expressionAttributeNames["#theme"] = "theme";
       }
-      if (email_notifications) {
-        updateExpression += ", #email_notifications = :email_notifications";
-        expressionAttributeValues[":email_notifications"] = email_notifications;
-        expressionAttributeNames["#email_notifications"] = "email_notifications";
+      if (body.email_notifications !== undefined) {
+          updateExpression += ", #email_notifications = :email_notifications";
+          expressionAttributeValues[":email_notifications"] = body.email_notifications;
+          expressionAttributeNames["#email_notifications"] = "email_notifications";
       }
-       if (plan_tier) {
-        updateExpression += ", #plan_tier = :plan_tier";
-        expressionAttributeValues[":plan_tier"] = plan_tier;
-        expressionAttributeNames["#plan_tier"] = "plan_tier";
-      }
+      // NOTE: plan_tier and Stripe fields are intentionally not updatable via this endpoint
 
       const updateParams = new UpdateCommand({
         TableName: tableName,

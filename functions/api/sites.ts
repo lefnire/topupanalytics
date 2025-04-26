@@ -21,6 +21,7 @@ const createResponse = (statusCode: number, body: any) => ({
 });
 
 export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) => {
+  const useStripe = process.env.USE_STRIPE === 'true';
   const method = event.requestContext.http.method;
   const routeKey = event.routeKey;
   const claims = event.requestContext.authorizer?.jwt.claims;
@@ -133,6 +134,11 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
             expressionAttributeValues[":domains"] = JSON.stringify(domains); // Store as JSON string
         }
         if (plan !== undefined) {
+            // If Stripe is disabled, only allow setting plan to 'free_tier' via this API
+            if (!useStripe && plan !== 'free_tier') {
+                console.warn(`Attempted to set plan to '${plan}' for site ${siteId} while USE_STRIPE=false. Only 'free_tier' is allowed.`);
+                return createResponse(400, { error: "Bad Request: Plan can only be set to 'free_tier' when Stripe integration is disabled." });
+            }
             updateExpression += ", plan = :plan"; // Use direct attribute name if not reserved
             expressionAttributeValues[":plan"] = plan;
         }

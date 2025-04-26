@@ -37,7 +37,9 @@ const USER_PREFERENCES_TABLE_NAME = process.env.USER_PREFERENCES_TABLE_NAME; // 
 
 // POST /api/events
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
+  const useStripe = process.env.USE_STRIPE === 'true';
   log('Received event:', JSON.stringify(event, null, 2));
+  log(`Stripe integration ${useStripe ? 'enabled' : 'disabled'}`);
 
   // --- Site ID Validation ---
   const siteId = event.queryStringParameters?.site; // Changed from token/header
@@ -96,73 +98,80 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
     log(`Validated site_id: ${siteId}`);
 
-      // --- Fetch User Payment Status ---
-      const ownerSub = Item.owner_sub; // Assuming owner_sub is available on the site item
-      let is_payment_active = 0; // Default to inactive
+      if (useStripe) {
+        log(`Checking payment status and decrementing allowance for site ${siteId} (Stripe enabled)`);
+        // --- Fetch User Payment Status ---
+        const ownerSub = Item.owner_sub; // Assuming owner_sub is available on the site item
+        let is_payment_active = 0; // Default to inactive
 
-      if (!USER_PREFERENCES_TABLE_NAME) {
-        console.error("USER_PREFERENCES_TABLE_NAME environment variable is not set.");
-        // Decide how to handle this - fail open (allow request) or closed (block request)?
-        // Failing open for now, but log an error. Consider implications.
-        // return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error' }) };
-      } else if (ownerSub) {
-        try {
-          const getPrefParams = {
-            TableName: USER_PREFERENCES_TABLE_NAME,
-            Key: { sub: ownerSub }, // Assuming 'sub' is the key for user preferences
-          };
-          const getPrefCommand = new GetCommand(getPrefParams);
-          const { Item: userPrefItem } = await docClient.send(getPrefCommand);
+        if (!USER_PREFERENCES_TABLE_NAME) {
+          console.error("USER_PREFERENCES_TABLE_NAME environment variable is not set. Cannot check payment status.");
+          // Fail closed if Stripe is expected but table is missing
+          return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error: Missing user preferences table' }) };
+        } else if (ownerSub) {
+          try {
+            const getPrefParams = {
+              TableName: USER_PREFERENCES_TABLE_NAME,
+              Key: { cognito_sub: ownerSub }, // Correct key based on other files
+            };
+            const getPrefCommand = new GetCommand(getPrefParams);
+            const { Item: userPrefItem } = await docClient.send(getPrefCommand);
 
-          if (userPrefItem && userPrefItem.is_payment_active === 1) {
-            is_payment_active = 1;
-            log(`User ${ownerSub} has active payment.`);
-          } else {
-            log(`User ${ownerSub} does not have active payment or preferences not found.`);
+            if (userPrefItem && userPrefItem.is_payment_active === 1) {
+              is_payment_active = 1;
+              log(`User ${ownerSub} has active payment.`);
+            } else {
+              log(`User ${ownerSub} does not have active payment or preferences not found.`);
+            }
+          } catch (prefError) {
+            console.error(`Error fetching user preferences for ${ownerSub}:`, prefError);
+            // Fail closed if Stripe is expected and preference check fails
+             return { statusCode: 500, body: JSON.stringify({ message: 'Internal Server Error checking payment status' }) };
           }
-        } catch (prefError) {
-          console.error(`Error fetching user preferences for ${ownerSub}:`, prefError);
-          // Decide how to handle this - fail open or closed? Failing open for now.
+        } else {
+          console.warn(`Site ${siteId} does not have an owner_sub defined. Cannot check payment status.`);
+          // Fail closed if Stripe is expected but owner is missing
+           return { statusCode: 403, body: JSON.stringify({ message: 'Forbidden: Site owner missing, cannot verify payment' }) };
+        }
+
+
+        // --- Decrement Request Allowance (Conditional) ---
+        try {
+          const updateParams = {
+            TableName: SITES_TABLE_NAME,
+            Key: { site_id: siteId },
+            ConditionExpression: "attribute_exists(site_id) AND (request_allowance > :zero OR :payment_active = :one)",
+            UpdateExpression: "SET request_allowance = request_allowance - :one",
+            ExpressionAttributeValues: {
+              ":zero": 0,
+              ":one": 1,
+              ":payment_active": is_payment_active,
+            },
+            ReturnValues: ReturnValue.NONE, // Use the enum value
+          };
+          const updateCommand = new UpdateCommand(updateParams);
+          await docClient.send(updateCommand);
+          log(`Successfully decremented request_allowance for site ${siteId}.`);
+
+        } catch (error: any) {
+          if (error.name === 'ConditionalCheckFailedException') {
+            log(`Blocking request for site ${siteId}: Allowance exhausted and no active payment.`);
+            return {
+              statusCode: 402, // Payment Required
+              body: JSON.stringify({ message: 'Payment Required: Request allowance exceeded.' }),
+            };
+          } else {
+            // Handle other potential errors during the update
+            console.error(`Error decrementing allowance for site ${siteId}:`, error);
+            return {
+              statusCode: 500,
+              body: JSON.stringify({ message: 'Internal Server Error during allowance update' }),
+            };
+          }
         }
       } else {
-        console.warn(`Site ${siteId} does not have an owner_sub defined. Cannot check payment status.`);
-        // Decide how to handle this - fail open or closed? Failing open for now.
-      }
-
-
-      // --- Decrement Request Allowance ---
-      try {
-        const updateParams = {
-          TableName: SITES_TABLE_NAME,
-          Key: { site_id: siteId },
-          ConditionExpression: "attribute_exists(site_id) AND (request_allowance > :zero OR :payment_active = :one)",
-          UpdateExpression: "SET request_allowance = request_allowance - :one",
-          ExpressionAttributeValues: {
-            ":zero": 0,
-            ":one": 1,
-            ":payment_active": is_payment_active,
-          },
-          ReturnValues: ReturnValue.NONE, // Use the enum value
-        };
-        const updateCommand = new UpdateCommand(updateParams);
-        await docClient.send(updateCommand);
-        log(`Successfully decremented request_allowance for site ${siteId}.`);
-
-      } catch (error: any) {
-        if (error.name === 'ConditionalCheckFailedException') {
-          log(`Blocking request for site ${siteId}: Allowance exhausted and no active payment.`);
-          return {
-            statusCode: 402, // Payment Required
-            body: JSON.stringify({ message: 'Payment Required: Request allowance exceeded.' }),
-          };
-        } else {
-          // Handle other potential errors during the update
-          console.error(`Error decrementing allowance for site ${siteId}:`, error);
-          return {
-            statusCode: 500,
-            body: JSON.stringify({ message: 'Internal Server Error during allowance update' }),
-          };
-        }
+         log(`Bypassing payment status check and allowance decrement for site ${siteId} (Stripe disabled)`);
+         // No checks needed, proceed with ingestion
       }
 
     // --- Fetch Site Configuration ---

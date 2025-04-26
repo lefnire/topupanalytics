@@ -46,7 +46,14 @@ interface UserPreferences {
 }
 
 export const handler = async (event: any): Promise<void> => {
-  console.log("Starting chargeProcessor execution...");
+  const useStripe = process.env.USE_STRIPE === 'true';
+
+  if (!useStripe) {
+    console.log("Stripe is disabled (USE_STRIPE=false). Skipping charge processing.");
+    return; // Exit immediately if Stripe is not enabled
+  }
+
+  console.log("Starting chargeProcessor execution (Stripe enabled)...");
 
   try {
     // 1. Identify Sites to Charge using the GSI

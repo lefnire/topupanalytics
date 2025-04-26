@@ -44,6 +44,15 @@ interface CustomEvent extends APIGatewayProxyEventV2 {
 }
 
 export const handler: APIGatewayProxyHandlerV2 = async (event: APIGatewayProxyEventV2) => {
+  const useStripe = process.env.USE_STRIPE === 'true';
+
+  // Safeguard: If Stripe is disabled via env var, this function should not be invoked.
+  // Return an error if it somehow is.
+  if (!useStripe) {
+    console.error("Stripe API handler invoked when USE_STRIPE is false. This should not happen.");
+    return createResponse(501, { error: "Stripe functionality is not enabled." });
+  }
+
   const routeKey = event.routeKey;
   const rawBody = event.body; // Needed for webhook verification
 

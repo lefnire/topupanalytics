@@ -68,9 +68,17 @@ export default $config({
     };
   },
   async run() {
+    const useStripe = process.env.USE_STRIPE === 'true'; // Step 1: Read env var
     const isProd = $app.stage === "production";
     const accountId = aws.getCallerIdentityOutput({}).accountId
     const region = aws.getRegionOutput().name
+    const baseName = `${$app.name}-${$app.stage}`; // Define baseName early
+
+    // Placeholder values instead of sst.Secret.create
+    const DUMMY_STRIPE_SECRET_KEY_PLACEHOLDER = "dummy_stripe_secret_key_placeholder";
+    const DUMMY_STRIPE_WEBHOOK_SECRET_PLACEHOLDER = "dummy_stripe_webhook_secret_placeholder";
+    const DUMMY_STRIPE_PUBLISHABLE_KEY_PLACEHOLDER = "dummy_stripe_publishable_key_placeholder";
+
 
     // === Linkable Wrappers (using global sst) ===
     // Wrap Kinesis Firehose Delivery Stream
@@ -107,12 +115,13 @@ export default $config({
     }));
 
     // === Configuration ===
-    const baseName = `${$app.name}-${$app.stage}`;
+    // const baseName = `${$app.name}-${$app.stage}`; // Moved up
 
-    // === Secrets ===
-    const STRIPE_SECRET_KEY = new sst.Secret("StripeSecretKey");
-    const STRIPE_WEBHOOK_SECRET = new sst.Secret("StripeWebhookSecret");
-    const STRIPE_PUBLISHABLE_KEY = new sst.Secret("StripePublishableKey"); // For frontend
+    // === Secrets === Step 2: Use undefined for non-Stripe case
+    const STRIPE_SECRET_KEY = useStripe ? new sst.Secret("StripeSecretKey") : undefined;
+    const STRIPE_WEBHOOK_SECRET = useStripe ? new sst.Secret("StripeWebhookSecret") : undefined;
+    const STRIPE_PUBLISHABLE_KEY = useStripe ? new sst.Secret("StripePublishableKey") : undefined; // For frontend
+
 
     // === S3 Buckets ===
     const eventsBucket = new sst.aws.Bucket("EventData", {});
@@ -384,6 +393,9 @@ export default $config({
           sitesTable,
           userPreferencesTable // Link the user preferences table
         ],
+        environment: { // Step 7: Add USE_STRIPE
+            USE_STRIPE: useStripe.toString(),
+        },
         permissions: [
           // Permission to query sitesTable is needed for validation
           { actions: ["dynamodb:GetItem"], resources: [sitesTable.arn] },
@@ -411,6 +423,7 @@ export default $config({
         environment: { // Only pass values not available via linked resources
             ATHENA_INITIAL_EVENTS_ICEBERG_TABLE: "initial_events_iceberg", // String constant
             ATHENA_EVENTS_ICEBERG_TABLE: "events_iceberg",           // String constant
+            USE_STRIPE: useStripe.toString(), // Step 7: Add USE_STRIPE
         },
         permissions: [
           { actions: ["athena:*"], resources: ["*"] },
@@ -436,9 +449,8 @@ export default $config({
             { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] },
         ],
         environment: {
-            // Pass the public ingest URL needed for script generation
-            // Note: We need to access the output value of publicIngestUrl later
-            // This will be handled by SST automatically when linking the function to the route
+            // PUBLIC_INGEST_URL is handled by route linking below
+            USE_STRIPE: useStripe.toString(), // Step 7: Add USE_STRIPE
         },
         nodejs: {
           install: ["ulid"], // Add ulid dependency
@@ -453,30 +465,40 @@ export default $config({
         permissions: [
             // Allow CRUD operations on userPreferencesTable
             { actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], resources: [userPreferencesTable.arn] },
-        ]
+        ],
+        environment: { // Step 7: Add USE_STRIPE
+            USE_STRIPE: useStripe.toString(),
+        },
     });
 
-    const stripeFn = new sst.aws.Function("StripeFn", {
-        handler: "functions/api/stripe.handler",
-        timeout: "10 second",
-        memory: "128 MB",
-        link: [
-          STRIPE_SECRET_KEY,
-          STRIPE_WEBHOOK_SECRET,
-          userPreferencesTable, // Link for customer ID lookup/storage
-          sitesTable,           // Link for subscription ID/plan update
-        ],
-        permissions: [
-          // Permissions to read/write stripe_customer_id in userPreferencesTable
-          { actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [userPreferencesTable.arn] },
-          // Permissions to update stripe_subscription_id and plan in sitesTable
-          { actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn] },
-          // Note: Query permissions might be needed if searching by subscription ID, add later if required.
-        ],
-        nodejs: {
-          install: ["stripe"], // Ensure stripe SDK is bundled if not already in root package.json
-        }
-    });
+    // Step 3: Conditional stripeFn
+    let stripeFn: sst.aws.Function | undefined;
+    if (useStripe) {
+      stripeFn = new sst.aws.Function("StripeFn", {
+          handler: "functions/api/stripe.handler",
+          timeout: "10 second",
+          memory: "128 MB",
+          link: [
+            STRIPE_SECRET_KEY!, // Use non-null assertion as we are inside the if block
+            STRIPE_WEBHOOK_SECRET!, // Use non-null assertion
+            userPreferencesTable, // Link for customer ID lookup/storage
+            sitesTable,           // Link for subscription ID/plan update
+          ],
+          environment: { // Step 7: Add USE_STRIPE (conditionally)
+              USE_STRIPE: useStripe.toString(),
+          },
+          permissions: [
+            // Permissions to read/write stripe_customer_id in userPreferencesTable
+            { actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [userPreferencesTable.arn] },
+            // Permissions to update stripe_subscription_id and plan in sitesTable
+            { actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn] },
+            // Note: Query permissions might be needed if searching by subscription ID, add later if required.
+          ],
+          nodejs: {
+            install: ["stripe"], // Ensure stripe SDK is bundled if not already in root package.json
+          }
+      });
+    }
     // === API Gateway (for Authenticated Endpoints like /api/query) ===
     const api = new sst.aws.ApiGatewayV2("ManagementApi", { // Renamed for clarity
       domain: isProd ? {
@@ -537,15 +559,17 @@ export default $config({
     api.route("GET /api/user/preferences", { handler: "functions/api/preferences.handler", ...commonAuth });
     api.route("PUT /api/user/preferences", { handler: "functions/api/preferences.handler", ...commonAuth });
 
-    // --- Stripe Routes ---
-    api.route("POST /api/stripe/webhook", {
-      handler: "functions/api/stripe.handler",
-      // NO auth: This endpoint is called by Stripe servers
-    });
-    api.route("POST /api/stripe/checkout", {
-      handler: "functions/api/stripe.handler",
-      ...commonAuth // Requires JWT auth
-    });
+    // Step 5: Conditional Stripe API Routes
+    if (useStripe) { // No need to check stripeFn here, route handler uses string
+      api.route("POST /api/stripe/webhook", {
+        handler: "functions/api/stripe.handler", // Correct: Use handler string
+        // NO auth: This endpoint is called by Stripe servers
+      });
+      api.route("POST /api/stripe/checkout", {
+        handler: "functions/api/stripe.handler", // Correct: Use handler string
+        ...commonAuth // Requires JWT auth
+      });
+    }
 
 
     // === Dashboard (React Frontend) ===
@@ -559,19 +583,18 @@ export default $config({
       // Link API Gateway for authenticated calls (/api/query)
       // Link UserPool/Client for frontend auth logic
       link: [api, userPool, userPoolClient],
-      environment: {
+      environment: { // Step 6: Conditional Dashboard Environment
         VITE_COGNITO_USER_POOL_ID: userPool.id,
         VITE_COGNITO_CLIENT_ID: userPoolClient.id,
         VITE_AWS_REGION: region,
-        // Pass the API Gateway URL for authenticated calls
         VITE_API_URL: api.url,
-        // Pass the Router URL/domain for context if needed, though ingest URL comes from script tag
         VITE_APP_URL: router.url,
-        VITE_STRIPE_PUBLISHABLE_KEY: STRIPE_PUBLISHABLE_KEY.value, // Add Stripe publishable key
+        VITE_STRIPE_PUBLISHABLE_KEY: useStripe ? STRIPE_PUBLISHABLE_KEY!.value : DUMMY_STRIPE_PUBLISHABLE_KEY_PLACEHOLDER, // Correct: Use real value or placeholder string
+        VITE_USE_STRIPE: useStripe.toString(), // Add the flag
       },
     });
 
-    // === Compaction Function ===
+    // === Compaction Function & Cron ===
     const compactionFn = new sst.aws.Function("CompactionFn", {
       handler: "functions/analytics/compact.handler",
       timeout: "15 minutes", memory: "512 MB", architecture: "arm64",
@@ -610,37 +633,44 @@ export default $config({
       function: compactionFn.arn // Use the ARN of the existing compactionFn
     });
 
-    // === Charge Processor Function ===
-    const chargeProcessorFn = new sst.aws.Function("ChargeProcessorFn", {
-        handler: "functions/billing/chargeProcessor.handler",
-        timeout: "60 second", // Allow time for Stripe API calls and DB updates
-        memory: "256 MB",
-        architecture: "arm64",
-        link: [
-            sitesTable,
-            userPreferencesTable,
-            STRIPE_SECRET_KEY,
-        ],
-        permissions: [
-            // Query sites needing payment using the GSI
-            { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/planIndex`] },
-            // Get user preferences to find payment details
-            { actions: ["dynamodb:GetItem"], resources: [userPreferencesTable.arn] },
-            // Update site allowance/plan after successful charge
-            { actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn] },
-            // Update user payment status after failed charge
-            { actions: ["dynamodb:UpdateItem"], resources: [userPreferencesTable.arn] },
-        ],
-        nodejs: {
-            install: ["stripe", "@aws-sdk/client-dynamodb"], // Add necessary SDKs
-        }
-    });
+    // Step 4: Conditional chargeProcessorFn and Cron
+    let chargeProcessorFn: sst.aws.Function | undefined;
+    if (useStripe) {
+      chargeProcessorFn = new sst.aws.Function("ChargeProcessorFn", {
+          handler: "functions/billing/chargeProcessor.handler",
+          timeout: "60 second", // Allow time for Stripe API calls and DB updates
+          memory: "256 MB",
+          architecture: "arm64",
+          link: [
+              sitesTable,
+              userPreferencesTable,
+              STRIPE_SECRET_KEY!, // Correct: Use non-null assertion
+          ],
+          environment: { // Step 7: Add USE_STRIPE (conditionally)
+              USE_STRIPE: useStripe.toString(),
+              // Inject placeholder value directly if Stripe is disabled and the function needs it
+              // (Though these functions only run if useStripe is true, so linking the real secret is sufficient)
+          },
+          permissions: [
+              // Query sites needing payment using the GSI
+              { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/planIndex`] },
+              // Get user preferences to find payment details
+              { actions: ["dynamodb:GetItem"], resources: [userPreferencesTable.arn] },
+              // Update site allowance/plan after successful charge
+              { actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn] },
+              // Update user payment status after failed charge
+              { actions: ["dynamodb:UpdateItem"], resources: [userPreferencesTable.arn] },
+          ],
+          nodejs: {
+              install: ["stripe", "@aws-sdk/client-dynamodb"], // Add necessary SDKs
+          }
+      });
 
-    // === Charge Cron Job ===
-    new sst.aws.Cron("ChargeCron", {
-      schedule: "rate(5 minutes)", // Run every 5 minutes
-      function: chargeProcessorFn.arn // Trigger the charge processor function
-    });
+      new sst.aws.Cron("ChargeCron", {
+        schedule: "rate(5 minutes)",
+        function: chargeProcessorFn.arn // Trigger the charge processor function
+      });
+    }
 
 
     // === Outputs ===
@@ -672,7 +702,10 @@ export default $config({
       isProd,
       icebergInitFunctionName: icebergInitFn.name, // Export new function name
       routerDistributionId: router.distributionID, // Export router ID
-      chargeProcessorFunctionName: chargeProcessorFn.name, // Add new function name
+      chargeProcessorFunctionName: chargeProcessorFn?.name, // Conditionally export name
+      // Ensure other Stripe-related outputs are handled if needed, though none were explicitly defined before
+      // Conditionally export real secret names/ARNs if needed, otherwise omit or use placeholders
+      stripeSecretKeyName: useStripe ? STRIPE_SECRET_KEY!.name : undefined, // Example
     }
   },
 });

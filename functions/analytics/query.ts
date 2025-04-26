@@ -198,9 +198,11 @@ async function executeAthenaQuery(
 export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     event: APIGatewayProxyEventV2WithJWTAuthorizer
 ): Promise<APIGatewayProxyResultV2> => { // Explicit return type
-    log('Received event:', JSON.stringify(event, null, 2));
+  const useStripe = process.env.USE_STRIPE === 'true';
+  log('Received event:', JSON.stringify(event, null, 2));
+  log(`Stripe integration ${useStripe ? 'enabled' : 'disabled'} (Note: Query logic does not currently check plan/payment status)`);
 
-    // --- Authentication & Authorization ---
+  // --- Authentication & Authorization ---
     const userSub = event.requestContext.authorizer?.jwt.claims.sub;
     if (!userSub) {
         log("Unauthorized: Missing user sub in JWT claims.");

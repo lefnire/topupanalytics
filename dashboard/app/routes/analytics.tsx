@@ -21,6 +21,8 @@ import { Calendar as CalendarIcon } from "lucide-react"; // Import Calendar icon
 import { format, differenceInDays } from 'date-fns'; // Import date-fns functions
 import { type DateRange } from 'react-day-picker'; // Import DateRange type
 import { cn } from "../lib/utils"; // Import cn utility
+import { useApiClient } from '../lib/api'; // Import useApiClient for Stripe calls
+import { toast } from 'sonner'; // Import toast
 
 // Remove direct import, use React.lazy instead
 // import { SankeyCard } from './components/SankeyCard';
@@ -513,6 +515,7 @@ import { UsageCard } from './components/UsageCard'; // Assuming path is correct
 export default function AnalyticsDashboard() {
   // --- Auth State ---
   const { isAuthenticated, isLoading: isAuthLoading, logout, user } = useAuth();
+  const { post } = useApiClient(); // Get post method for Stripe API calls
 
   // --- Analytics Store State ---
   const {
@@ -627,23 +630,51 @@ export default function AnalyticsDashboard() {
     )
   }
 
-  // --- Placeholder Callbacks for UsageCard ---
-  // TODO: Implement actual Stripe Setup Intent flow trigger
-  const handleSetupAutoPay = () => {
+  // --- Stripe Integration Callbacks ---
+  const useStripe = import.meta.env.VITE_USE_STRIPE === 'true';
+
+  const handleSetupAutoPay = async () => {
+    if (!useStripe) {
+      toast.info("Stripe payments are not enabled in this configuration.");
+      console.log("Stripe is disabled. Skipping Setup Intent flow.");
+      return;
+    }
     console.log("Trigger Stripe Setup Intent flow...");
-    // Example: redirect or open modal
-    alert("Redirecting to payment setup...");
-    // Replace with actual navigation or modal logic
-    // window.location.href = '/setup-payment';
+    toast.info("Initiating payment setup..."); // User feedback
+    try {
+      // TODO: Replace with actual API call to create Setup Intent and redirect/use Stripe Elements
+      // const { clientSecret } = await post<{ clientSecret: string }>('/api/stripe/create-setup-intent');
+      // Now use clientSecret with Stripe Elements or redirect to a dedicated setup page
+      alert("Placeholder: Redirecting to payment setup (using Setup Intent)...");
+      // Example redirect (if not using Elements):
+      // window.location.href = `/setup-payment?client_secret=${clientSecret}`;
+    } catch (error: any) {
+      console.error("Failed to initiate Stripe Setup Intent:", error);
+      toast.error(`Failed to start payment setup: ${error.message || 'Unknown error'}`);
+    }
   };
 
-  // TODO: Implement actual Stripe Customer Portal link generation/navigation
-  const handleManagePayment = () => {
+  const handleManagePayment = async () => {
+    if (!useStripe) {
+      toast.info("Stripe payments are not enabled in this configuration.");
+      console.log("Stripe is disabled. Skipping Customer Portal.");
+      return;
+    }
     console.log("Trigger Stripe Customer Portal...");
-    // Example: Fetch portal link from backend and redirect
-    alert("Redirecting to manage payment...");
-    // Replace with actual API call and redirect
-    // api.post('/api/stripe/create-portal-session').then(data => window.location.href = data.url);
+    toast.info("Redirecting to manage payment..."); // User feedback
+    try {
+      // TODO: Replace with actual API call to create Portal Session and redirect
+      // Pass an empty object as the second argument for POST requests without a body
+      const { url } = await post<{ url: string }>('/api/stripe/create-portal-session', {});
+      if (url) {
+        window.location.href = url;
+      } else {
+        throw new Error("Portal session URL not received.");
+      }
+    } catch (error: any) {
+      console.error("Failed to create Stripe Customer Portal session:", error);
+      toast.error(`Failed to open payment management: ${error.message || 'Unknown error'}`);
+    }
   };
 
   return <>
