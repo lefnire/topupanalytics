@@ -44,7 +44,6 @@ export default $config({
     const region = aws.getRegionOutput().name
 
 
-
     // === Configuration ===
     const baseName = `${$app.name}-${$app.stage}`;
 
@@ -59,7 +58,7 @@ export default $config({
     });
 
     // Import schemas for both tables
-    const { initialGlueColumns, eventsGlueColumns } = await import('./functions/analytics/schema');
+    const {initialGlueColumns, eventsGlueColumns} = await import('./functions/analytics/schema');
 
     // Create table for initial events (contains all session data)
     const initialEventsTable = new aws.glue.CatalogTable(`${baseName}-initial-events-table`, {
@@ -96,7 +95,7 @@ export default $config({
       },
       // IMPORTANT: Define partition keys matching the S3 prefix structure Firehose creates
       partitionKeys: [
-        { name: "dt", type: "string" }, // Single date partition key
+        {name: "dt", type: "string"}, // Single date partition key
       ],
     });
 
@@ -135,7 +134,7 @@ export default $config({
       },
       // IMPORTANT: Define partition keys matching the S3 prefix structure Firehose creates
       partitionKeys: [
-        { name: "dt", type: "string" }, // Single date partition key
+        {name: "dt", type: "string"}, // Single date partition key
       ],
     });
 
@@ -264,102 +263,117 @@ export default $config({
       },
     });
 
-    // === API Gateway (HTTP API - simpler and cheaper) ===
-    const apiAnalytics = new sst.aws.ApiGatewayV2("APIGAnalytics", {
-      cors: {
-        // allowOrigins: isProd ? ["https://ocdevel.com"] : ["*"],
-        allowOrigins: ["*"],
-        allowCredentials: isProd,
-        // exposeHeaders: ["*"]
-      },
-    })
-    apiAnalytics.route("POST /event", {
-      permissions: [
-          {
-            actions: ["firehose:PutRecord", "firehose:PutRecordBatch"],
-            resources: [eventsFirehoseStream.arn, initialEventsFirehoseStream.arn]
+    const router = new sst.aws.Router("MyRouter", {
+      // Domain configuration depends on whether it's production
+      // domain: undefined,
+      domain: isProd ? {
+        name: domain,
+        redirects: [`www.${domain}`],
+        // Add DNS config if needed: dns: sst.aws.dns({ zone: "YOUR_ZONE_ID" })
+      } : undefined,
+      // Routes will be defined within the function/site components below
+    });
+
+    // === Ingest Function (with Function URL & Router integration) ===
+    const ingestFn = new sst.aws.Function("IngestFn", {
+        handler: "functions/analytics/ingest.handler",
+        url: {
+          cors: true, // Keep direct Function URL enabled with CORS if needed
+          router: {    // Integrate with the router
+            instance: router,
+            path: "/api/events" // Expose this function at /api/events via the router
           }
-      ],
-      handler: "functions/analytics/ingest.handler",
-      environment: {
-        EVENTS_FIREHOSE_STREAM_NAME: eventsFirehoseStream.name,
-        INITIAL_EVENTS_FIREHOSE_STREAM_NAME: initialEventsFirehoseStream.name,
-      },
-      timeout: '10 second',
-      memory: "128 MB",
-    })
-
-    // === Query Lambda Function (Optional - if you want programmatic querying) ===
-    apiAnalytics.route("GET /query", {
-      permissions: [
-        {
-          actions: [
-            "athena:StartQueryExecution",
-            "athena:GetQueryExecution",
-            "athena:GetQueryResults",
-            "athena:StopQueryExecution"
-          ],
-          resources: ["*"] // FIXME!
         },
-        {
-          actions: [
-            "glue:GetDatabase",
-            "glue:GetTable",
-            "glue:GetPartitions",
-            "glue:GetPartition"
-          ],
-          resources: [
-            analyticsDatabase.arn,
-            initialEventsTable.arn,
-            eventsTable.arn,
-            $interpolate`arn:aws:glue:${region}:${accountId}:catalog`
-          ]
+        timeout: '10 second',
+        memory: "128 MB",
+        environment: {
+          EVENTS_FIREHOSE_STREAM_NAME: eventsFirehoseStream.name,
+          INITIAL_EVENTS_FIREHOSE_STREAM_NAME: initialEventsFirehoseStream.name,
         },
-        {
-          actions: [
-            "s3:GetObject",
-            "s3:ListBucket",
-            "s3:PutObject",
-            "s3:AbortMultipartUpload",
-            "s3:GetBucketLocation"
-          ],
-          resources: [
-            queryResultsBucket.arn,
-            $interpolate`${queryResultsBucket.arn}/*`,
-            $interpolate`${eventsBucket.arn}`,
-            $interpolate`${eventsBucket.arn}/*`
-          ]
-        }
-      ],
-      handler: "functions/analytics/query.handler",
-      environment: {
-        ATHENA_DATABASE: analyticsDatabase.name,
-        ATHENA_INITIAL_EVENTS_TABLE: initialEventsTable.name,
-        ATHENA_EVENTS_TABLE: eventsTable.name,
-        ATHENA_OUTPUT_LOCATION: $interpolate`s3://${queryResultsBucket.name}/`,
-      },
-      timeout: "60 second", // Athena queries can take longer
-      memory: "512 MB",
-    })
+        permissions: [
+            {
+              actions: ["firehose:PutRecord", "firehose:PutRecordBatch"],
+              resources: [eventsFirehoseStream.arn, initialEventsFirehoseStream.arn]
+            }
+        ],
+    });
 
-    const router = new sst.aws.Router("MyRouter", {})
-    router.route("/", apiAnalytics.url )
+    // === Query Function (with Function URL & Router integration) ===
+    const queryFn = new sst.aws.Function("QueryFn", {
+        handler: "functions/analytics/query.handler",
+        url: {
+          cors: true, // Keep direct Function URL enabled with CORS if needed
+          router: {    // Integrate with the router
+            instance: router,
+            path: "/api/query" // Expose this function at /api/query via the router
+          }
+        },
+        timeout: "60 second", // Athena queries can take longer
+        memory: "512 MB",
+        environment: {
+          ATHENA_DATABASE: analyticsDatabase.name,
+          ATHENA_INITIAL_EVENTS_TABLE: initialEventsTable.name,
+          ATHENA_EVENTS_TABLE: eventsTable.name,
+          ATHENA_OUTPUT_LOCATION: $interpolate`s3://${queryResultsBucket.name}/`,
+        },
+        permissions: [
+          {
+            actions: [
+              "athena:StartQueryExecution",
+              "athena:GetQueryExecution",
+              "athena:GetQueryResults",
+              "athena:StopQueryExecution"
+            ],
+            resources: ["*"] // FIXME!
+          },
+          {
+            actions: [
+              "glue:GetDatabase",
+              "glue:GetTable",
+              "glue:GetPartitions",
+              "glue:GetPartition"
+            ],
+            resources: [
+              analyticsDatabase.arn,
+              initialEventsTable.arn,
+              eventsTable.arn,
+              $interpolate`arn:aws:glue:${region}:${accountId}:catalog`
+            ]
+          },
+          {
+            actions: [
+              "s3:GetObject",
+              "s3:ListBucket",
+              "s3:PutObject",
+              "s3:AbortMultipartUpload",
+              "s3:GetBucketLocation"
+            ],
+            resources: [
+              queryResultsBucket.arn,
+              $interpolate`${queryResultsBucket.arn}/*`,
+              $interpolate`${eventsBucket.arn}`,
+              $interpolate`${eventsBucket.arn}/*`
+            ]
+          }
+        ],
+    });
 
     const dashboard = new sst.aws.React("Dashboard", {
       path: "dashboard/",
-      environment: {
-        ANALYTICS: $interpolate`${router.url}/query`
+      // Domain handled by Router
+      router: { // Integrate with the router
+        instance: router
+        // path: "/" // Default path is "/", so this is optional
       },
-      domain: (isProd ? {
-        name: domain,
-        redirects: [`www.${domain}`]
-      } : undefined)
+      // Pass Router URL and API path to the React app
+      environment: {
+        VITE_APP_URL: router.url, // Base URL served by the router
+        VITE_API_PATH: "/api",    // Path prefix for API calls
+      },
     });
-    // FIXME: use the router, than custom-defined above in dashboard, to
-    // point /api to the APIG API, / to the ReactRouter site (so they share a domain)
 
-    // router.route("/", dashboard.url )
-    // router.route("/api", apiAnalytics.url )
+    // === Router for CloudFront Functionality and Domain ===
+    // Routes are now configured within the respective Function/React components above.
 
     // // === Athena Compaction Cron Job ===
     // const compactionCron = new sst.aws.Cron("AthenaCompactionCron", {
@@ -367,68 +381,67 @@ export default $config({
     //     // Use 'function' instead of 'job'
     //     function: {
     const compactionFn = new sst.aws.Function("CompactionFn", {
-            handler: "functions/analytics/compact.handler",
-            timeout: "15 minutes",
-            memory: "512 MB",
-            architecture: "arm64",
-            environment: {
-                ATHENA_DATABASE: analyticsDatabase.name,
-                ATHENA_INITIAL_EVENTS_TABLE: initialEventsTable.name,
-                ATHENA_EVENTS_TABLE: eventsTable.name,
-                EVENTS_BUCKET_NAME: eventsBucket.name,
-                ATHENA_OUTPUT_LOCATION: $interpolate`s3://${queryResultsBucket.name}/athena_compaction_results/`,
-            },
-            // Define permissions inline using FunctionArgs 'permissions'
-            permissions: [
-                // Athena
-                {
-                    actions: [
-                        "athena:StartQueryExecution",
-                        "athena:GetQueryExecution",
-                        "athena:GetQueryResults",
-                        "athena:StopQueryExecution"
-                    ],
-                    resources: ["*"], // TODO: Scope down if possible
-                },
-                // Glue
-                {
-                    actions: [
-                        "glue:GetDatabase",
-                        "glue:GetTable",
-                        "glue:GetPartitions",
-                        "glue:CreatePartition",
-                        "glue:UpdatePartition",
-                        "glue:CreateTable",
-                        "glue:DeleteTable",
-                        "glue:GetPartition"
-                    ],
-                    resources: [
-                        analyticsDatabase.arn,
-                        initialEventsTable.arn,
-                        eventsTable.arn,
-                        $interpolate`arn:aws:glue:${region}:${accountId}:catalog`,
-                        $interpolate`arn:aws:glue:${region}:${accountId}:table/${analyticsDatabase.name}/*_compact_*`
-                    ]
-                },
-                // S3
-                {
-                    actions: [
-                        "s3:GetObject",
-                        "s3:ListBucket",
-                        "s3:PutObject",
-                        "s3:DeleteObject",
-                        "s3:AbortMultipartUpload",
-                        "s3:GetBucketLocation"
-                    ],
-                    resources: [
-                        queryResultsBucket.arn,
-                        $interpolate`${queryResultsBucket.arn}/*`,
-                        eventsBucket.arn,
-                        $interpolate`${eventsBucket.arn}/*`
-                    ]
-                }
-            ],
-        // },
+      handler: "functions/analytics/compact.handler",
+      timeout: "15 minutes",
+      memory: "512 MB",
+      architecture: "arm64",
+      environment: {
+        ATHENA_DATABASE: analyticsDatabase.name,
+        ATHENA_INITIAL_EVENTS_TABLE: initialEventsTable.name,
+        ATHENA_EVENTS_TABLE: eventsTable.name,
+        EVENTS_BUCKET_NAME: eventsBucket.name,
+        ATHENA_OUTPUT_LOCATION: $interpolate`s3://${queryResultsBucket.name}/athena_compaction_results/`,
+      },
+      // Define permissions inline using FunctionArgs 'permissions'
+      permissions: [
+        // Athena
+        {
+          actions: [
+            "athena:StartQueryExecution",
+            "athena:GetQueryExecution",
+            "athena:GetQueryResults",
+            "athena:StopQueryExecution"
+          ],
+          resources: ["*"], // TODO: Scope down if possible
+        },
+        // Glue
+        {
+          actions: [
+            "glue:GetDatabase",
+            "glue:GetTable",
+            "glue:GetPartitions",
+            "glue:CreatePartition",
+            "glue:UpdatePartition",
+            "glue:CreateTable",
+            "glue:DeleteTable",
+            "glue:GetPartition"
+          ],
+          resources: [
+            analyticsDatabase.arn,
+            initialEventsTable.arn,
+            eventsTable.arn,
+            $interpolate`arn:aws:glue:${region}:${accountId}:catalog`,
+            $interpolate`arn:aws:glue:${region}:${accountId}:table/${analyticsDatabase.name}/*_compact_*`
+          ]
+        },
+        // S3
+        {
+          actions: [
+            "s3:GetObject",
+            "s3:ListBucket",
+            "s3:PutObject",
+            "s3:DeleteObject",
+            "s3:AbortMultipartUpload",
+            "s3:GetBucketLocation"
+          ],
+          resources: [
+            queryResultsBucket.arn,
+            $interpolate`${queryResultsBucket.arn}/*`,
+            eventsBucket.arn,
+            $interpolate`${eventsBucket.arn}/*`
+          ]
+        }
+      ],
     });
 
     return {
@@ -437,8 +450,9 @@ export default $config({
       // use $interpolate to show how to call this arn in CLI. Something about base64 thingy is required 
       compactionFn: $interpolate`AWS_PROFILE=diyadmin AWS_REGION=us-east-1 aws lambda invoke --function-name ${compactionFn.name} --cli-binary-format raw-in-base64-out /dev/stdout`,
       dashboardUrl: dashboard.url,
-      routerUrl: router.url,
-      apiAnalyticsUrl: apiAnalytics.url, // URL to POST events to
+      routerUrl: router.url,      // Export the main router URL
+      ingestUrl: ingestFn.url,     // Export direct ingest URL
+      queryUrl: queryFn.url,       // Export direct query URL
       dataBucketName: eventsBucket.name,
       queryResultsBucketName: queryResultsBucket.name,
       eventsFirehoseStreamName: eventsFirehoseStream.name,

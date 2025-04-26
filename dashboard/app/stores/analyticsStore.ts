@@ -29,6 +29,8 @@ import mvp_worker from '@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?ur
 import duckdb_wasm_eh from '@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url';
 import eh_worker from '@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url';
 
+const endpoint = import.meta.env.VITE_APP_URL + '/api/query'
+
 // --- Constants ---
 const isServer = typeof window === 'undefined';
 const SANKEY_MIN_TRANSITION_COUNT = 3; // Minimum transitions for a link to appear
@@ -159,7 +161,6 @@ const initialAnalyticsState = {
 };
 
 export interface AnalyticsState {
-    endpoint: string
     db: duckdb.AsyncDuckDB | null;
     connection: duckdb.AsyncDuckDBConnection | null;
     status: AnalyticsStatus;
@@ -180,7 +181,7 @@ export interface AnalyticsState {
 
     resetAnalyticsState: () => Partial<AnalyticsState>;
     setSelectedRange: (range: string) => void;
-    fetchAndLoadData: (endpoint?: string) => Promise<void>;
+    fetchAndLoadData: () => Promise<void>;
     runAggregations: () => Promise<void>;
     runCustomPropertyAggregation: (key: string) => Promise<void>;
     runSankeyAggregation: () => Promise<void>;
@@ -332,7 +333,6 @@ function buildSankeyData(rawLinks: { source_node: string; target_node: string; v
 export const useStore = create<AnalyticsState>()(
     persist(
         (set, get) => ({
-            endpoint: "",
             db: null,
             connection: null,
             status: 'idle',
@@ -380,7 +380,6 @@ export const useStore = create<AnalyticsState>()(
             },
 
             _fetchData: async (range: string) => {
-                const endpoint = get().endpoint;
                 if (!endpoint) throw new Error("API endpoint not set.");
                 const response = await fetch(`${endpoint}?range=${range}`);
                 if (!response.ok) {
@@ -408,8 +407,7 @@ export const useStore = create<AnalyticsState>()(
                 get().fetchAndLoadData();
             },
 
-            fetchAndLoadData: async (endpoint) => {
-                if (endpoint) set({endpoint});
+            fetchAndLoadData: async () => {
                 if (get().isRefreshing) return; // Prevent multiple refreshes
 
                 const {selectedRange, status} = get();

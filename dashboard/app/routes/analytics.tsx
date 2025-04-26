@@ -13,10 +13,6 @@ const isServer = typeof window === 'undefined';
 // --- Helper Functions ---
 const formatNumber = (num: number) => num.toLocaleString();
 
-export function loader() {
-  return {endpoint: process.env.ANALYTICS}
-}
-
 // --- Specific Card Components (No changes needed here for now) ---
 
 // BaseCard remains mostly the same for now, accepting data via props
@@ -496,7 +492,7 @@ import { UsageCard } from './components/UsageCard'; // Assuming path is correct
 
 // --- Main Dashboard Component ---
 
-export default function AnalyticsDashboard({loaderData: {endpoint}}: any) {
+export default function AnalyticsDashboard() {
   // Get state and actions from store using consolidated status/error
   const {
     selectedRange,
@@ -529,21 +525,11 @@ export default function AnalyticsDashboard({loaderData: {endpoint}}: any) {
 
   useEffect(() => {
     if (isServer) return;
-    // Pass endpoint only if it's not already set in the store or if it changes
-    if (endpoint && endpoint !== useStore.getState().endpoint) {
-      useStore.getState().fetchAndLoadData(endpoint);
-    } else if (!useStore.getState().endpoint && !useStore.getState().db) {
-      // If no endpoint and no db, maybe try fetching if endpoint is available?
-      // Or log an error. For now, assume endpoint is needed initially.
-      console.error("Analytics endpoint missing.");
-    } else if (!useStore.getState().aggregatedData && useStore.getState().status === 'idle') {
-      // If idle but no data, try fetching (e.g., after initial load failed maybe?)
-      useStore.getState().fetchAndLoadData();
-    }
+    useStore.getState().fetchAndLoadData();
 
     return () => { useStore.getState().cleanup(); }
     // Depend on endpoint to refetch if it changes
-  }, [endpoint]);
+  }, []);
 
   const handleRangeChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
     setSelectedRange(event.target.value); // This already clears segments in the store action

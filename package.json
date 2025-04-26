@@ -18,7 +18,7 @@
     "@aws-sdk/client-glue": "^3.787.0",
     "@aws-sdk/client-s3": "^3.787.0",
     "date-fns": "^4.1.0",
-    "sst": "3.13.17",
+    "sst": "3.13.19",
     "ua-parser-js": "^2.0.3"
   },
   "devDependencies": {

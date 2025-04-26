@@ -5,10 +5,6 @@
 
 declare module "sst" {
   export interface Resource {
-    "APIGAnalytics": {
-      "type": "sst.aws.ApiGatewayV2"
-      "url": string
-    }
     "AthenaResults": {
       "name": string
       "type": "sst.aws.Bucket"
@@ -17,20 +13,26 @@ declare module "sst" {
       "name": string
       "type": "sst.aws.Function"
     }
+    "Dashboard": {
+      "type": "sst.aws.React"
+      "url": string
+    }
     "EventData": {
       "name": string
       "type": "sst.aws.Bucket"
+    }
+    "IngestFn": {
+      "name": string
+      "type": "sst.aws.Function"
+      "url": string
     }
     "MyRouter": {
       "type": "sst.aws.Router"
       "url": string
     }
-    "ReactRouter7": {
-      "type": "sst.aws.React"
-      "url": string
-    }
-    "SiteAnalytics": {
-      "type": "sst.aws.React"
+    "QueryFn": {
+      "name": string
+      "type": "sst.aws.Function"
       "url": string
     }
   }
