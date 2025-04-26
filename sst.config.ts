@@ -3,33 +3,84 @@
 /*
 ## Data Pipeline: Cost-Optimized & Scalable Analytics
 
-The primary goal of this data pipeline is extreme cost-effectiveness and scalability, aiming to support a high volume of events and queries affordably. The core AWS services used are Kinesis Firehose, S3, Glue, Athena, and Lambda.
+The primary goal of this data pipeline is extreme cost-effectiveness and scalability, aiming to support a high volume of events and queries affordably. The core AWS services used are Kinesis Firehose, S3, Glue, Athena, Lambda, CloudFront (via SST Router), and API Gateway V2.
 
-#### 1. Ingest: API -> Lambda -> Firehose -> S3 (Parquet)
+## Next Steps / Missing Components
 
-- **Entrypoint:** Events are sent to an API Gateway endpoint (`POST /event` via `ingestFn`). CloudFront might add geographic headers before hitting the API.
-- **Processing:** The `ingestFn` Lambda receives the event payload. It distinguishes between an initial event for a session (containing full details like device, UTMs, referer) and subsequent events (minimal data: event, pathname, session_id, timestamp).
+This IaC configures the core data pipeline and basic routing, but several components are needed to realize the full web analytics product:
+
+1.  **API Gateway Routes (for Management):**
+    *   Define authenticated routes within the `ManagementApi` (`ApiGatewayV2`) for user/site management (these are lower volume and protected, justifying API Gateway cost):
+        *   `POST /api/sites`: Create a new site entry in `sitesTable` linked to the authenticated Cognito user.
+        *   `GET /api/sites`: List sites belonging to the user.
+        *   `GET /api/sites/{site_id}`: Get details for a specific site (including configuration).
+        *   `PUT /api/sites/{site_id}`: Update site configuration (e.g., domains, allowed fields for GDPR).
+        *   `GET /api/sites/{site_id}/script`: Generate the JS embed script tag.
+    *   Define routes for user preferences (`userPreferencesTable`).
+    *   Stripe integration endpoints (webhook for payment confirmation, initiating checkout).
+    *   **Note:** The `/api/query` route is already configured on this API Gateway.
+2.  **Lambda Function Logic:**
+    *   Implement logic within backend functions (new Lambdas or potentially adding logic to `queryFn`) to handle the management API routes (CRUD for `sitesTable`, `userPreferencesTable`, Stripe interactions). These new functions will need linking to the `ManagementApi`.
+    *   `ingestFn`: Modify to:
+        *   Extract `site_id` (e.g., from a query param or header specified in the embed script).
+        *   Validate `site_id` against `sitesTable` (ensure it exists and potentially check allowed domains against `Referer`).
+        *   Fetch site config (e.g., GDPR field preferences) from `sitesTable`.
+        *   Extract relevant data points from the request body and the headers forwarded by CloudFront (via the Router).
+        *   Filter event fields based on site config *before* sending to Firehose.
+        *   Send the processed record to the appropriate Firehose stream.
+    *   `queryFn`: Ensure queries are correctly scoped to the `site_id`(s) owned by the authenticated user (using the `ownerSubIndex` on `sitesTable`). Implement pagination/filtering.
+    *   Script Generation Logic: Function (invoked by `GET /api/sites/{site_id}/script`) to create the JS snippet embedding the `site_id` and the public Router ingest endpoint URL (`/api/event`).
+3.  **Frontend Dashboard (`Dashboard` React App):**
+    *   Implement UI flows for user authentication (sign up, login, etc. using Cognito).
+    *   Build UI for site management (create, list, configure fields, get script tag) interacting with the `ManagementApi` endpoints.
+    *   Integrate Stripe Elements/Checkout for payments.
+    *   Develop analytics visualizations: Fetch data from `/api/query` (via `ManagementApi`), perform client-side processing/joining (DuckDB WASM), display charts/tables.
+
+## Potential Architectural Improvements
+
+While the current setup focuses on cost/scale, consider these enhancements:
+
+*   **Cost/Scalability:**
+    *   **Ingestion Sampling:** Introduce sampling (client-side or in `ingestFn`) for high-traffic sites or lower tiers to reduce data volume.
+    *   **Pre-Aggregation:** For common dashboard views (e.g., daily uniques, top pages), use scheduled Athena CTAS queries to create materialized summary tables (Iceberg). This speeds up reads and cuts query costs at the expense of some storage/complexity.
+    *   **Data Archival/Tiering:** Beyond S3 Intelligent Tiering, implement stricter lifecycle policies to archive or delete raw event data after a defined period if feasible, relying on summaries for long-term trends.
+*   **Performance:**
+    *   **Query API Optimization:** Implement robust pagination, filtering, and potentially projection in the `/api/query` Lambda to minimize data transfer to the client.
+    *   **Dashboard Caching:** Utilize browser caching or state management libraries to cache fetched analytics data effectively.
+    *   **Consider Read-Optimized Store:** If Athena latency/cost becomes prohibitive at extreme scale for *interactive* queries, explore replicating aggregated/hot data to a faster store (e.g., DynamoDB, OpenSearch, ClickHouse Cloud), though this adds significant complexity.
+*   **Operations & Security:**
+    *   **Site ID Security:** Ensure robust validation of `site_id` in `ingestFn`. Consider verifying the `Referer` header against the domains configured in `sitesTable` for that `site_id` as an additional check.
+    *   **Monitoring & Alerting:** Add CloudWatch Alarms for function errors, Firehose failures, high Athena costs, compaction failures, and API Gateway/CloudFront (Router) metrics (latency, errors, cache hit rate).
+    *   **Rate Limiting:** Configure WAF/rate limiting on the public ingest CloudFront distribution used by the `Router`.
+
+---
+*Existing Pipeline Description:*
+
+#### 1. Ingest: Client -> Router (CloudFront) -> Lambda (`ingestFn`) -> Firehose -> S3 (Parquet)
+
+- **Entrypoint:** Events are sent to the `sst.aws.Router` endpoint (e.g., `https://yourdomain.com/api/event` or the CloudFront URL).
+- **Routing:** The Router (using CloudFront + CF Functions) directs `/api/event` requests to the `ingestFn`'s Lambda Function URL. It automatically forwards relevant CloudFront headers (geo, user-agent, etc.).
+- **Processing:** The `ingestFn` Lambda receives the event payload and headers. It validates the `site_id`, distinguishes between initial/subsequent events, filters based on site config, and extracts necessary fields.
 - **Delivery:** The Lambda sends the data to one of two Kinesis Firehose streams: `initial-events-stream` or `events-stream`.
-- **Firehose to S3:** Firehose uses **dynamic partitioning** based on `site_id` (extracted from the payload) and `dt` (event timestamp) to write data directly into the `eventsBucket` S3 bucket. It handles JSON parsing and converts data to **Parquet** format (SNAPPY compressed) automatically, landing files under prefixes like `s3://events-bucket/initial_events/site_id=.../dt=yyyy-MM-dd/`. This avoids the need for an intermediate processing Lambda. S3 buckets utilize **Intelligent Tiering** for cost optimization.
+- **Firehose to S3:** Firehose uses **dynamic partitioning** based on `site_id` and `dt` to write data directly into the `eventsBucket` S3 bucket as **Parquet** files (SNAPPY compressed). S3 buckets utilize **Intelligent Tiering**.
 
 #### 2. Storage & Catalog: S3 -> Glue (Hive + Iceberg)
 
 - **Raw Data:** Parquet files reside in the `eventsBucket`.
-- **Glue Hive Tables:** Two traditional Glue external tables (`initial_events`, `events`) are defined over the S3 paths. They use **partition projection** based on `site_id` and `dt` for efficient partition discovery by Athena without needing `MSCK REPAIR TABLE`.
-- **Glue Iceberg Tables:** Upon deployment, an `IcebergInitFn` Lambda runs via `aws.lambda.Invocation`. It executes Athena `CREATE TABLE AS SELECT` (CTAS) queries to create **Apache Iceberg** tables (`initial_events_iceberg`, `events_iceberg`) based on the data in the original Hive tables. Iceberg manages its own metadata/manifest files within the `eventsBucket`, offering benefits like atomic commits, time travel, and schema evolution, and improved query performance over many small files.
+- **Glue Hive Tables:** Two traditional Glue external tables (`initial_events`, `events`) are defined over the S3 paths, using **partition projection**.
+- **Glue Iceberg Tables:** An `IcebergInitFn` Lambda creates **Apache Iceberg** tables (`initial_events_iceberg`, `events_iceberg`) via Athena CTAS upon deployment.
 
-#### 3. Query: API -> Lambda -> Athena (Querying Iceberg)
+#### 3. Query: Dashboard -> API Gateway (`ManagementApi`) -> Lambda (`queryFn`) -> Athena (Querying Iceberg)
 
-- **Entrypoint:** Users query data via the dashboard, hitting `GET /api/query`.
-- **Execution:** The `queryFn` Lambda receives the request, constructs an Athena query, and executes it.
-- **Target Tables:** Queries primarily target the **Iceberg tables** (`initial_events_iceberg`, `events_iceberg`) for better performance and data consistency. Athena queries these tables using the Glue Data Catalog.
-- **Client-Side Join:** Similar to the original design, joining the `initial_events` data (session details) with the `events` data (actions within the session) is intended to happen **client-side** (using DuckDB WASM). This minimizes Athena scan costs/time, Lambda execution time/memory, and network transfer. The Lambda likely fetches raw data from both Iceberg tables for the requested `site_id` and date range.
+- **Entrypoint:** Users query data via the dashboard, hitting `GET /api/query` on the `ManagementApi` endpoint (e.g., `https://api.yourdomain.com/api/query`).
+- **Authentication:** API Gateway validates the Cognito JWT token using the configured authorizer.
+- **Execution:** The `queryFn` Lambda receives the request, constructs an Athena query scoped to the user's `site_id`(s), and executes it against the **Iceberg tables**.
+- **Client-Side Join:** Joining `initial_events` and `events` data happens client-side (DuckDB WASM).
 
 #### 4. Maintenance: Cron -> Lambda -> Athena (Iceberg Compaction)
 
-- **Problem:** Firehose's frequent data delivery creates many small Parquet files, which can degrade Athena query performance, even with Iceberg.
-- **Solution:** A `CompactionCron` triggers the `CompactionFn` Lambda hourly.
-- **Action:** This Lambda executes Athena `OPTIMIZE` commands (or potentially other maintenance operations like `VACUUM`) on the **Iceberg tables**. This process compacts small files into larger, optimally sized ones, improving subsequent query speed and efficiency. It also manages Iceberg metadata updates within Glue and S3.
+- **Trigger:** A `CompactionCron` triggers the `CompactionFn` Lambda hourly.
+- **Action:** This Lambda executes Athena `OPTIMIZE` commands on the **Iceberg tables** to compact small files.
  */
 
 
@@ -311,48 +362,42 @@ export default $config({
       primaryIndex: { hashKey: "cognito_sub" },
     });
 
-    // === API Functions (Defined before Router) ===
+    // === Router for Public Endpoints (Ingest + Dashboard) ===
+    const router = new sst.aws.Router("PublicRouter", {
+      domain: isProd ? domain : undefined, // Use custom domain in prod
+    });
+
+    // === API Functions (Defined before Router/API Gateway attachments) ===
     const ingestFn = new sst.aws.Function("IngestFn", {
         handler: "functions/analytics/ingest.handler",
         timeout: '10 second',
         memory: "128 MB",
-        url: true,
+        // url: true, // Keep url enabled, but attach to router for public access
+        url: {
+          router: {
+            instance: router,
+            path: "/api/event", // Route /api/event via Router
+            // method: "POST", // Method filtering happens in function or via Router config if available elsewhere
+          }
+        },
         link: [
           eventsFirehoseStream,
           initialEventsFirehoseStream,
           sitesTable
         ],
         permissions: [
-          { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] }
+          // Permission to query sitesTable is needed for validation
+          { actions: ["dynamodb:GetItem"], resources: [sitesTable.arn] },
+          { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] } // Keep query if needed elsewhere? Revisit. GetItem is likely sufficient for site validation.
         ],
-    });
-
-    // === API Gateway ===
-    const api = new sst.aws.ApiGatewayV2("MyApi", {
-      domain: isProd ? {
-        name: domain,
-        // redirects property removed - not valid for ApiGatewayV2
-      } : undefined,
-      cors: { // Phase 1.3: Add CORS directly to ApiGatewayV2
-        allowOrigins: isProd ? [`https://${domain}`] : ["*"],
-        allowCredentials: false,
-        // Assuming default allowedMethods/Headers are okay
-      },
-    });
-
-    // Define JWT Authorizer (Phase 1.3 / Implicit from original config)
-    const jwtAuthorizer = api.addAuthorizer({
-      name: "jwtAuth",
-      jwt: {
-        issuer: $interpolate`https://cognito-idp.${region}.amazonaws.com/${userPool.id}`,
-        audiences: [userPoolClient.id],
-      }
     });
 
     const queryFn = new sst.aws.Function("QueryFn", {
         handler: "functions/analytics/query.handler",
         timeout: "60 second",
         memory: "512 MB",
+        // NOTE: queryFn is NOT attached to the public Router
+        // It will be attached to the authenticated ApiGatewayV2 below
         link: [
            analyticsDatabase,
            queryResultsBucket,
@@ -367,16 +412,48 @@ export default $config({
         permissions: [
           { actions: ["athena:*"], resources: ["*"] },
           { actions: ["s3:ListBucket"], resources: [ queryResultsBucket.arn, eventsBucket.arn ] },
+          // Permission to query sitesTable needed to scope results
           { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] },
+          // Permission to get user preferences
+          { actions: ["dynamodb:GetItem"], resources: [userPreferencesTable.arn] },
         ],
     });
 
-    // Define Query Route (Phase 1.3 / Implicit from original config)
+
+    // === API Gateway (for Authenticated Endpoints like /api/query) ===
+    const api = new sst.aws.ApiGatewayV2("ManagementApi", { // Renamed for clarity
+      domain: isProd ? {
+        name: `api.${domain}`, // Suggest using a subdomain like api.* for management endpoints
+        // redirects property removed - not valid for ApiGatewayV2
+      } : undefined,
+      cors: { // CORS needed for dashboard interaction
+        allowOrigins: isProd ? [`https://${domain}`] : ["*"], // Allow origin from the main dashboard domain
+        allowCredentials: true, // Important if auth cookies/headers are used
+        allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"], // Allow necessary methods
+        allowHeaders: ["Content-Type", "Authorization"], // Allow standard headers + Auth
+      },
+    });
+
+    // Define JWT Authorizer (Phase 1.3 / Implicit from original config)
+    const jwtAuthorizer = api.addAuthorizer({
+      name: "jwtAuth",
+      jwt: {
+        issuer: $interpolate`https://cognito-idp.${region}.amazonaws.com/${userPool.id}`,
+        audiences: [userPoolClient.id],
+      }
+    });
+
+    // Define Query Route on the Management API Gateway
     api.route(
       "GET /api/query",
-      "functions/analytics/query.handler", // Handler as second argument
-      { // Route args (including auth) as third argument
-        auth: {
+      "functions/analytics/query.handler", // Provide the handler path directly
+      {
+        // Link the function for permissions/env vars if not implicitly linked
+        // link: [queryFn], // Remove: Rely on implicit linking via handler string
+        // Inherit timeout/memory if desired (or let Lambda have its own)
+        // timeout: queryFn.timeout,
+        // memory: queryFn.memory,
+        auth: { // Auth config goes in the options object
           jwt: {
             authorizer: jwtAuthorizer.id
           }
@@ -387,11 +464,22 @@ export default $config({
     // === Dashboard (React Frontend) ===
     const dashboard = new sst.aws.React("Dashboard", {
       path: "dashboard/",
-      link: [api, userPool, userPoolClient, ingestFn],
+      // Attach dashboard to the root of the public Router
+      router: {
+        instance: router,
+        // path defaults to "/*" when attaching a site like this
+      },
+      // Link API Gateway for authenticated calls (/api/query)
+      // Link UserPool/Client for frontend auth logic
+      link: [api, userPool, userPoolClient],
       environment: {
         VITE_COGNITO_USER_POOL_ID: userPool.id,
         VITE_COGNITO_CLIENT_ID: userPoolClient.id,
         VITE_AWS_REGION: region,
+        // Pass the API Gateway URL for authenticated calls
+        VITE_API_URL: api.url,
+        // Pass the Router URL/domain for context if needed, though ingest URL comes from script tag
+        VITE_APP_URL: router.url,
       },
     });
 
@@ -439,9 +527,12 @@ export default $config({
       appName: $app.name,
       accountId: accountId,
       compactionFunctionName: compactionFn.name,
-      dashboardUrl: dashboard.url,
-      apiUrl: api.url,
-      ingestFunctionUrl: ingestFn.url,
+      // dashboardUrl: dashboard.url, // URL now comes from the router
+      dashboardUrl: router.url, // Use router URL for dashboard access
+      // apiUrl: api.url, // Keep API Gateway URL for management endpoints
+      managementApiUrl: api.url, // Rename output for clarity
+      // ingestFunctionUrl: ingestFn.url, // Ingest URL is via the router now
+      publicIngestUrl: $interpolate`${router.url}/api/event`, // Construct ingest URL from router
       ingestFunctionName: ingestFn.name,
       queryFunctionName: queryFn.name,
       dataBucketName: eventsBucket.name,
@@ -459,6 +550,7 @@ export default $config({
       userPreferencesTableName: userPreferencesTable.name,
       isProd,
       icebergInitFunctionName: icebergInitFn.name, // Export new function name
+      routerDistributionId: router.distributionID, // Export router ID
     }
   },
 });
