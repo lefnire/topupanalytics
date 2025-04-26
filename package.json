@@ -1,0 +1,28 @@
+{
+  "name": "topupanalytics",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "sst dev",
+    "deploy": "sst deploy",
+    "deploy:prod": "sst deploy --stage=production",
+    "remove": "sst remove",
+    "remove:dev": "sst remove --stage=dev",
+    "remove:prod": "sst remove --stage=production",
+    "upgrade": "sst upgrade"
+  },
+  "dependencies": {
+    "@aws-sdk/client-athena": "^3.787.0",
+    "@aws-sdk/client-firehose": "^3.793.0",
+    "@aws-sdk/client-glue": "^3.787.0",
+    "@aws-sdk/client-s3": "^3.787.0",
+    "date-fns": "^4.1.0",
+    "sst": "3.13.17",
+    "ua-parser-js": "^2.0.3"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.149",
+    "vite-plugin-sitemap": "^0.7.1"
+  }
+}

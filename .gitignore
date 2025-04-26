@@ -1,0 +1,10 @@
+**/.idea
+**/config.json
+**/feed.xml
+tmp/
+**/.DS_Store
+node_modules
+.aider*
+
+# sst
+.sst
