@@ -4,7 +4,7 @@ import { getCurrentUser, signOut as amplifySignOut, fetchAuthSession } from '@aw
 import { Hub } from '@aws-amplify/core'; // Try importing Hub from core
 
 // Define the shape of the user object (adjust as needed based on Cognito attributes)
-interface AuthenticatedUser {
+export interface AuthenticatedUser { // Add export keyword
   userId: string;
   username: string;
   // Add other attributes you might need, e.g., email

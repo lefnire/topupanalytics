@@ -1,7 +1,7 @@
 import { type RouteConfig, index, route } from "@react-router/dev/routes";
 
 export default [
-  index("routes/analytics.tsx"), // Main dashboard (will be protected within the component)
+  index("routes/dashboard.tsx"), // Main dashboard (will be protected within the component)
   // Site Management Routes (assuming they are protected within the main layout/index)
   route("sites", "routes/sites/index.tsx"), // List sites
   route("sites/new", "routes/sites/new.tsx"), // Create new site form
