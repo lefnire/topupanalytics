@@ -14,14 +14,7 @@ import { toast } from 'sonner';
 // Zod schema for validation
 const formSchema = z.object({
   name: z.string().min(2, { message: "Site name must be at least 2 characters." }),
-  allowed_domains: z.string().refine((val) => {
-    try {
-      const parsed = JSON.parse(val);
-      return Array.isArray(parsed) && parsed.every(item => typeof item === 'string');
-    } catch (e) {
-      return false;
-    }
-  }, { message: "Allowed domains must be a valid JSON array of strings (e.g., [\"example.com\", \"www.example.com\"])" }),
+  allowed_domains: z.string().optional(), // Accept a string, parsing happens in onSubmit
   // Add allowed_fields if needed for creation, otherwise omit or make optional
   // allowed_fields: z.string().refine(... similar validation ...),
 });
@@ -41,7 +34,7 @@ export function CreateSiteForm({ onSuccess }: CreateSiteFormProps) {
     resolver: zodResolver(formSchema),
     defaultValues: {
       name: "",
-      allowed_domains: "[]", // Default to empty JSON array string
+      allowed_domains: "", // Default to empty string
       // allowed_fields: "[]",
     },
   });
@@ -49,12 +42,14 @@ export function CreateSiteForm({ onSuccess }: CreateSiteFormProps) {
   async function onSubmit(values: FormData) {
     setIsSubmitting(true);
     try {
-      // Parse the JSON string into an array and use the correct key 'domains'
-      const domainsArray = JSON.parse(values.allowed_domains);
+      // Parse the newline-delimited string into an array and use the correct key 'domains'
+      const domainsArray = values.allowed_domains
+        ? values.allowed_domains.split('\n').map(d => d.trim()).filter(d => d.length > 0)
+        : []; // Handle empty/undefined input
       const newSite: Site = await post('/api/sites', { // Add type annotation
         name: values.name, // Send name
-        domains: domainsArray,
-        // allowed_fields: JSON.parse(values.allowed_fields), // Include and parse if part of the schema/API
+        domains: domainsArray, // Send parsed array
+        // allowed_fields: [], // Send empty array if needed by API on creation
       });
       toast.success(`Site "${values.name}" created successfully!`);
       // If an onSuccess callback is provided, call it instead of navigating
@@ -98,18 +93,17 @@ export function CreateSiteForm({ onSuccess }: CreateSiteFormProps) {
           name="allowed_domains"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Allowed Domains (JSON Array)</FormLabel>
+              <FormLabel>Allowed Domains</FormLabel>
               <FormControl>
-                {/* Using Textarea for easier multi-line JSON editing */}
                 <Textarea
-                  placeholder='["example.com", "www.example.com"]'
+                  placeholder="example.com&#10;www.example.com" // Updated placeholder
                   rows={3}
                   {...field}
                   disabled={isSubmitting}
                 />
               </FormControl>
               <FormDescription>
-                Enter the domains where the tracking script will be allowed to run, as a JSON array of strings.
+                Enter each domain on a new line. The tracking script will only run on these domains.
               </FormDescription>
               <FormMessage />
             </FormItem>

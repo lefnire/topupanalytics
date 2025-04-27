@@ -10,7 +10,7 @@ interface SiteSelectorDropdownContentProps {
   onSettingsClick?: (siteId: string) => void;
 }
 
-export function SiteSelectorDropdownContent({ onSiteSelect, onSettingsClick }) { // Removed type annotation for debugging
+export function SiteSelectorDropdownContent({ onSiteSelect, onSettingsClick }: SiteSelectorDropdownContentProps) {
   const { get } = useApiClient();
   const [sites, setSites] = useState<Site[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -73,7 +73,7 @@ export function SiteSelectorDropdownContent({ onSiteSelect, onSettingsClick }) {
           tabIndex={0} // Make it focusable
           onKeyDown={(e) => e.key === 'Enter' || e.key === ' ' ? handleSiteClick(site.site_id) : null}
         >
-          <span>{site.name}</span>
+          <span>{site.name || 'Unnamed Site'}</span>
           <button
             onClick={(e) => handleSettingsClick(e, site.site_id)}
             className="p-1 rounded hover:bg-muted focus:outline-none focus:ring-1 focus:ring-ring"

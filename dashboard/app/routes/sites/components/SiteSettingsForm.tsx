@@ -4,6 +4,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
 // import { loadStripe } from '@stripe/stripe-js'; // Removed as Stripe checkout logic is no longer in this form
 import { useApiClient, type Site } from '../../../lib/api';
+import { initialEventsSchema } from '../../../../../functions/analytics/schema'; // Import the schema
 import { Button } from '../../../components/ui/button';
 import { Input } from '../../../components/ui/input';
 import { Label } from '../../../components/ui/label';
@@ -15,22 +16,8 @@ import { toast } from 'sonner';
 // Zod schema for validation
 const formSchema = z.object({
   name: z.string().min(2, { message: "Site name must be at least 2 characters." }),
-  allowed_domains: z.string().refine((val) => {
-    try {
-      const parsed = JSON.parse(val);
-      return Array.isArray(parsed) && parsed.every(item => typeof item === 'string');
-    } catch (e) {
-      return false;
-    }
-  }, { message: "Allowed domains must be a valid JSON array of strings." }),
-  allowed_fields: z.string().refine((val) => { // Assuming allowed_fields is also a JSON string array
-    try {
-      const parsed = JSON.parse(val);
-      return Array.isArray(parsed) && parsed.every(item => typeof item === 'string');
-    } catch (e) {
-      return false;
-    }
-  }, { message: "Allowed fields must be a valid JSON array of strings (e.g., [\"utm_source\", \"referrer\"])" }),
+  allowed_domains: z.string().optional(), // Accept string, parse in onSubmit
+  allowed_fields: z.array(z.string()).optional(), // Expect an array of strings for checkboxes
   is_active: z.boolean(),
 });
 
@@ -51,8 +38,10 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
     // Initialize with current site values
     defaultValues: {
       name: site.name || "",
-      allowed_domains: site.allowed_domains || "[]",
-      allowed_fields: site.allowed_fields || "[]", // Initialize allowed_fields
+      // Join array into newline-separated string for textarea
+      allowed_domains: Array.isArray(site.allowed_domains) ? site.allowed_domains.join('\n') : "",
+      // Use the array directly, default to empty array if null/undefined
+      allowed_fields: Array.isArray(site.allowed_fields) ? site.allowed_fields : [],
       is_active: site.is_active ?? true, // Default to true if undefined/null
     },
   });
@@ -61,8 +50,10 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
    useEffect(() => {
     form.reset({
       name: site.name || "",
-      allowed_domains: site.allowed_domains || "[]",
-      allowed_fields: site.allowed_fields || "[]",
+      // Join array into newline-separated string for textarea
+      allowed_domains: Array.isArray(site.allowed_domains) ? site.allowed_domains.join('\n') : "",
+       // Use the array directly, default to empty array if null/undefined
+      allowed_fields: Array.isArray(site.allowed_fields) ? site.allowed_fields : [],
       is_active: site.is_active ?? true,
     });
   }, [site, form]);
@@ -71,11 +62,16 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
   async function onSubmit(values: FormData) {
     setIsSubmitting(true);
     try {
-      // Schema ensures JSON fields are valid strings
+      // Parse allowed_domains string into array
+      const domainsArray = values.allowed_domains
+        ? values.allowed_domains.split('\n').map(d => d.trim()).filter(d => d.length > 0)
+        : [];
+
+      // Prepare data for API (using 'domains' key)
       const updatedSiteData = {
         name: values.name,
-        allowed_domains: values.allowed_domains,
-        allowed_fields: values.allowed_fields,
+        domains: domainsArray, // Use parsed array and correct key
+        allowed_fields: values.allowed_fields || [], // Send the array directly
         is_active: values.is_active,
       };
 
@@ -118,39 +114,70 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
           name="allowed_domains"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Allowed Domains (JSON Array)</FormLabel>
+              <FormLabel>Allowed Domains</FormLabel>
               <FormControl>
-                <Textarea rows={3} {...field} disabled={isSubmitting} />
+                <Textarea
+                  placeholder="example.com&#10;www.example.com"
+                  rows={3}
+                  {...field}
+                  disabled={isSubmitting}
+                />
               </FormControl>
               <FormDescription>
-                Domains where the tracking script can run (JSON array of strings).
+                Enter each domain on a new line. The tracking script will only run on these domains.
               </FormDescription>
               <FormMessage />
             </FormItem>
           )}
         />
-         <FormField
+        {/* Allowed Fields Checkboxes */}
+        <FormField
           control={form.control}
           name="allowed_fields"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Allowed GDPR Fields (JSON Array)</FormLabel>
-              <FormControl>
-                <Textarea
-                    placeholder='["utm_source", "referrer", "custom_event"]'
-                    rows={3}
-                    {...field}
-                    disabled={isSubmitting}
-                 />
-              </FormControl>
+              <FormLabel>Allowed Data Fields</FormLabel>
               <FormDescription>
-                URL parameters or custom event fields allowed for collection (JSON array of strings).
+                Select the URL parameters or custom event data fields you want to collect.
               </FormDescription>
+              <div className="space-y-2 pt-2">
+                {initialEventsSchema.map((schemaField) => (
+                  <FormField
+                    key={schemaField.name}
+                    control={form.control}
+                    name="allowed_fields"
+                    render={({ field: checkboxField }) => { // Rename inner field to avoid conflict
+                      return (
+                        <FormItem className="flex flex-row items-start space-x-3 space-y-0">
+                          <FormControl>
+                            <Checkbox
+                              checked={checkboxField.value?.includes(schemaField.name)}
+                              onCheckedChange={(checked) => {
+                                return checked
+                                  ? checkboxField.onChange([...(checkboxField.value || []), schemaField.name])
+                                  : checkboxField.onChange(
+                                      (checkboxField.value || []).filter(
+                                        (value) => value !== schemaField.name
+                                      )
+                                    );
+                              }}
+                              disabled={isSubmitting}
+                            />
+                          </FormControl>
+                          <FormLabel className="font-normal">
+                            {schemaField.name}
+                          </FormLabel>
+                        </FormItem>
+                      );
+                    }}
+                  />
+                ))}
+              </div>
               <FormMessage />
             </FormItem>
           )}
         />
-         <FormField
+        <FormField
           control={form.control}
           name="is_active"
           render={({ field }) => (

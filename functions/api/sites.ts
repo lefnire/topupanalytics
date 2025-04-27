@@ -39,10 +39,14 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
     if (routeKey === "POST /api/sites") {
       const body = event.body ? JSON.parse(event.body) : {};
       // Note: 'plan' default is now handled directly in the Item below.
-      // We still extract domains, is_active, allowed_fields from the body if provided.
-      const { domains, is_active = true, allowed_fields = [] } = body;
+      // We extract name, domains, is_active, allowed_fields from the body if provided.
+      const { name, domains, is_active = true, allowed_fields = [] } = body;
 
       // --- Validation ---
+      // Name: Must be a non-empty string
+      if (!name || typeof name !== 'string' || name.trim().length === 0) {
+          return createResponse(400, { error: "Bad Request: 'name' must be a non-empty string." });
+      }
       // Domains: Must be a non-empty array of strings
       if (!domains || !Array.isArray(domains) || domains.length === 0) {
         return createResponse(400, { error: "Bad Request: 'domains' must be a non-empty array." });
@@ -67,6 +71,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
       const itemToSave = {
         site_id: newSiteId,
         owner_sub: userSub,
+        name: name.trim(), // Store trimmed name
         domains: domains, // Store as native list
         plan: 'free_tier', // Default plan
         request_allowance: 10000, // Default request allowance (updated)
@@ -126,20 +131,33 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
     // --- Update Site ---
     if (routeKey === "PUT /api/sites/{site_id}") {
         const body = event.body ? JSON.parse(event.body) : {};
-        const { domains, plan, is_active, allowed_fields } = body; // Add new updatable fields
+        const { name, domains, plan, is_active, allowed_fields } = body; // Add 'name'
 
-        if (domains === undefined && plan === undefined && is_active === undefined && allowed_fields === undefined) {
-            return createResponse(400, { error: "Bad Request: Requires 'domains', 'plan', 'is_active', or 'allowed_fields' in body." });
+        if (name === undefined && domains === undefined && plan === undefined && is_active === undefined && allowed_fields === undefined) {
+            return createResponse(400, { error: "Bad Request: Requires 'name', 'domains', 'plan', 'is_active', or 'allowed_fields' in body." });
         }
 
         let updateExpression = "SET updated_at = :now";
         const expressionAttributeValues: Record<string, any> = { ":now": new Date().toISOString(), ":sub": userSub };
         const expressionAttributeNames: Record<string, string> = {}; // Needed if using reserved words
 
+        if (name !== undefined) {
+            if (typeof name !== 'string' || name.trim().length === 0) {
+                return createResponse(400, { error: "Bad Request: 'name' must be a non-empty string." });
+            }
+            updateExpression += ", #n = :name"; // Use placeholder for reserved word 'name'
+            expressionAttributeNames["#n"] = "name";
+            expressionAttributeValues[":name"] = name.trim();
+        }
         if (domains !== undefined) {
-            if (!Array.isArray(domains)) return createResponse(400, { error: "Bad Request: 'domains' must be an array." });
+            if (!Array.isArray(domains) || domains.length === 0) {
+                 return createResponse(400, { error: "Bad Request: 'domains' must be a non-empty array." });
+            }
+            if (!domains.every(d => typeof d === 'string' && d.trim().length > 0)) {
+                return createResponse(400, { error: "Bad Request: 'domains' must contain only non-empty strings." });
+            }
             updateExpression += ", domains = :domains"; // Use direct attribute name if not reserved
-            expressionAttributeValues[":domains"] = JSON.stringify(domains); // Store as JSON string
+            expressionAttributeValues[":domains"] = domains; // Store as native list
         }
         if (plan !== undefined) {
             // If Stripe is disabled, only allow setting plan to 'free_tier' via this API
@@ -153,12 +171,17 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
         if (is_active !== undefined) {
             if (typeof is_active !== 'boolean') return createResponse(400, { error: "Bad Request: 'is_active' must be a boolean." });
             updateExpression += ", is_active = :is_active";
-            expressionAttributeValues[":is_active"] = is_active ? 1 : 0; // Store as number
+            expressionAttributeValues[":is_active"] = is_active; // Store as native boolean
         }
         if (allowed_fields !== undefined) {
-            if (!Array.isArray(allowed_fields)) return createResponse(400, { error: "Bad Request: 'allowed_fields' must be an array." });
+            if (!Array.isArray(allowed_fields)) {
+                return createResponse(400, { error: "Bad Request: 'allowed_fields' must be an array." });
+            }
+            if (!allowed_fields.every(f => typeof f === 'string')) {
+                return createResponse(400, { error: "Bad Request: 'allowed_fields' must contain only strings." });
+            }
             updateExpression += ", allowed_fields = :allowed_fields";
-            expressionAttributeValues[":allowed_fields"] = JSON.stringify(allowed_fields); // Store as JSON string
+            expressionAttributeValues[":allowed_fields"] = allowed_fields; // Store as native list
         }
 
         const updateParams = new UpdateCommand({
