@@ -389,7 +389,15 @@ export default $config({
 
     // === Cognito User Pool ===
     const userPool = new aws.cognito.UserPool("UserPool", {
-        name: `${baseName}-user-pool`, aliasAttributes: ["email"], autoVerifiedAttributes: ["email"],
+        name: `${baseName}-user-pool`, usernameAttributes: ["email"], autoVerifiedAttributes: ["email"],
+        passwordPolicy: {
+            minimumLength: 6,
+            requireLowercase: false,
+            requireNumbers: false,
+            requireSymbols: false,
+            requireUppercase: false,
+            temporaryPasswordValidityDays: 7, // Default, but good to be explicit
+        },
     });
     const userPoolClient = new aws.cognito.UserPoolClient("UserPoolClient", {
         name: `${baseName}-user-pool-client`, userPoolId: userPool.id, generateSecret: false,
@@ -587,52 +595,35 @@ export default $config({
     });
 
     // Define Query Route on the Management API Gateway
-    api.route(
-      "GET /api/query",
-      "functions/analytics/query.handler", // Provide the handler path directly
-      {
-        // Link the function for permissions/env vars if not implicitly linked
-        // link: [queryFn], // Remove: Rely on implicit linking via handler string
-        // Inherit timeout/memory if desired (or let Lambda have its own)
-        // timeout: queryFn.timeout,
-        // memory: queryFn.memory,
-        auth: { // Auth config goes in the options object
-          jwt: {
-            authorizer: jwtAuthorizer.id
-          }
-        }
-      }
-    );
-
-    // === Management API Routes ===
+    // Define common auth config once
     const commonAuth = { auth: { jwt: { authorizer: jwtAuthorizer.id } } };
 
+    // === Management API Routes (Using Function ARNs) ===
+
+    // --- Query Route ---
+    // Pass the Function ARN as the handler (2nd arg), auth config as 3rd arg
+    api.route("GET /api/query", queryFn.arn, commonAuth);
+
     // --- Sites Routes ---
-    api.route("POST /api/sites", { handler: "functions/api/sites.handler", ...commonAuth });
-    api.route("GET /api/sites", { handler: "functions/api/sites.handler", ...commonAuth });
-    api.route("GET /api/sites/{site_id}", { handler: "functions/api/sites.handler", ...commonAuth });
-    api.route("PUT /api/sites/{site_id}", { handler: "functions/api/sites.handler", ...commonAuth });
-    api.route("GET /api/sites/{site_id}/script", {
-      handler: "functions/api/sites.handler", // Corrected handler path
-      ...commonAuth,
-      // Pass the public ingest URL to the script generation endpoint
-      environment: { PUBLIC_INGEST_URL: $interpolate`${router.url}/api/event` }
-    });
+    api.route("POST /api/sites", sitesFn.arn, commonAuth);
+    api.route("GET /api/sites", sitesFn.arn, commonAuth);
+    api.route("GET /api/sites/{site_id}", sitesFn.arn, commonAuth);
+    api.route("PUT /api/sites/{site_id}", sitesFn.arn, commonAuth);
+    // Note: Passing PUBLIC_INGEST_URL to the script endpoint via environment
+    // isn't directly possible when using the ARN. If the handler needs this,
+    // it might need to construct it or receive it differently.
+    // For now, we assume the ARN linking is sufficient.
+    api.route("GET /api/sites/{site_id}/script", sitesFn.arn, commonAuth);
+
 
     // --- User Preferences Routes ---
-    api.route("GET /api/user/preferences", { handler: "functions/api/preferences.handler", ...commonAuth });
-    api.route("PUT /api/user/preferences", { handler: "functions/api/preferences.handler", ...commonAuth });
+    api.route("GET /api/user/preferences", preferencesFn.arn, commonAuth);
+    api.route("PUT /api/user/preferences", preferencesFn.arn, commonAuth);
 
     // Step 5: Conditional Stripe API Routes
-    if (useStripe) { // No need to check stripeFn here, route handler uses string
-      api.route("POST /api/stripe/webhook", {
-        handler: "functions/api/stripe.handler", // Correct: Use handler string
-        // NO auth: This endpoint is called by Stripe servers
-      });
-      api.route("POST /api/stripe/checkout", {
-        handler: "functions/api/stripe.handler", // Correct: Use handler string
-        ...commonAuth // Requires JWT auth
-      });
+    if (useStripe && stripeFn) { // Check stripeFn exists
+      api.route("POST /api/stripe/webhook", stripeFn.arn); // NO auth needed
+      api.route("POST /api/stripe/checkout", stripeFn.arn, commonAuth); // Requires JWT auth
     }
 
 

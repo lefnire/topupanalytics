@@ -22,7 +22,8 @@
     "date-fns": "^4.1.0",
     "sst": "3.13.19",
     "stripe": "^18.0.0",
-    "ua-parser-js": "^2.0.3"
+    "ua-parser-js": "^2.0.3",
+    "ulid": "^3.0.0"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.149",

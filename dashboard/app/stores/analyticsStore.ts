@@ -33,9 +33,7 @@ import mvp_worker from '@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?ur
 import duckdb_wasm_eh from '@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url';
 import eh_worker from '@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url';
 
-const queryEndpoint = import.meta.env.VITE_APP_URL + '/api/query';
-const sitesEndpoint = import.meta.env.VITE_APP_URL + '/api/sites';
-const preferencesEndpoint = import.meta.env.VITE_APP_URL + '/api/user/preferences'; // Added
+// Endpoints are now constructed within the api helper using VITE_API_URL
 
 // --- Constants ---
 const isServer = typeof window === 'undefined';
@@ -404,63 +402,42 @@ export const useStore = create<AnalyticsState>()(
                 }
             },
 
-            _fetchData: async () => { // Removed range parameter
+            _fetchData: async () => {
                 const { selectedSiteId, selectedRange } = get();
-                if (!queryEndpoint) throw new Error("API query endpoint not set.");
                 if (!selectedSiteId) throw new Error("No site selected for fetching data.");
-                if (!selectedRange?.from || !selectedRange?.to) throw new Error("Date range not selected for fetching data."); // Prevent fetch without range
-
-                // Get Cognito ID token
-                let idToken;
-                try {
-                    const session = await fetchAuthSession();
-                    idToken = session.tokens?.idToken?.toString();
-                    if (!idToken) {
-                        throw new Error("No ID token found in session.");
-                    }
-                } catch (authError) {
-                    console.error("Authentication error:", authError);
-                    throw new Error("Failed to get authentication token. Please log in again.");
-                }
+                if (!selectedRange?.from || !selectedRange?.to) throw new Error("Date range not selected for fetching data.");
 
                 // Format dates for query parameters
                 const startDateParam = format(selectedRange.from, 'yyyy-MM-dd');
                 const endDateParam = format(selectedRange.to, 'yyyy-MM-dd');
 
-                const url = `${queryEndpoint}?siteId=${selectedSiteId}&startDate=${startDateParam}&endDate=${endDateParam}`;
-                console.log(`Fetching query data from: ${url}`);
-                const response = await fetch(url, {
-                    headers: {
-                        'Authorization': `Bearer ${idToken}` // Add Authorization header
-                    }
-                });
+                // Construct the endpoint path with query parameters
+                const endpoint = `/api/query?siteId=${selectedSiteId}&startDate=${startDateParam}&endDate=${endDateParam}`;
+                console.log(`Fetching query data from endpoint: ${endpoint}`);
 
-                if (!response.ok) {
-                    const errorBody = await response.text();
-                    throw new Error(`HTTP error ${response.status}: ${errorBody || response.statusText}`);
-                }
-                const data = await response.json();
-                 const { initialEvents, events, commonSchema, initialOnlySchema } = data;
+                // Use the api helper which handles base URL and auth
+                const data = await api.get<any>(endpoint); // Define a proper type for the response later
 
+                const { initialEvents, events, commonSchema, initialOnlySchema } = data;
+
+                // Validate the structure of the received data
                 if (!Array.isArray(initialEvents) || !Array.isArray(events) || !Array.isArray(commonSchema) || !Array.isArray(initialOnlySchema)) {
-                    throw new Error("Invalid data structure received from endpoint.");
+                    throw new Error("Invalid data structure received from /api/query endpoint.");
                 }
 
                 console.log(`Received ${initialEvents.length} initial events, ${events.length} subsequent events, ${commonSchema.length} common fields, ${initialOnlySchema.length} initial-only fields.`);
                 return { initialEvents, events, commonSchema, initialOnlySchema };
             },
 
-            fetchSites: async () => { // Renamed to fetchSitesAndPreferences, but keeping original name for now to avoid breaking calls
-                if (!sitesEndpoint || !preferencesEndpoint) {
-                    set({ status: 'error', error: 'API endpoints not configured.' });
-                    return;
-                }
+            fetchSites: async () => {
+                console.log("AnalyticsStore: fetchSites called."); // Log entry
                 console.log("Fetching sites and user preferences...");
                 try {
-                    // Fetch sites and preferences concurrently
+                    // Fetch sites and preferences concurrently using only the path
+                    console.log("AnalyticsStore: Attempting api.get('/api/sites') and api.get('/api/user/preferences')..."); // Log before API calls
                     const [fetchedSites, fetchedPreferences] = await Promise.all([
-                        api.get<Site[]>(sitesEndpoint),
-                        api.get<UserPreferences>(preferencesEndpoint)
+                        api.get<Site[]>('/api/sites'),
+                        api.get<UserPreferences>('/api/user/preferences')
                     ]);
 
                     console.log(`Fetched ${fetchedSites.length} sites and user preferences.`);
@@ -522,7 +499,11 @@ export const useStore = create<AnalyticsState>()(
             },
 
             fetchAndLoadData: async () => {
-                if (get().isRefreshing) return; // Prevent multiple refreshes
+                console.log("AnalyticsStore: fetchAndLoadData called."); // Log entry
+                if (get().isRefreshing) {
+                    console.log("AnalyticsStore: fetchAndLoadData skipped (already refreshing).");
+                    return;
+                }
 
                 const { status, selectedSiteId, db, selectedRange } = get(); // Get selectedRange here
 
