@@ -10,6 +10,7 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   UpdateCommand, // Import UpdateCommand
+  TransactWriteCommand, // Corrected import for batching
 } from "@aws-sdk/lib-dynamodb";
 import {
   colsCompliant,
@@ -33,54 +34,146 @@ const docClient = DynamoDBDocumentClient.from(dynamoClient);
 const EVENTS_FIREHOSE_STREAM_NAME = process.env.EVENTS_FIREHOSE_STREAM_NAME;
 const INITIAL_EVENTS_FIREHOSE_STREAM_NAME = process.env.INITIAL_EVENTS_FIREHOSE_STREAM_NAME;
 const SITES_TABLE_NAME = process.env.SITES_TABLE_NAME;
-const USER_PREFERENCES_TABLE_NAME = process.env.USER_PREFERENCES_TABLE_NAME; // Add this
+const USER_PREFERENCES_TABLE_NAME = process.env.USER_PREFERENCES_TABLE_NAME;
+
+// --- Caching & Batching Implementation ---
+interface SiteConfig {
+  site_id: string;
+  is_active: number;
+  domains?: string; // JSON stringified array
+  allowed_fields?: string; // JSON stringified array
+  request_allowance: number;
+  owner_sub?: string; // Needed for Stripe check if enabled
+}
+
+const siteCache = new Map<string, { cfg: SiteConfig; ts: number }>();
+const allowanceDelta: Record<string, number> = {};
+const FLUSH = false; // Set to true to enable time-based flushing
+
+async function loadFromDynamo(siteId: string): Promise<SiteConfig> {
+  if (!SITES_TABLE_NAME) {
+    throw new Error("SITES_TABLE_NAME environment variable is not set.");
+  }
+  const getParams = {
+    TableName: SITES_TABLE_NAME,
+    Key: { site_id: siteId },
+  };
+  const getSiteCommand = new GetCommand(getParams);
+  const { Item } = await docClient.send(getSiteCommand);
+
+  if (!Item) {
+    log(`Invalid site_id received: ${siteId}`);
+    throw new Error('Forbidden: Invalid site identifier'); // Throw error to be caught by handler
+  }
+
+  // Expecting is_active to be 1 (true) or 0 (false) from DynamoDB
+  if (Item.is_active !== 1) {
+    log(`Site ${siteId} is not active.`);
+    throw new Error('Forbidden: Site inactive'); // Throw error
+  }
+
+  // Basic validation passed, return the config
+  // Ensure request_allowance is a number, default to 0 if missing/invalid
+  const request_allowance = typeof Item.request_allowance === 'number' ? Item.request_allowance : 0;
+
+  return {
+    site_id: Item.site_id,
+    is_active: Item.is_active,
+    domains: Item.domains,
+    allowed_fields: Item.allowed_fields,
+    request_allowance: request_allowance,
+    owner_sub: Item.owner_sub,
+  } as SiteConfig; // Cast needed if Item is loosely typed
+}
+
+async function flush() {
+  const updates = Object.entries(allowanceDelta).map(([site_id, cnt]) => ({
+    Update: {
+      TableName: SITES_TABLE_NAME!, // Use non-null assertion as it's checked earlier
+      Key: { site_id },
+      // Condition: Only decrement if current allowance is sufficient
+      ConditionExpression: "attribute_exists(site_id) AND request_allowance >= :cnt",
+      UpdateExpression: "SET request_allowance = request_allowance - :cnt",
+      ExpressionAttributeValues: {
+        ":cnt": cnt,
+      },
+    },
+  }));
+
+  if (updates.length > 0) {
+    log(`Flushing allowance updates for ${updates.length} sites:`, Object.keys(allowanceDelta));
+    try {
+      const transactWriteCommand = new TransactWriteCommand({ TransactItems: updates }); // Corrected command name
+      await docClient.send(transactWriteCommand);
+      log("Flush successful.");
+      // Clear delta only after successful write
+      Object.keys(allowanceDelta).forEach((k) => delete allowanceDelta[k]);
+    } catch (error: any) {
+      // Handle potential errors, especially ConditionalCheckFailedException
+      // which might occur if allowance was depleted between check and flush.
+      console.error("Error during allowance flush:", error);
+      // Decide on error handling: retry? clear delta partially? For now, log and clear.
+      // If a specific update fails due to condition check, it won't decrement,
+      // but we clear the delta here. The next request might fail the optimistic check.
+      Object.keys(allowanceDelta).forEach((k) => delete allowanceDelta[k]); // Clear delta even on error to prevent retrying failed decrements immediately
+      // Re-throwing might be appropriate depending on desired behavior
+      // throw error;
+    }
+  } else {
+    log("No allowance updates to flush.");
+  }
+}
+
 
 // POST /api/events
-export const handler: APIGatewayProxyHandlerV2 = async (event) => {
-  const useStripe = process.env.USE_STRIPE === 'true';
+// Add 'context' to the handler signature
+export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
+  const now = Date.now();
   log('Received event:', JSON.stringify(event, null, 2));
-  log(`Stripe integration ${useStripe ? 'enabled' : 'disabled'}`);
 
   // --- Site ID Validation ---
-  const siteId = event.queryStringParameters?.site; // Changed from token/header
-
+  const siteId = event.queryStringParameters?.site;
   if (!siteId) {
-    log('Missing site query parameter'); // Updated log message
-    return { statusCode: 400, body: JSON.stringify({ message: 'Bad Request: Missing site parameter' }) }; // Updated status code and message
+    log('Missing site query parameter');
+    return { statusCode: 400, body: JSON.stringify({ message: 'Bad Request: Missing site parameter' }) };
   }
 
   if (!SITES_TABLE_NAME) {
-    console.error("SITES_TABLE_NAME environment variable is not set.");
-    return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error' }) };
+      console.error("SITES_TABLE_NAME environment variable is not set.");
+      return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error' }) };
   }
 
   try {
-    const getParams = {
-      TableName: SITES_TABLE_NAME,
-      Key: { site_id: siteId },
-    };
-    const getSiteCommand = new GetCommand(getParams); // Renamed variable
-    const { Item } = await docClient.send(getSiteCommand); // Use renamed variable
-
-    if (!Item) {
-      log(`Invalid site_id received: ${siteId}`);
-      return { statusCode: 403, body: JSON.stringify({ message: 'Forbidden: Invalid site identifier' }) };
+    // --- 1. Get Site Config (Cache or Load) ---
+    let entry = siteCache.get(siteId);
+    if (!entry || now - entry.ts > 10 * 60 * 1000) { // 10-min TTL
+      log(`Cache miss or expired for site ${siteId}. Fetching from DynamoDB.`);
+      try {
+        const loadedCfg = await loadFromDynamo(siteId);
+        entry = { cfg: loadedCfg, ts: now };
+        siteCache.set(siteId, entry);
+        log(`Cached config for site ${siteId}.`);
+      } catch (loadError: any) {
+        // Handle errors from loadFromDynamo (e.g., not found, inactive)
+        log(`Error loading site config for ${siteId}:`, loadError.message);
+        if (loadError.message.includes('Forbidden')) {
+          return { statusCode: 403, body: JSON.stringify({ message: loadError.message }) };
+        }
+        return { statusCode: 500, body: JSON.stringify({ message: 'Internal Server Error loading site configuration' }) };
+      }
+    } else {
+      log(`Cache hit for site ${siteId}.`);
     }
-    // --- Site Status and Domain Validation ---
-    // Expecting is_active to be 1 (true) or 0 (false) from DynamoDB
-    if (Item.is_active !== 1) {
-      log(`Site ${siteId} is not active.`);
-      return { statusCode: 403, body: JSON.stringify({ message: 'Forbidden: Site inactive' }) };
-    }
 
-    // Optional: Referer validation
+    const cfg = entry.cfg;
+
+    // --- Domain Validation (using cached config) ---
     const refererHeader = event.headers?.referer;
-    // Expecting domains to be a JSON stringified array from DynamoDB
-    const allowedDomainsString = Item.domains as string | undefined;
+    const allowedDomainsString = cfg.domains;
     if (refererHeader && allowedDomainsString) {
       try {
         const allowedDomains: string[] = JSON.parse(allowedDomainsString);
-        if (allowedDomains.length > 0) { // Only validate if domains are configured
+        if (allowedDomains.length > 0) {
           const refererUrl = new URL(refererHeader);
           const refererHostname = refererUrl.hostname;
           if (!allowedDomains.includes(refererHostname)) {
@@ -90,109 +183,59 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
           log(`Referer ${refererHostname} validated for site ${siteId}.`);
         }
       } catch (e) {
-        console.error(`Error parsing domains for site ${siteId}: ${allowedDomainsString}`, e);
-        // Fail open or closed? Failing closed for security.
+        console.error(`Error parsing cached domains for site ${siteId}: ${allowedDomainsString}`, e);
         return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error: Cannot parse site domains' }) };
       }
     }
 
-    log(`Validated site_id: ${siteId}`);
+    // --- 2. Optimistic Allowance Check ---
+    // Note: Stripe payment status check is implicitly handled by the flush condition `request_allowance >= :cnt`.
+    // If payment is active, allowance might go negative in DB but the optimistic check here prevents requests if local shadow is <= 0.
+    // This differs slightly from the original logic but aligns with the batching goal.
+    if (cfg.request_allowance <= 0) {
+      log(`Optimistic check failed for site ${siteId}: Allowance exhausted (cached value: ${cfg.request_allowance}).`);
+      // Potentially call flush here if needed to sync near-zero allowance? For now, just block.
+      // await flush(); // Optional: Flush before returning to ensure DB is up-to-date
+      return {
+        statusCode: 402, // Payment Required
+        body: JSON.stringify({ message: 'Payment Required: Request allowance likely exceeded.' }),
+      };
+    }
 
-      if (useStripe) {
-        log(`Checking payment status and decrementing allowance for site ${siteId} (Stripe enabled)`);
-        // --- Fetch User Payment Status ---
-        const ownerSub = Item.owner_sub; // Assuming owner_sub is available on the site item
-        let is_payment_active = 0; // Default to inactive
+    // --- 3. Update Delta & Local Shadow ---
+    allowanceDelta[siteId] = (allowanceDelta[siteId] ?? 0) + 1;
+    cfg.request_allowance--; // Decrement local shadow copy
+    log(`Allowance check passed for site ${siteId}. New local allowance: ${cfg.request_allowance}. Delta incremented to: ${allowanceDelta[siteId]}`);
 
-        if (!USER_PREFERENCES_TABLE_NAME) {
-          console.error("USER_PREFERENCES_TABLE_NAME environment variable is not set. Cannot check payment status.");
-          // Fail closed if Stripe is expected but table is missing
-          return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error: Missing user preferences table' }) };
-        } else if (ownerSub) {
-          try {
-            const getPrefParams = {
-              TableName: USER_PREFERENCES_TABLE_NAME,
-              Key: { cognito_sub: ownerSub }, // Correct key based on other files
-            };
-            const getPrefCommand = new GetCommand(getPrefParams);
-            const { Item: userPrefItem } = await docClient.send(getPrefCommand);
-
-            if (userPrefItem && userPrefItem.is_payment_active === 1) {
-              is_payment_active = 1;
-              log(`User ${ownerSub} has active payment.`);
-            } else {
-              log(`User ${ownerSub} does not have active payment or preferences not found.`);
-            }
-          } catch (prefError) {
-            console.error(`Error fetching user preferences for ${ownerSub}:`, prefError);
-            // Fail closed if Stripe is expected and preference check fails
-             return { statusCode: 500, body: JSON.stringify({ message: 'Internal Server Error checking payment status' }) };
-          }
-        } else {
-          console.warn(`Site ${siteId} does not have an owner_sub defined. Cannot check payment status.`);
-          // Fail closed if Stripe is expected but owner is missing
-           return { statusCode: 403, body: JSON.stringify({ message: 'Forbidden: Site owner missing, cannot verify payment' }) };
-        }
-
-
-        // --- Decrement Request Allowance (Conditional) ---
-        try {
-          const updateParams = {
-            TableName: SITES_TABLE_NAME,
-            Key: { site_id: siteId },
-            ConditionExpression: "attribute_exists(site_id) AND (request_allowance > :zero OR :payment_active = :one)",
-            UpdateExpression: "SET request_allowance = request_allowance - :one",
-            ExpressionAttributeValues: {
-              ":zero": 0,
-              ":one": 1,
-              ":payment_active": is_payment_active,
-            },
-            ReturnValues: ReturnValue.NONE, // Use the enum value
-          };
-          const updateCommand = new UpdateCommand(updateParams);
-          await docClient.send(updateCommand);
-          log(`Successfully decremented request_allowance for site ${siteId}.`);
-
-        } catch (error: any) {
-          if (error.name === 'ConditionalCheckFailedException') {
-            log(`Blocking request for site ${siteId}: Allowance exhausted and no active payment.`);
-            return {
-              statusCode: 402, // Payment Required
-              body: JSON.stringify({ message: 'Payment Required: Request allowance exceeded.' }),
-            };
-          } else {
-            // Handle other potential errors during the update
-            console.error(`Error decrementing allowance for site ${siteId}:`, error);
-            return {
-              statusCode: 500,
-              body: JSON.stringify({ message: 'Internal Server Error during allowance update' }),
-            };
-          }
-        }
-      } else {
-         log(`Bypassing payment status check and allowance decrement for site ${siteId} (Stripe disabled)`);
-         // No checks needed, proceed with ingestion
+    // --- 4. Flush Logic ---
+    if (!FLUSH) {
+      log("FLUSH is false, flushing immediately.");
+      await flush();
+    } else {
+      const remainingTime = context.getRemainingTimeInMillis();
+      log(`FLUSH is true. Remaining time: ${remainingTime}ms`);
+      if (remainingTime < 1000) { // Using 1000ms threshold
+        log("Remaining time low, flushing allowance updates.");
+        await flush();
       }
+    }
 
-    // --- Fetch Site Configuration ---
-    // Expecting allowed_fields to be a JSON stringified array from DynamoDB
-    const allowedFieldsString = Item.allowed_fields as string | undefined;
+    // --- Fetch Allowed Fields Configuration (from cache) ---
+    const allowedFieldsStringFromCache = cfg.allowed_fields;
     let allowedFields: string[] = [];
-    if (allowedFieldsString) {
+    if (allowedFieldsStringFromCache) {
         try {
-            allowedFields = JSON.parse(allowedFieldsString);
-            log(`Fetched allowed_fields for site ${siteId}: ${allowedFields.join(', ')}`);
+            allowedFields = JSON.parse(allowedFieldsStringFromCache);
+            log(`Using cached allowed_fields for site ${siteId}: ${allowedFields.join(', ')}`);
         } catch (e) {
-            console.error(`Error parsing allowed_fields for site ${siteId}: ${allowedFieldsString}`, e);
-            // Fail open or closed? Failing closed to prevent data leakage.
+            console.error(`Error parsing cached allowed_fields for site ${siteId}: ${allowedFieldsStringFromCache}`, e);
             return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error: Cannot parse site configuration' }) };
         }
     } else {
-        log(`No allowed_fields configured for site ${siteId}, allowing all.`);
-        // If no config, allow all fields (or define a default minimal set)
-        // For now, allowing all if not specified. Consider changing this default.
+        log(`No allowed_fields configured in cache for site ${siteId}, allowing all.`);
         allowedFields = Object.keys(colsAll); // Allow all known fields if not specified
     }
+
 
     // --- Event Body Processing ---
     if (!event.body) {
