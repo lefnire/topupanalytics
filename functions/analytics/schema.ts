@@ -1,44 +1,92 @@
-// Common schema for both initial events and regular events
-interface SchemaField {
-    name: string;
-    type: string;
-    description?: string;
-    compliant: boolean;
+/*
+Here’s a **bold-but-defensible** three-tier split plus an updated schema that replaces the old `compliant: boolean` with a clearer risk flag:
+
+### Why each tier shakes out this way
+
+| Tier | Core idea | Typical legal hook |
+|------|-----------|--------------------|
+| **yes** | Either _pure content_ (page path, UTM) or coarse context that can’t single out a person even when combined (device class, country). No identifier is stored on the user’s device, so ePrivacy “cookie” rules don’t bite. | GDPR **Recital 26** anonymisation; ePrivacy Art. 5 only governs storage/access in the terminal equipment. |
+| **maybe** | Adds granularity that _could_ single somebody out (city, screen size, full UA strings) **or** accepts arbitrary props. This is still widely treated as “legitimate interest analytics” → privacy policy + opt-out. | GDPR **Art. 6(1)(f)** balancing test; CNIL & EDPB guidance on audience-measurement cookies. |
+| **no** | Cross-session IDs or high-entropy fingerprint bits (device model/OEM) create a persistent online identifier → prior consent required. | GDPR **Art. 4(1)** definition of “personal data”; ePrivacy Art. 5 consent for non-essential identifiers. |
+
+---
+
+### Fingerprinting & cross-session uniques without consent?
+
+* **Daily-rotating, salted hash** of `(truncated IP + UA)` à la Plausible _can_ stay in “maybe” if you:
+  1. Drop the salt every 24 h (breaks re-identification).
+  2. Truncate IP to /24 for IPv4 or /48 for IPv6 before hashing.
+  3. Never export the raw hash; use it only for server-side unique-visit math.
+
+* **Session continuity**: use `sessionStorage` or in-memory var → nothing persists after tab close, so it remains tier 1.
+
+* **Custom properties**: whitelist keys and run a regex to nuke emails, phone numbers, UUID-looking strings. Anything user-provided is a liability.
+
+---
+
+### Implementation tips
+
+1. **Config switch** – expose a single `complianceLevel: "basic" | "enhanced" | "full"` option in your installer.
+2. **User-facing doc string** – auto-generate a snippet for the client’s privacy policy when they pick level 2, listing the concrete fields.
+3. **Banner helper** – for level 3 return a ready-made CMP JSON so devs can drop it into Cookiebot / Klaro.
+4. **Geo accuracy** – stick to `country`+`region`; `city` bumps the risk score mainly because of UK ICO & German DSK opinions.
+5. **Referer hygiene** – strip querystring & fragment (`new URL(r).origin + URL.pathname`) before storing; you dodge inadvertent PII in links.
+
+Run with this split and you’ll match (or overshoot) Plausible’s legal posture while still offering richer, opt-in metrics when your customers want them.
+
+ */
+
+// “yes”   = no banner, no privacy policy needed
+// “maybe” = publish a privacy policy + opt-out, banner still not required
+// “no”    = full cookie / consent banner needed (GDPR Art. 6(1)(a), ePrivacy Art. 5)
+type Safe = "yes" | "maybe" | "no";
+
+export interface SchemaField {
+  name: string;
+  type: string;
+  description: string;
+  safe: Safe;
 }
 
+/* ────────────────── ALWAYS-SAFE CORE (no banner, no policy) ────────────────── */
 export const commonSchema: SchemaField[] = [
-  {name: "event", type: "string", description: "Event key. 'page_view' for Page Views, whatever you want for anything else", compliant: true},
-  {name: "pathname", type: "string", description: "Pathname of the page visited, from client-side location.pathname", compliant: true},
-  {name: "session_id", type: "string", description: "ID unique to the user's session, generated client-side. Use sessionStorage, or an in-memory variable for SPAs. For compliant mode, only track events within a single session, not across sessions.", compliant: true},
-  {name: "timestamp", type: "timestamp", description: "Timestamp when the event was received by the server", compliant: true},
-  {name: "properties", type: "map<string,string>", description: "Custom key-value properties sent with the event from the client", compliant: true},
-]
+  { name: "event",           type: "string",             description: "Event key (e.g. 'page_view').",                         safe: "yes" },
+  { name: "pathname",        type: "string",             description: "location.pathname.",                                   safe: "yes" },
+  { name: "session_id",      type: "string",             description: "Ephemeral ID stored in sessionStorage or memory only.",safe: "yes" },
+  { name: "timestamp",       type: "timestamp",          description: "Server-receive timestamp (ISO).",                      safe: "yes" },
+  { name: "properties",      type: "map<string,string>", description: "Arbitrary event props (MUST exclude PII).",            safe: "maybe" },
+];
 
-// Additional fields that are only needed for initial events
-export const initialOnlySchema: SchemaField[] = [ // Export this schema
-  // single-session tracking in compliant-mode; cross-session otherwise
-  {name: "distinct_id", type: "string", description: "ID unique to the user, generated client-side (used for cross-session tracking if not compliant)", compliant: false},
-  {name: "city", type: "string", description: "User's city, derived from CloudFront headers (cloudfront-viewer-city)", compliant: false},
-  {name: "region", type: "string", description: "User's region/state name or code, derived from CloudFront headers (cloudfront-viewer-country-region-name/code)", compliant: true},
-  {name: "country", type: "string", description: "User's country name, derived from CloudFront headers (cloudfront-viewer-country-name)", compliant: true},
-  {name: "timezone", type: "string", description: "User's timezone, derived from CloudFront headers (cloudfront-viewer-time-zone)", compliant: false},
-  {name: "device", type: "string", description: "Device type (e.g., mobile, tablet, desktop) or vendor/model, parsed from User-Agent header", compliant: true},
-  {name: "browser", type: "string", description: "Browser name, parsed from User-Agent header", compliant: true},
-  {name: "browser_version", type: "string", description: "Browser version, parsed from User-Agent header", compliant: false},
-  {name: "os", type: "string", description: "Operating system name, parsed from User-Agent header", compliant: true},
-  {name: "os_version", type: "string", description: "Operating system version, parsed from User-Agent header", compliant: false},
-  {name: "model", type: "string", description: "Device model, parsed from User-Agent header", compliant: false},
-  {name: "manufacturer", type: "string", description: "Device manufacturer/vendor, parsed from User-Agent header", compliant: false},
-  {name: "referer", type: "string", description: "Referring URL, captured client-side or from HTTP header. '$direct' if same-origin or no referer.", compliant: true},
-  {name: "referer_domain", type: "string", description: "Domain of the referring URL, derived from referer. '$direct' if same-origin or no referer.", compliant: true},
-  {name: "screen_height", type: "string", description: "Screen height in pixels, from client-side window.screen.height", compliant: true},
-  {name: "screen_width", type: "string", description: "Screen width in pixels, from client-side window.screen.width", compliant: true},
-  {name: "utm_source", type: "string", description: "UTM source parameter from the URL, captured client-side", compliant: true},
-  {name: "utm_campaign", type: "string", description: "UTM campaign parameter from the URL, captured client-side", compliant: true},
-  {name: "utm_medium", type: "string", description: "UTM medium parameter from the URL, captured client-side", compliant: true},
-  {name: "utm_content", type: "string", description: "UTM content parameter from the URL, captured client-side", compliant: true},
-  {name: "utm_term", type: "string", description: "UTM term parameter from the URL, captured client-side", compliant: true},
-]
+/* ────────────────── FIELDS SENT ONLY WITH FIRST EVENT IN A VISIT ───────────── */
+export const initialOnlySchema: SchemaField[] = [
+  /* HIGH-RISK  → banner a must */
+  { name: "distinct_id",     type: "string", description: "Cross-session user ID.",                        safe: "no" },
+  { name: "model",           type: "string", description: "Device model.",                                 safe: "no" },
+  { name: "manufacturer",    type: "string", description: "Device OEM.",                                   safe: "no" },
+
+  /* MEDIUM-RISK → publish a privacy policy & opt-out switch */
+  { name: "city",            type: "string", description: "Viewer city (≈25 k pop. granularity).",         safe: "maybe" },
+  { name: "timezone",        type: "string", description: "IANA TZ (e.g. America/Denver).",               safe: "maybe" },
+  { name: "browser_version", type: "string", description: "Full browser version string.",                 safe: "maybe" },
+  { name: "os_version",      type: "string", description: "Full OS version.",                             safe: "maybe" },
+  { name: "screen_height",   type: "string", description: "window.screen.height.",                        safe: "maybe" },
+  { name: "screen_width",    type: "string", description: "window.screen.width.",                         safe: "maybe" },
+
+  /* LOW-RISK → still banner-free */
+  { name: "region",          type: "string", description: "State/region code.",                           safe: "yes" },
+  { name: "country",         type: "string", description: "ISO-3166 country.",                            safe: "yes" },
+  { name: "device",          type: "string", description: "Device class (mobile / desktop / tablet).",    safe: "yes" },
+  { name: "browser",         type: "string", description: "Browser family (Chrome, Safari …).",           safe: "yes" },
+  { name: "os",              type: "string", description: "OS family (Windows, iOS …).",                  safe: "yes" },
+  { name: "referer",         type: "string", description: "Full Referer (scrub querystring!).",           safe: "yes" },
+  { name: "referer_domain",  type: "string", description: "eTLD+1 of referer.",                           safe: "yes" },
+  { name: "utm_source",      type: "string", description: "UTM source.",                                  safe: "yes" },
+  { name: "utm_campaign",    type: "string", description: "UTM campaign.",                                safe: "yes" },
+  { name: "utm_medium",      type: "string", description: "UTM medium.",                                  safe: "yes" },
+  { name: "utm_content",     type: "string", description: "UTM content.",                                 safe: "yes" },
+  { name: "utm_term",        type: "string", description: "UTM term.",                                    safe: "yes" },
+];
+
 
 // Complete schema for initial events (includes all fields)
 export const initialEventsSchema: SchemaField[] = [...commonSchema, ...initialOnlySchema] // Export this schema
