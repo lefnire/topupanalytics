@@ -1,25 +1,27 @@
+@import "tailwindcss";
 
-@import "tw-animate-css";
+/*@import "tw-animate-css";*/ 
 
 @custom-variant dark (&:is(.dark *));
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Remove these as the import should handle them via the plugin */
+/* @tailwind base; */
+/* @tailwind components; */
+/* @tailwind utilities; */
 
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif,
     "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
 }
 
-html,
+/*html,
 body {
   @apply bg-white dark:bg-gray-950;
 
   @media (prefers-color-scheme: dark) {
     color-scheme: dark;
   }
-}
+}*/
 
 /* Custom Scrollbar Styles */
 ::-webkit-scrollbar {
