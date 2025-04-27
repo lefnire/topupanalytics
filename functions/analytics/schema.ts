@@ -2,41 +2,42 @@
 interface SchemaField {
     name: string;
     type: string;
+    description?: string;
     compliant: boolean;
 }
 
 export const commonSchema: SchemaField[] = [
-  {name: "event", type: "string", compliant: true},
-  {name: "pathname", type: "string", compliant: true},
-  {name: "session_id", type: "string", compliant: true},
-  {name: "timestamp", type: "timestamp", compliant: true}, // Assuming event has its own timestamp
-  {name: "properties", type: "map<string,string>", compliant: true}, // Example for custom properties
+  {name: "event", type: "string", description: "Event key. 'page_view' for Page Views, whatever you want for anything else", compliant: true},
+  {name: "pathname", type: "string", description: "Pathname of the page visited, from client-side location.pathname", compliant: true},
+  {name: "session_id", type: "string", description: "ID unique to the user's session, generated client-side. Use sessionStorage, or an in-memory variable for SPAs. For compliant mode, only track events within a single session, not across sessions.", compliant: true},
+  {name: "timestamp", type: "timestamp", description: "Timestamp when the event was received by the server", compliant: true},
+  {name: "properties", type: "map<string,string>", description: "Custom key-value properties sent with the event from the client", compliant: true},
 ]
 
 // Additional fields that are only needed for initial events
 export const initialOnlySchema: SchemaField[] = [ // Export this schema
   // single-session tracking in compliant-mode; cross-session otherwise
-  {name: "distinct_id", type: "string", compliant: false},
-  {name: "city", type: "string", compliant: false},
-  {name: "region", type: "string", compliant: true},
-  {name: "country", type: "string", compliant: true},
-  {name: "timezone", type: "string", compliant: false},
-  {name: "device", type: "string", compliant: true},
-  {name: "browser", type: "string", compliant: true},
-  {name: "browser_version", type: "string", compliant: false},
-  {name: "os", type: "string", compliant: true},
-  {name: "os_version", type: "string", compliant: false},
-  {name: "model", type: "string", compliant: false},
-  {name: "manufacturer", type: "string", compliant: false},
-  {name: "referer", type: "string", compliant: true},
-  {name: "referer_domain", type: "string", compliant: true},
-  {name: "screen_height", type: "string", compliant: true},
-  {name: "screen_width", type: "string", compliant: true},
-  {name: "utm_source", type: "string", compliant: true},
-  {name: "utm_campaign", type: "string", compliant: true},
-  {name: "utm_medium", type: "string", compliant: true},
-  {name: "utm_content", type: "string", compliant: true},
-  {name: "utm_term", type: "string", compliant: true},
+  {name: "distinct_id", type: "string", description: "ID unique to the user, generated client-side (used for cross-session tracking if not compliant)", compliant: false},
+  {name: "city", type: "string", description: "User's city, derived from CloudFront headers (cloudfront-viewer-city)", compliant: false},
+  {name: "region", type: "string", description: "User's region/state name or code, derived from CloudFront headers (cloudfront-viewer-country-region-name/code)", compliant: true},
+  {name: "country", type: "string", description: "User's country name, derived from CloudFront headers (cloudfront-viewer-country-name)", compliant: true},
+  {name: "timezone", type: "string", description: "User's timezone, derived from CloudFront headers (cloudfront-viewer-time-zone)", compliant: false},
+  {name: "device", type: "string", description: "Device type (e.g., mobile, tablet, desktop) or vendor/model, parsed from User-Agent header", compliant: true},
+  {name: "browser", type: "string", description: "Browser name, parsed from User-Agent header", compliant: true},
+  {name: "browser_version", type: "string", description: "Browser version, parsed from User-Agent header", compliant: false},
+  {name: "os", type: "string", description: "Operating system name, parsed from User-Agent header", compliant: true},
+  {name: "os_version", type: "string", description: "Operating system version, parsed from User-Agent header", compliant: false},
+  {name: "model", type: "string", description: "Device model, parsed from User-Agent header", compliant: false},
+  {name: "manufacturer", type: "string", description: "Device manufacturer/vendor, parsed from User-Agent header", compliant: false},
+  {name: "referer", type: "string", description: "Referring URL, captured client-side or from HTTP header. '$direct' if same-origin or no referer.", compliant: true},
+  {name: "referer_domain", type: "string", description: "Domain of the referring URL, derived from referer. '$direct' if same-origin or no referer.", compliant: true},
+  {name: "screen_height", type: "string", description: "Screen height in pixels, from client-side window.screen.height", compliant: true},
+  {name: "screen_width", type: "string", description: "Screen width in pixels, from client-side window.screen.width", compliant: true},
+  {name: "utm_source", type: "string", description: "UTM source parameter from the URL, captured client-side", compliant: true},
+  {name: "utm_campaign", type: "string", description: "UTM campaign parameter from the URL, captured client-side", compliant: true},
+  {name: "utm_medium", type: "string", description: "UTM medium parameter from the URL, captured client-side", compliant: true},
+  {name: "utm_content", type: "string", description: "UTM content parameter from the URL, captured client-side", compliant: true},
+  {name: "utm_term", type: "string", description: "UTM term parameter from the URL, captured client-side", compliant: true},
 ]
 
 // Complete schema for initial events (includes all fields)
