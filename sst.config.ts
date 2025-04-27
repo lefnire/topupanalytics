@@ -153,6 +153,8 @@ export default $config({
     // === Glue Data Catalog ===
     const analyticsDatabase = new aws.glue.CatalogDatabase(`${baseName}-db`, {
       name: `${baseName}_analytics_db`, // Glue names often use underscores
+      // Add a default location for managed tables like Iceberg
+      locationUri: $interpolate`s3://${eventsBucket.name}/_glue_database/`,
     });
 
     // Import schemas for both tables
@@ -242,7 +244,6 @@ export default $config({
         { actions: [
             "glue:GetTable",      // Needed to read source schema
             "glue:CreateTable",   // Needed to create temp table and Iceberg table
-            "glue:DeleteTable",   // Needed to delete temp table
             "glue:GetDatabase"
           ],
           resources: [ // Specific Glue actions
@@ -251,7 +252,7 @@ export default $config({
             eventsTable.arn,        // Allow GetTable on source
             $interpolate`arn:aws:glue:${region}:${accountId}:catalog`,
             $interpolate`arn:aws:glue:${region}:${accountId}:database/${analyticsDatabase.name}`,
-            $interpolate`arn:aws:glue:${region}:${accountId}:table/${analyticsDatabase.name}/*`, // Allow Create/Delete/Get on any table in the DB
+            $interpolate`arn:aws:glue:${region}:${accountId}:table/${analyticsDatabase.name}/*`, // Allow Create/Get on any table in the DB
           ]
         },
         { actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"], resources: [ // S3 permissions for Athena/Iceberg
@@ -263,7 +264,7 @@ export default $config({
         },
       ],
       nodejs: {
-        install: ["@aws-sdk/client-athena", "@aws-sdk/client-glue"], // Add Glue client
+        install: ["@aws-sdk/client-athena", "@aws-sdk/client-glue"], // Glue client still needed for GetTable
       }
     });
 
