@@ -214,47 +214,61 @@ export default $config({
 
     // === Iceberg Table Initialization Function ===
     const icebergInitFn = new sst.aws.Function("IcebergInitFn", {
-      handler: "functions/infra/iceberg-init.handler", // New handler path
-      timeout: "5 minutes", // Might take time
+      handler: "functions/iceberg-init.handler", // Correct handler path
+      timeout: "10 minutes", // Keep increased timeout
       memory: "256 MB",
       architecture: "arm64",
       link: [
         analyticsDatabase,
-        initialEventsTable,
-        eventsTable,
+        initialEventsTable, // Link source table
+        eventsTable,       // Link source table
         eventsBucket,
         queryResultsBucket
       ],
-      environment: { // Only pass values not available via linked resources
-        INITIAL_EVENTS_ICEBERG_TABLE_NAME: "initial_events_iceberg", // String constant
-        EVENTS_ICEBERG_TABLE_NAME: "events_iceberg",           // String constant
-        ATHENA_WORKGROUP: "primary", // String constant
+      environment: { // Pass values needed by the handler
+        // Values from linked resources:
+        GLUE_DATABASE_NAME: analyticsDatabase.name,
+        SOURCE_INITIAL_EVENTS_TABLE_NAME: initialEventsTable.name,
+        SOURCE_EVENTS_TABLE_NAME: eventsTable.name,
+        EVENTS_BUCKET_NAME: eventsBucket.name,
+        QUERY_RESULTS_BUCKET_NAME: queryResultsBucket.name,
+        // Values passed via invocation are handled by the Invocation resource below
+        // INITIAL_EVENTS_ICEBERG_TABLE_NAME: "initial_events_iceberg",
+        // EVENTS_ICEBERG_TABLE_NAME: "events_iceberg",
+        // ATHENA_WORKGROUP: "primary",
       },
       permissions: [
         { actions: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:GetWorkGroup"], resources: ["*"] }, // Specific Athena actions
-        { actions: ["glue:CreateTable", "glue:GetTable", "glue:GetDatabase"], resources: [ // Specific Glue actions
-            analyticsDatabase.arn, // Database ARN from link
-            initialEventsTable.arn, // Source Table ARN from link
-            eventsTable.arn,        // Source Table ARN from link
-            $interpolate`arn:aws:glue:${region}:${accountId}:catalog`, // Catalog access often needed
-            $interpolate`arn:aws:glue:${region}:${accountId}:table/${analyticsDatabase.name}/*`, // Access to tables within the DB
+        { actions: [
+            "glue:GetTable",      // Needed to read source schema
+            "glue:CreateTable",   // Needed to create temp table and Iceberg table
+            "glue:DeleteTable",   // Needed to delete temp table
+            "glue:GetDatabase"
+          ],
+          resources: [ // Specific Glue actions
+            analyticsDatabase.arn,
+            initialEventsTable.arn, // Allow GetTable on source
+            eventsTable.arn,        // Allow GetTable on source
+            $interpolate`arn:aws:glue:${region}:${accountId}:catalog`,
+            $interpolate`arn:aws:glue:${region}:${accountId}:database/${analyticsDatabase.name}`,
+            $interpolate`arn:aws:glue:${region}:${accountId}:table/${analyticsDatabase.name}/*`, // Allow Create/Delete/Get on any table in the DB
           ]
         },
         { actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"], resources: [ // S3 permissions for Athena/Iceberg
             eventsBucket.arn,
             $interpolate`${eventsBucket.arn}/*`,
-            queryResultsBucket.arn, // Athena needs access to results bucket too
+            queryResultsBucket.arn,
             $interpolate`${queryResultsBucket.arn}/*`
           ]
         },
       ],
       nodejs: {
-        install: ["@aws-sdk/client-athena"],
+        install: ["@aws-sdk/client-athena", "@aws-sdk/client-glue"], // Add Glue client
       }
     });
 
     // === Invoke Iceberg Initialization Function ===
-    // Only pass data not available via linked resources as input
+    // Only pass data not available via linked resources/env vars as input
     const icebergInitInput ={
         INITIAL_EVENTS_ICEBERG_TABLE_NAME: "initial_events_iceberg",
         EVENTS_ICEBERG_TABLE_NAME: "events_iceberg",
