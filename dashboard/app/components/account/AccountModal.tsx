@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { Button } from '../ui/button'; // Corrected path relative to components/account/
 import { toast } from 'sonner';
+import { DialogTitle, DialogDescription } from '../ui/dialog'; // Added Dialog imports
+import { VisuallyHidden } from '@radix-ui/react-visually-hidden'; // Added VisuallyHidden import
 // Import useApiClient if needed for future direct API calls from modal
 // import { useApiClient } from '../../lib/api';
 
@@ -134,7 +136,10 @@ export function AccountModal({
 
   return (
     <div className="p-1 space-y-4"> {/* Adjust padding based on modal */}
-      <h2 className="text-lg font-semibold">Account</h2>
+      <VisuallyHidden>
+        <DialogTitle>Account Details</DialogTitle>
+        <DialogDescription>View your account email and manage billing settings.</DialogDescription>
+      </VisuallyHidden>
       <div>
         <p className="text-sm font-medium text-muted-foreground">Email</p>
         <p className="text-sm">{userEmail || 'N/A'}</p>

@@ -1,6 +1,8 @@
 import React from 'react';
 import { CreateSiteForm } from '../../routes/sites/components/CreateSiteForm'; // Adjust path as needed
 import { type Site } from '../../lib/api'; // Import Site type if needed for callback
+import { DialogTitle, DialogDescription } from '../../components/ui/dialog'; // Added Dialog imports
+import { VisuallyHidden } from '@radix-ui/react-visually-hidden'; // Added VisuallyHidden import
 
 interface AddSiteModalProps {
   onClose?: () => void; // Optional: For closing the modal
@@ -22,10 +24,10 @@ export function AddSiteModal({ onClose, onSiteCreated }: AddSiteModalProps) {
 
   return (
     <div className="p-1"> {/* Adjust padding based on modal implementation */}
-      <h2 className="text-lg font-semibold mb-4">Create New Site</h2>
-      <p className="text-sm text-muted-foreground mb-4">
-        Register a new website to start tracking analytics.
-      </p>
+      <VisuallyHidden>
+        <DialogTitle>Add New Site</DialogTitle>
+        <DialogDescription>Register a new website to start tracking analytics.</DialogDescription>
+      </VisuallyHidden>
       {/* Pass the success handler to the form */}
       <CreateSiteForm onSuccess={handleSuccess} />
       {/* Optional: Add Close button if modal doesn't provide one */}

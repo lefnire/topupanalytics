@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from 'react'; // Added useState
-// Removed unused Select imports
+import React, { useState, useMemo, useEffect } from 'react'; // Added useEffect
+import { Avatar, AvatarImage, AvatarFallback } from '~/components/ui/avatar'; // Use path alias
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Calendar } from '../ui/calendar';
 import { Button } from '../ui/button';
@@ -66,8 +66,24 @@ export const DashboardHeader = () => {
   // Derive isLoading state locally based on status
   const isLoading = status === 'initializing' || status === 'loading_data' || status === 'aggregating';
 
-  // Derive selectedSite for display purposes if needed (e.g., avatar in trigger)
+  // Select the first site if none is selected and sites exist
+  useEffect(() => {
+    if (!selectedSiteId && sites.length > 0) {
+      setSelectedSiteId(sites[0].site_id);
+    }
+  }, [sites, selectedSiteId, setSelectedSiteId]);
+
+  // Derive selectedSite for display purposes
   const selectedSite = useMemo(() => sites.find(site => site.site_id === selectedSiteId), [sites, selectedSiteId]);
+
+  // Determine the text for the dropdown trigger
+  const dropdownTriggerText = useMemo(() => {
+    if (isLoading) return "Admin"; // Show loading state
+    if (selectedSite) return selectedSite.name;
+    if (sites.length > 0 && !selectedSiteId) return sites[0].name; // Fallback to first site name if selection is pending
+    return "Admin"; // Default if no sites or still initializing without sites
+  }, [selectedSite, sites, selectedSiteId, isLoading]);
+
 
   const handleOpenSiteSettings = (siteId: string) => {
     setSelectedSiteIdForModal(siteId);
@@ -76,53 +92,77 @@ export const DashboardHeader = () => {
 
   return (
     <>
-      <header className="mb-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-        {/* Left Side: Current Site Name and Segments */}
-        <div className="flex flex-col items-start gap-2">
-           {/* Display Current Site Name */}
-           <div className="flex items-center gap-2">
-               <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold ${selectedSite ? 'bg-blue-500' : 'bg-gray-400'}`}>
-                   {selectedSite?.name?.charAt(0).toUpperCase() || '?'}
-               </div>
-               <h1 className="text-lg font-semibold">
-                   {selectedSite ? selectedSite.name : (sites.length > 0 ? 'Select a site' : 'No sites yet')}
-               </h1>
-           </div>
-           {/* Segment Display Area */}
-           {segments.length > 0 && (
-               <div className="flex flex-wrap items-center gap-2 mt-1">
-                   {segments.map((segment, index) => (
-                       <span key={index} className="flex items-center gap-1 bg-blue-100 text-blue-800 text-xs font-medium px-2 py-0.5 rounded-full">
-                           {segment.label}
-                           <button
-                               onClick={() => removeSegment(segment)}
-                               className="ml-1 text-blue-600 hover:text-blue-800 focus:outline-none"
-                               aria-label={`Remove filter: ${segment.label}`}
-                               title={`Remove filter: ${segment.label}`}
-                           >
-                               &times; {/* Cross icon */}
-                           </button>
-                       </span>
-                   ))}
-                   {segments.length > 1 && (
-                       <button
-                           onClick={clearSegments}
-                           className="text-xs text-gray-500 hover:text-gray-700 underline focus:outline-none ml-1"
-                           title="Clear all filters"
-                       >
-                           Clear all
-                       </button>
-                   )}
-               </div>
-           )}
+      <header className="mb-6 flex items-center justify-between gap-4">
+        {/* Left Side: User/Site Dropdown */}
+        <div className="flex items-center gap-2">
+             {/* User Dropdown Menu */}
+             <DropdownMenu>
+               <DropdownMenuTrigger asChild>
+                 {/* Use Avatar and dynamic text */}
+                 <Button variant="ghost" className="flex items-center gap-2 px-2 py-1 h-auto rounded-md">
+                   <Avatar className="h-6 w-6">
+                     {/* <AvatarImage src={user?.avatarUrl} alt={user?.name} /> */}
+                     <AvatarFallback className="text-xs">A</AvatarFallback> {/* Static "A" for now */}
+                   </Avatar>
+                   <span className="text-sm font-medium">{dropdownTriggerText}</span>
+                 </Button>
+               </DropdownMenuTrigger>
+               <DropdownMenuContent align="start" className="w-56"> {/* Align start for left positioning */}
+                 <DropdownMenuLabel>Sites</DropdownMenuLabel>
+                 {/* Pass only required callbacks, assuming component handles data internally */}
+                 <SiteSelectorDropdownContent
+                   onSiteSelect={setSelectedSiteId}
+                   onSettingsClick={handleOpenSiteSettings}
+                 />
+                  <DropdownMenuItem onSelect={() => setIsAddSiteModalOpen(true)}>
+                   <PlusCircle className="mr-2 h-4 w-4" />
+                   <span>Add New Site</span>
+                 </DropdownMenuItem>
+                 <DropdownMenuSeparator />
+                 <DropdownMenuItem onSelect={() => setIsAccountModalOpen(true)}>
+                   <User className="mr-2 h-4 w-4" />
+                   <span>Account</span>
+                   {/*{user?.username && <span className="ml-auto text-xs text-muted-foreground">{user.username}</span>}*/}
+                 </DropdownMenuItem>
+                 <DropdownMenuItem onSelect={logout}>
+                   <LogOut className="mr-2 h-4 w-4" />
+                   <span>Logout</span>
+                 </DropdownMenuItem>
+               </DropdownMenuContent>
+             </DropdownMenu>
         </div>
 
-        {/* Right Side: Date Range Picker & User Dropdown */}
+        {/* Right Side: Segments, Date Range Picker & Refresh */}
         <div className="flex items-center gap-4 text-sm text-gray-600 flex-shrink-0">
-            {/* Refresh Indicator */}
-            {isRefreshing && <span className="text-xs text-gray-400 animate-pulse">(syncing...)</span>}
+             {/* Segment Display Area */}
+             {segments.length > 0 && (
+                 <div className="flex flex-wrap items-center gap-2">
+                     {segments.map((segment, index) => (
+                         <span key={index} className="flex items-center gap-1 bg-blue-100 text-blue-800 text-xs font-medium px-2 py-0.5 rounded-full">
+                             {segment.label}
+                             <button
+                                 onClick={() => removeSegment(segment)}
+                                 className="ml-1 text-blue-600 hover:text-blue-800 focus:outline-none"
+                                 aria-label={`Remove filter: ${segment.label}`}
+                                 title={`Remove filter: ${segment.label}`}
+                             >
+                                 &times; {/* Cross icon */}
+                             </button>
+                         </span>
+                     ))}
+                     {segments.length > 1 && (
+                         <button
+                             onClick={clearSegments}
+                             className="text-xs text-gray-500 hover:text-gray-700 underline focus:outline-none ml-1"
+                             title="Clear all filters"
+                         >
+                             Clear all
+                         </button>
+                     )}
+                 </div>
+             )}
 
-            {/* Date Range Picker */}
+             {/* Date Range Picker */}
             <Popover>
               <PopoverTrigger asChild>
                 <Button
@@ -162,38 +202,8 @@ export const DashboardHeader = () => {
               </PopoverContent>
             </Popover>
 
-            {/* User Dropdown Menu */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="rounded-full">
-                  {/* Use a generic user icon or potentially user avatar if available */}
-                  <User className="h-5 w-5" />
-                  <span className="sr-only">Open user menu</span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuLabel>Sites</DropdownMenuLabel>
-                {/* Pass only required callbacks, assuming component handles data internally */}
-                <SiteSelectorDropdownContent
-                  onSiteSelect={setSelectedSiteId}
-                  onSettingsClick={handleOpenSiteSettings}
-                />
-                 <DropdownMenuItem onSelect={() => setIsAddSiteModalOpen(true)}>
-                  <PlusCircle className="mr-2 h-4 w-4" />
-                  <span>Add New Site</span>
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => setIsAccountModalOpen(true)}>
-                  <User className="mr-2 h-4 w-4" />
-                  <span>Account</span>
-                  {user?.username && <span className="ml-auto text-xs text-muted-foreground">{user.username}</span>}
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={logout}>
-                  <LogOut className="mr-2 h-4 w-4" />
-                  <span>Logout</span>
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+             {/* Refresh Indicator */}
+             {isRefreshing && <span className="text-xs text-gray-400 animate-pulse">(syncing...)</span>}
         </div>
       </header>
 

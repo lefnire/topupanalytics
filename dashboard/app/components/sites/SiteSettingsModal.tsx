@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useApiClient, type Site } from '../../lib/api';
-import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '../../components/ui/card'; // Keep Card for structure for now
+import { Card, CardHeader, CardTitle, CardContent } from '../../components/ui/card'; // Removed CardDescription import as DialogDescription will be used
+import { DialogTitle, DialogDescription } from '../../components/ui/dialog'; // Added Dialog imports
+import { VisuallyHidden } from '@radix-ui/react-visually-hidden'; // Added VisuallyHidden import
 import { toast } from 'sonner';
 import { SiteSettingsForm } from '../../routes/sites/components/SiteSettingsForm'; // Adjust path as needed
 import { EmbedScriptDisplay } from '../../routes/sites/components/EmbedScriptDisplay'; // Adjust path as needed
@@ -68,8 +70,12 @@ export function SiteSettingsModal({ siteId, onClose, onSiteUpdate }: SiteSetting
 
   // Render content suitable for a modal
   return (
-    <div className="space-y-4 p-1"> {/* Remove outer padding if modal provides it */}
-      {/* Optional: Display site name/ID prominently */}
+    <div className="space-y-4 p-1 max-h-[80vh] overflow-y-auto"> {/* Added max-height and overflow */}
+      <VisuallyHidden>
+        <DialogTitle>Site Settings</DialogTitle>
+        <DialogDescription>View and manage settings for the {site.name} site, including configuration and embed script.</DialogDescription>
+      </VisuallyHidden>
+      {/* Display site name/ID prominently */}
        <h2 className="text-lg font-semibold">{site.name} Settings</h2>
        <p className="text-sm text-muted-foreground">Site ID: {site.site_id}</p>
 
