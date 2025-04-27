@@ -111,20 +111,19 @@ export const glueColumns = initialEventsSchema.map(s => ({
   type: s.type
 }))
 
-// Create compliance maps for both schemas
-export const isInitialCompliant = Object.fromEntries(initialEventsSchema.map(s => [s.name, s.compliant]))
-export const isEventsCompliant = Object.fromEntries(eventsSchema.map(s => [s.name, s.compliant]))
-export const isCompliant = isInitialCompliant
+// Create safety maps for both schemas (true if safe is 'yes' or 'maybe')
+export const isInitialSafe = Object.fromEntries(initialEventsSchema.map(s => [s.name, s.safe === 'yes' || s.safe === 'maybe']))
+export const isEventsSafe = Object.fromEntries(eventsSchema.map(s => [s.name, s.safe === 'yes' || s.safe === 'maybe']))
+export const isCompliant = isInitialSafe // Keep isCompliant name for backward compatibility if needed elsewhere, but point to safe logic
 
-// Create column lists for both schemas
-export const initialColsCompliant = initialEventsSchema.filter(s => s.compliant).map(s => s.name)
-export const eventsColsCompliant = eventsSchema.filter(s => s.compliant).map(s => s.name)
+// Create lists of safe columns for both schemas
+export const initialColsSafe = initialEventsSchema.filter(s => s.safe === 'yes' || s.safe === 'maybe').map(s => s.name)
+export const eventsColsSafe = eventsSchema.filter(s => s.safe === 'yes' || s.safe === 'maybe').map(s => s.name)
 export const initialColsAll = initialEventsSchema.map(s => s.name)
 export const eventsColsAll = eventsSchema.map(s => s.name)
 
-// For backward compatibility
-export const colsCompliant = initialColsCompliant
+// For backward compatibility (point old names to new safe lists/maps)
+export const colsCompliant = initialColsSafe
 export const colsAll = initialColsAll
 
 // TODO this will be per-account checkbox when the webapp is setup
-export const ONLY_COMPLIANT = true;

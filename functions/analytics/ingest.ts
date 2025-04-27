@@ -14,9 +14,8 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import {
   colsCompliant,
-  colsAll as colsAll_, 
-  isCompliant, 
-  ONLY_COMPLIANT,
+  colsAll as colsAll_,
+  isCompliant,
   initialColsAll,
   eventsColsAll
 } from './schema'

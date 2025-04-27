@@ -16,7 +16,6 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { subDays, format, parseISO, isValid } from 'date-fns';
 import {
-  ONLY_COMPLIANT,
   initialOnlySchema,
   commonSchema
 } from './schema';
@@ -343,9 +342,9 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     const siteIdFilterSql = `site_id IN (${finalSiteIds.map(id => `'${id.replace(/'/g, "''")}'`).join(', ')})`; // Basic SQL injection prevention for IDs
 
     try {
-        // --- Determine Schemas based on Compliance ---
-        const commonSchemaFields = commonSchema.filter(s => ONLY_COMPLIANT ? s.compliant : true);
-        const initialOnlySchemaFields = initialOnlySchema.filter(s => ONLY_COMPLIANT ? s.compliant : true);
+        // --- Determine Schemas based on Safety Level ---
+        const commonSchemaFields = commonSchema.filter(s => s.safe === 'yes' || s.safe === 'maybe');
+        const initialOnlySchemaFields = initialOnlySchema.filter(s => s.safe === 'yes' || s.safe === 'maybe');
 
         const commonSelectColNames = commonSchemaFields.map(s => s.name);
         const initialOnlySelectColNames = initialOnlySchemaFields.map(s => s.name);
