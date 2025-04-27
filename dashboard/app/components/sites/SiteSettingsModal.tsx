@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { useApiClient, type Site } from '../../lib/api';
-import { Card, CardHeader, CardTitle, CardContent } from '../../components/ui/card'; // Removed CardDescription import as DialogDescription will be used
-import { DialogTitle, DialogDescription } from '../../components/ui/dialog'; // Added Dialog imports
+import { useApiClient, type Site } from '~/lib/api';
+import { Card, CardHeader, CardTitle, CardContent } from '~/components/ui/card'; // Removed CardDescription import as DialogDescription will be used
+import { DialogTitle, DialogDescription } from '~/components/ui/dialog'; // Added Dialog imports
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden'; // Added VisuallyHidden import
 import { toast } from 'sonner';
-import { SiteSettingsForm } from '../../routes/sites/components/SiteSettingsForm'; // Adjust path as needed
-import { EmbedScriptDisplay } from '../../routes/sites/components/EmbedScriptDisplay'; // Adjust path as needed
+import { SiteSettingsForm } from '~/routes/sites/components/SiteSettingsForm'; // Adjust path as needed
+import { EmbedScriptDisplay } from '~/routes/sites/components/EmbedScriptDisplay'; // Adjust path as needed
 
 interface SiteSettingsModalProps {
   siteId: string;

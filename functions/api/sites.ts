@@ -204,21 +204,91 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
       // Construct the full ingest URL
       const ingestUrl = `${routerUrl.replace(/\/$/, '')}/api/event`; // Ensure no double slash
 
-      // Simple script example - enhance as needed
+      // Generate the new embed script
       const scriptContent = `
 (function() {
-  var d = document, s = d.createElement('script');
-  s.src = '${ingestUrl}?sid=${siteId}'; // Use 'sid' query param as decided for ingestFn
-  s.async = true;
-  d.getElementsByTagName('head')[0].appendChild(s);
-  console.log('TopUp Analytics Loaded for site: ${siteId}');
+  if (window.topup) {
+    console.warn('TopUp script already loaded.');
+    return;
+  }
+
+  const siteId = '${siteId}';
+  const ingestUrl = '${ingestUrl}'; // Use the dynamically generated ingest URL
+
+  // Simple session ID management using sessionStorage
+  function getSessionId() {
+    let sid = sessionStorage.getItem('topup_sid');
+    let isNewSession = false;
+    if (!sid) {
+      sid = Date.now() + '-' + Math.random().toString(36).substring(2);
+      sessionStorage.setItem('topup_sid', sid);
+      isNewSession = true;
+    }
+    return { sessionId: sid, isNewSession: isNewSession };
+  }
+
+  // Function to extract basic UTM parameters
+  function getUtmParams() {
+    const params = new URLSearchParams(window.location.search);
+    const utm = {};
+    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'].forEach(key => {
+      if (params.has(key)) {
+        utm[key] = params.get(key);
+      }
+    });
+    return utm;
+  }
+
+  window.topup = {
+    event: function(eventName, payload = {}) {
+      try {
+        const { sessionId, isNewSession } = getSessionId();
+        const data = {
+          site_id: siteId,
+          session_id: sessionId,
+          event: eventName,
+          pathname: window.location.pathname,
+          timestamp: new Date().toISOString(),
+          properties: payload,
+        };
+
+        if (isNewSession) {
+          data.is_initial_event = true;
+          data.referer = document.referrer || null; // Use null if empty
+          data.screen_width = window.screen.width;
+          data.screen_height = window.screen.height;
+          const utmParams = getUtmParams();
+          if (Object.keys(utmParams).length > 0) {
+            data.utm_params = utmParams; // Nest UTM params under a key
+          }
+        }
+
+        // Use keepalive: true for reliability on page unload
+        fetch(ingestUrl + '?site=' + siteId, { // Pass siteId in query param as well for potential routing/filtering
+          method: 'POST',
+          body: JSON.stringify(data),
+          headers: { 'Content-Type': 'application/json' },
+          keepalive: true
+        }).catch(console.error); // Basic error handling
+
+      } catch (error) {
+        console.error('TopUp Error:', error);
+      }
+    }
+  };
+
+  // Track initial pageview automatically
+  window.topup.event('pageview');
+
+  console.log('TopUp Analytics Initialized for site: ' + siteId);
+
 })();
       `;
       // Return as JavaScript content type
       return {
         statusCode: 200,
         headers: { "Content-Type": "application/javascript" },
-        body: scriptContent.trim(),
+        body: scriptContent.trim(), // Trim whitespace
       };
     }
 

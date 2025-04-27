@@ -13,4 +13,5 @@ export default [
   route("login", "routes/login.tsx"),
   route("signup", "routes/signup.tsx"),
   route("confirm-signup", "routes/confirm-signup.tsx"), // For email confirmation codes
+route("test-ingest", "routes/test-ingest.tsx"), // New route for testing ingestion
 ] satisfies RouteConfig;

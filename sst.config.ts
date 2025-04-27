@@ -83,7 +83,7 @@ export default $config({
     // === Linkable Wrappers (using global sst) ===
     // Wrap Kinesis Firehose Delivery Stream
     sst.Linkable.wrap(aws.kinesis.FirehoseDeliveryStream, (stream) => ({
-      properties: { name: stream.name },
+      properties: {name: stream.name},
       include: [
         sst.aws.permission({ // Use global sst.aws.permission
           actions: ["firehose:PutRecord", "firehose:PutRecordBatch"],
@@ -94,7 +94,7 @@ export default $config({
 
     // Wrap Glue Catalog Database
     sst.Linkable.wrap(aws.glue.CatalogDatabase, (db) => ({
-      properties: { name: db.name, arn: db.arn },
+      properties: {name: db.name, arn: db.arn},
       include: [
         sst.aws.permission({ // Use global sst.aws.permission
           actions: ["glue:GetDatabase"],
@@ -105,7 +105,7 @@ export default $config({
 
     // Wrap Glue Catalog Table
     sst.Linkable.wrap(aws.glue.CatalogTable, (table) => ({
-      properties: { name: table.name, arn: table.arn, databaseName: table.databaseName },
+      properties: {name: table.name, arn: table.arn, databaseName: table.databaseName},
       include: [
         sst.aws.permission({ // Use global sst.aws.permission
           actions: ["glue:GetTable", "glue:GetTableVersion", "glue:GetTableVersions", "glue:GetPartition", "glue:GetPartitions"], // Read actions
@@ -129,25 +129,25 @@ export default $config({
 
     // === Common S3 Lifecycle Rule for Intelligent Tiering ===
     const intelligentTieringRule: aws.types.input.s3.BucketLifecycleConfigurationV2Rule[] = [{
-        id: "IntelligentTieringRule",
-        status: "Enabled",
-        filter: {}, // Apply rule to all objects
-        transitions: [{
-            days: 0,
-            storageClass: "INTELLIGENT_TIERING",
-        }],
+      id: "IntelligentTieringRule",
+      status: "Enabled",
+      filter: {}, // Apply rule to all objects
+      transitions: [{
+        days: 0,
+        storageClass: "INTELLIGENT_TIERING",
+      }],
     }];
 
     // Apply lifecycle rule to Events Bucket
     new aws.s3.BucketLifecycleConfigurationV2(`${baseName}-event-data-lifecycle`, {
-        bucket: eventsBucket.name,
-        rules: intelligentTieringRule,
+      bucket: eventsBucket.name,
+      rules: intelligentTieringRule,
     });
 
     // Apply lifecycle rule to Athena Results Bucket
     new aws.s3.BucketLifecycleConfigurationV2(`${baseName}-athena-results-lifecycle`, {
-        bucket: queryResultsBucket.name,
-        rules: intelligentTieringRule,
+      bucket: queryResultsBucket.name,
+      rules: intelligentTieringRule,
     });
 
     // === Glue Data Catalog ===
@@ -158,12 +158,12 @@ export default $config({
     });
 
     // Import schemas for both tables
-    const { initialGlueColumns, eventsGlueColumns } = await import('./functions/analytics/schema');
+    const {initialGlueColumns, eventsGlueColumns} = await import('./functions/analytics/schema');
 
     // Define partition keys once for consistency
     const commonPartitionKeys = [
-      { name: "site_id", type: "string" },
-      { name: "dt", type: "string" },
+      {name: "site_id", type: "string"},
+      {name: "dt", type: "string"},
     ];
 
     // Create table for initial events (contains all session data) - Original Glue Table
@@ -181,7 +181,11 @@ export default $config({
         location: $interpolate`s3://${eventsBucket.name}/initial_events/`,
         inputFormat: "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
         outputFormat: "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
-        serDeInfo: { name: "parquet-serde", serializationLibrary: "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe", parameters: { "serialization.format": "1" } },
+        serDeInfo: {
+          name: "parquet-serde",
+          serializationLibrary: "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+          parameters: {"serialization.format": "1"}
+        },
         columns: initialGlueColumns, compressed: false, storedAsSubDirectories: true,
       },
       partitionKeys: commonPartitionKeys,
@@ -202,7 +206,11 @@ export default $config({
         location: $interpolate`s3://${eventsBucket.name}/events/`,
         inputFormat: "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
         outputFormat: "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
-        serDeInfo: { name: "parquet-serde", serializationLibrary: "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe", parameters: { "serialization.format": "1" } },
+        serDeInfo: {
+          name: "parquet-serde",
+          serializationLibrary: "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+          parameters: {"serialization.format": "1"}
+        },
         columns: eventsGlueColumns, compressed: false, storedAsSubDirectories: true,
       },
       partitionKeys: commonPartitionKeys,
@@ -240,8 +248,12 @@ export default $config({
         // ATHENA_WORKGROUP: "primary",
       },
       permissions: [
-        { actions: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:GetWorkGroup"], resources: ["*"] }, // Specific Athena actions
-        { actions: [
+        {
+          actions: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:GetWorkGroup"],
+          resources: ["*"]
+        }, // Specific Athena actions
+        {
+          actions: [
             "glue:GetTable",      // Needed to read source schema
             "glue:CreateTable",   // Needed to create temp table and Iceberg table
             "glue:GetDatabase"
@@ -255,7 +267,8 @@ export default $config({
             $interpolate`arn:aws:glue:${region}:${accountId}:table/${analyticsDatabase.name}/*`, // Allow Create/Get on any table in the DB
           ]
         },
-        { actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"], resources: [ // S3 permissions for Athena/Iceberg
+        {
+          actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"], resources: [ // S3 permissions for Athena/Iceberg
             eventsBucket.arn,
             $interpolate`${eventsBucket.arn}/*`,
             queryResultsBucket.arn,
@@ -270,19 +283,19 @@ export default $config({
 
     // === Invoke Iceberg Initialization Function ===
     // Only pass data not available via linked resources/env vars as input
-    const icebergInitInput ={
-        INITIAL_EVENTS_ICEBERG_TABLE_NAME: "initial_events_iceberg",
-        EVENTS_ICEBERG_TABLE_NAME: "events_iceberg",
-        ATHENA_WORKGROUP: "primary",
+    const icebergInitInput = {
+      INITIAL_EVENTS_ICEBERG_TABLE_NAME: "initial_events_iceberg",
+      EVENTS_ICEBERG_TABLE_NAME: "events_iceberg",
+      ATHENA_WORKGROUP: "primary",
     };
 
     new aws.lambda.Invocation(`${baseName}-IcebergInitInvocation`, {
         functionName: icebergInitFn.name,
         input: $util.jsonStringify(icebergInitInput),
         triggers: {
-           redeployment: Date.now().toString(),
+          redeployment: Date.now().toString(),
         },
-      }, { dependsOn: [icebergInitFn, initialEventsTable, eventsTable] }
+      }, {dependsOn: [icebergInitFn, initialEventsTable, eventsTable]}
     );
 
     // === IAM Role for Firehose ===
@@ -333,16 +346,20 @@ export default $config({
             {
               type: "AppendDelimiterToRecord",
               parameters: [
-                { parameterName: "Delimiter", parameterValue: "\\n" }, // Note double backslash for newline in string
+                {parameterName: "Delimiter", parameterValue: "\\n"}, // Note double backslash for newline in string
               ],
             },
           ],
         },
-        dynamicPartitioningConfiguration: { enabled: true }, // Phase 3.1: Enable dynamic partitioning
+        dynamicPartitioningConfiguration: {enabled: true}, // Phase 3.1: Enable dynamic partitioning
         dataFormatConversionConfiguration: {
-          enabled: true, inputFormatConfiguration: { deserializer: { openXJsonSerDe: {} } },
-          outputFormatConfiguration: { serializer: { parquetSerDe: { compression: "SNAPPY" } } },
-          schemaConfiguration: { databaseName: analyticsDatabase.name, tableName: eventsTable.name, roleArn: firehoseRole.arn },
+          enabled: true, inputFormatConfiguration: {deserializer: {openXJsonSerDe: {}}},
+          outputFormatConfiguration: {serializer: {parquetSerDe: {compression: "SNAPPY"}}},
+          schemaConfiguration: {
+            databaseName: analyticsDatabase.name,
+            tableName: eventsTable.name,
+            roleArn: firehoseRole.arn
+          },
         },
       },
     });
@@ -373,35 +390,39 @@ export default $config({
             {
               type: "AppendDelimiterToRecord",
               parameters: [
-                { parameterName: "Delimiter", parameterValue: "\\n" }, // Note double backslash for newline in string
+                {parameterName: "Delimiter", parameterValue: "\\n"}, // Note double backslash for newline in string
               ],
             },
           ],
         },
-        dynamicPartitioningConfiguration: { enabled: true }, // Phase 3.1: Enable dynamic partitioning
+        dynamicPartitioningConfiguration: {enabled: true}, // Phase 3.1: Enable dynamic partitioning
         dataFormatConversionConfiguration: {
-          enabled: true, inputFormatConfiguration: { deserializer: { openXJsonSerDe: {} } },
-          outputFormatConfiguration: { serializer: { parquetSerDe: { compression: "SNAPPY" } } },
-          schemaConfiguration: { databaseName: analyticsDatabase.name, tableName: initialEventsTable.name, roleArn: firehoseRole.arn },
+          enabled: true, inputFormatConfiguration: {deserializer: {openXJsonSerDe: {}}},
+          outputFormatConfiguration: {serializer: {parquetSerDe: {compression: "SNAPPY"}}},
+          schemaConfiguration: {
+            databaseName: analyticsDatabase.name,
+            tableName: initialEventsTable.name,
+            roleArn: firehoseRole.arn
+          },
         },
       },
     });
 
     // === Cognito User Pool ===
     const userPool = new aws.cognito.UserPool("UserPool", {
-        name: `${baseName}-user-pool`, usernameAttributes: ["email"], autoVerifiedAttributes: ["email"],
-        passwordPolicy: {
-            minimumLength: 6,
-            requireLowercase: false,
-            requireNumbers: false,
-            requireSymbols: false,
-            requireUppercase: false,
-            temporaryPasswordValidityDays: 7, // Default, but good to be explicit
-        },
+      name: `${baseName}-user-pool`, usernameAttributes: ["email"], autoVerifiedAttributes: ["email"],
+      passwordPolicy: {
+        minimumLength: 6,
+        requireLowercase: false,
+        requireNumbers: false,
+        requireSymbols: false,
+        requireUppercase: false,
+        temporaryPasswordValidityDays: 7, // Default, but good to be explicit
+      },
     });
     const userPoolClient = new aws.cognito.UserPoolClient("UserPoolClient", {
-        name: `${baseName}-user-pool-client`, userPoolId: userPool.id, generateSecret: false,
-        explicitAuthFlows: ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
+      name: `${baseName}-user-pool-client`, userPoolId: userPool.id, generateSecret: false,
+      explicitAuthFlows: ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
     });
 
     // === DynamoDB Tables ===
@@ -418,12 +439,12 @@ export default $config({
         // is_active: "number", // 0 or 1: Is the site allowed to ingest data?
         // allowed_fields: "string", // JSON stringified list of event fields allowed (for GDPR/filtering)
       },
-      primaryIndex: { hashKey: "site_id" },
+      primaryIndex: {hashKey: "site_id"},
       globalIndexes: {
         // GSI for querying sites by owner
-        ownerSubIndex: { hashKey: "owner_sub", projection: ["site_id"] },
+        ownerSubIndex: {hashKey: "owner_sub", projection: ["site_id"]},
         // GSI for querying sites needing payment
-        planIndex: { hashKey: "plan", projection: "all" }, // NEW GSI
+        planIndex: {hashKey: "plan", projection: "all"}, // NEW GSI
       },
     });
     const userPreferencesTable = new sst.aws.Dynamo("UserPreferencesTable", {
@@ -438,7 +459,7 @@ export default $config({
         // stripe_last4: "string",
         // is_payment_active: "number",
       },
-      primaryIndex: { hashKey: "cognito_sub" },
+      primaryIndex: {hashKey: "cognito_sub"},
     });
 
     // === Router for Public Endpoints (Ingest + Dashboard) ===
@@ -448,128 +469,139 @@ export default $config({
 
     // === API Functions (Defined before Router/API Gateway attachments) ===
     const ingestFn = new sst.aws.Function("IngestFn", {
-        handler: "functions/analytics/ingest.handler",
-        timeout: '10 second',
-        memory: "128 MB",
-        // url: true, // Keep url enabled, but attach to router for public access
-        url: {
-          router: {
-            instance: router,
-            path: "/api/event", // Route /api/event via Router
-            // method: "POST", // Method filtering happens in function or via Router config if available elsewhere
-          }
-        },
-        link: [
-          eventsFirehoseStream,
-          initialEventsFirehoseStream,
-          sitesTable,
-          userPreferencesTable // Link the user preferences table
-        ],
-        environment: { // Step 7: Add USE_STRIPE
-            USE_STRIPE: useStripe.toString(),
-        },
-        permissions: [
-          // Permission to query sitesTable is needed for validation
-          { actions: ["dynamodb:GetItem"], resources: [sitesTable.arn] },
-          // Permission to update request_allowance on sitesTable
-          { actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn] },
-          // Permission to get user preferences for payment status check
-          { actions: ["dynamodb:GetItem"], resources: [userPreferencesTable.arn] },
-          // { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] } // Keep query if needed elsewhere? Revisit. GetItem is likely sufficient for site validation.
-        ],
+      handler: "functions/analytics/ingest.handler",
+      timeout: '10 second',
+      memory: "128 MB",
+      // url: true, // Keep url enabled, but attach to router for public access
+      url: {
+        router: {
+          instance: router,
+          path: "/api/event", // Route /api/event via Router
+          // method: "POST", // Method filtering happens in function or via Router config if available elsewhere
+        }
+      },
+      link: [
+        eventsFirehoseStream,
+        initialEventsFirehoseStream,
+        sitesTable,
+        userPreferencesTable // Link the user preferences table
+      ],
+      environment: { // Step 7: Add USE_STRIPE
+        USE_STRIPE: useStripe.toString(),
+        // TODO use Resource.* to get these in ingest.ts
+        EVENTS_FIREHOSE_STREAM_NAME: eventsFirehoseStream.name,
+        INITIAL_EVENTS_FIREHOSE_STREAM_NAME: initialEventsFirehoseStream.name,
+        SITES_TABLE_NAME: sitesTable.name,
+        USER_PREFERENCES_TABLE_NAME: userPreferencesTable.name,
+      },
+      permissions: [
+        // Permission to query sitesTable is needed for validation
+        {actions: ["dynamodb:GetItem"], resources: [sitesTable.arn]},
+        // Permission to update request_allowance on sitesTable
+        {actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn]},
+        // Permission to get user preferences for payment status check
+        {actions: ["dynamodb:GetItem"], resources: [userPreferencesTable.arn]},
+        // { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] } // Keep query if needed elsewhere? Revisit. GetItem is likely sufficient for site validation.
+      ],
     });
 
     const queryFn = new sst.aws.Function("QueryFn", {
-        handler: "functions/analytics/query.handler",
-        timeout: "60 second",
-        memory: "512 MB",
-        // NOTE: queryFn is NOT attached to the public Router
-        // It will be attached to the authenticated ApiGatewayV2 below
-        link: [
-           analyticsDatabase,
-           queryResultsBucket,
-           eventsBucket,
-           sitesTable,
-           userPreferencesTable
-        ],
-        environment: { // Only pass values not available via linked resources
-            ATHENA_INITIAL_EVENTS_ICEBERG_TABLE: "initial_events_iceberg", // String constant
-            ATHENA_EVENTS_ICEBERG_TABLE: "events_iceberg",           // String constant
-            USE_STRIPE: useStripe.toString(), // Step 7: Add USE_STRIPE
-        },
-        permissions: [
-          { actions: ["athena:*"], resources: ["*"] },
-          { actions: ["s3:ListBucket"], resources: [ queryResultsBucket.arn, eventsBucket.arn ] },
-          // Permission to query sitesTable needed to scope results
-          { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] },
-          // Permission to get user preferences
-          { actions: ["dynamodb:GetItem"], resources: [userPreferencesTable.arn] },
-        ],
+      handler: "functions/analytics/query.handler",
+      timeout: "60 second",
+      memory: "512 MB",
+      // NOTE: queryFn is NOT attached to the public Router
+      // It will be attached to the authenticated ApiGatewayV2 below
+      link: [
+        analyticsDatabase,
+        queryResultsBucket,
+        eventsBucket,
+        sitesTable,
+        userPreferencesTable
+      ],
+      environment: { // Only pass values not available via linked resources
+        ATHENA_INITIAL_EVENTS_ICEBERG_TABLE: "initial_events_iceberg", // String constant
+        ATHENA_EVENTS_ICEBERG_TABLE: "events_iceberg",           // String constant
+        USE_STRIPE: useStripe.toString(), // Step 7: Add USE_STRIPE
+      },
+      permissions: [
+        {actions: ["athena:*"], resources: ["*"]},
+        {actions: ["s3:ListBucket"], resources: [queryResultsBucket.arn, eventsBucket.arn]},
+        // Permission to query sitesTable needed to scope results
+        {actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`]},
+        // Permission to get user preferences
+        {actions: ["dynamodb:GetItem"], resources: [userPreferencesTable.arn]},
+      ],
     });
 
 
 // === Management API Functions ===
     const sitesFn = new sst.aws.Function("SitesFn", {
-        handler: "functions/api/sites.handler",
-        timeout: "10 second",
-        memory: "128 MB",
-        link: [sitesTable], // Link sites table for CRUD
-        permissions: [
-            // Allow CRUD operations on sitesTable
-            { actions: ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:Query"], resources: [sitesTable.arn] },
-            // Allow querying the owner index
-            { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] },
-        ],
-        environment: {
-            // PUBLIC_INGEST_URL is handled by route linking below // Keep comment for context
-            ROUTER_URL: router.url, // Pass the base router URL
-            USE_STRIPE: useStripe.toString(), // Step 7: Add USE_STRIPE
+      handler: "functions/api/sites.handler",
+      timeout: "10 second",
+      memory: "128 MB",
+      link: [sitesTable], // Link sites table for CRUD
+      permissions: [
+        // Allow CRUD operations on sitesTable
+        {
+          actions: ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:Query"],
+          resources: [sitesTable.arn]
         },
-        nodejs: {
-          install: ["ulid"], // Add ulid dependency
-        }
+        // Allow querying the owner index
+        {actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`]},
+      ],
+      environment: {
+        // PUBLIC_INGEST_URL is handled by route linking below // Keep comment for context
+        ROUTER_URL: router.url, // Pass the base router URL
+        USE_STRIPE: useStripe.toString(), // Step 7: Add USE_STRIPE
+      },
+      nodejs: {
+        install: ["ulid"], // Add ulid dependency
+      }
     });
 
     const preferencesFn = new sst.aws.Function("PreferencesFn", {
-        handler: "functions/api/preferences.handler",
-        timeout: "10 second",
-        memory: "128 MB",
-        link: [userPreferencesTable], // Link preferences table
-        permissions: [
-            // Allow CRUD operations on userPreferencesTable
-            { actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], resources: [userPreferencesTable.arn] },
-        ],
-        environment: { // Step 7: Add USE_STRIPE
-            USE_STRIPE: useStripe.toString(),
+      handler: "functions/api/preferences.handler",
+      timeout: "10 second",
+      memory: "128 MB",
+      link: [userPreferencesTable], // Link preferences table
+      permissions: [
+        // Allow CRUD operations on userPreferencesTable
+        {
+          actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"],
+          resources: [userPreferencesTable.arn]
         },
+      ],
+      environment: { // Step 7: Add USE_STRIPE
+        USE_STRIPE: useStripe.toString(),
+      },
     });
 
     // Step 3: Conditional stripeFn
     let stripeFn: sst.aws.Function | undefined;
     if (useStripe) {
       stripeFn = new sst.aws.Function("StripeFn", {
-          handler: "functions/api/stripe.handler",
-          timeout: "10 second",
-          memory: "128 MB",
-          link: [
-            STRIPE_SECRET_KEY!, // Use non-null assertion as we are inside the if block
-            STRIPE_WEBHOOK_SECRET!, // Use non-null assertion
-            userPreferencesTable, // Link for customer ID lookup/storage
-            sitesTable,           // Link for subscription ID/plan update
-          ],
-          environment: { // Step 7: Add USE_STRIPE (conditionally)
-              USE_STRIPE: useStripe.toString(),
-          },
-          permissions: [
-            // Permissions to read/write stripe_customer_id in userPreferencesTable
-            { actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [userPreferencesTable.arn] },
-            // Permissions to update stripe_subscription_id and plan in sitesTable
-            { actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn] },
-            // Note: Query permissions might be needed if searching by subscription ID, add later if required.
-          ],
-          nodejs: {
-            install: ["stripe"], // Ensure stripe SDK is bundled if not already in root package.json
-          }
+        handler: "functions/api/stripe.handler",
+        timeout: "10 second",
+        memory: "128 MB",
+        link: [
+          STRIPE_SECRET_KEY!, // Use non-null assertion as we are inside the if block
+          STRIPE_WEBHOOK_SECRET!, // Use non-null assertion
+          userPreferencesTable, // Link for customer ID lookup/storage
+          sitesTable,           // Link for subscription ID/plan update
+        ],
+        environment: { // Step 7: Add USE_STRIPE (conditionally)
+          USE_STRIPE: useStripe.toString(),
+        },
+        permissions: [
+          // Permissions to read/write stripe_customer_id in userPreferencesTable
+          {actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [userPreferencesTable.arn]},
+          // Permissions to update stripe_subscription_id and plan in sitesTable
+          {actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn]},
+          // Note: Query permissions might be needed if searching by subscription ID, add later if required.
+        ],
+        nodejs: {
+          install: ["stripe"], // Ensure stripe SDK is bundled if not already in root package.json
+        }
       });
     }
     // === API Gateway (for Authenticated Endpoints like /api/query) ===
@@ -597,7 +629,7 @@ export default $config({
 
     // Define Query Route on the Management API Gateway
     // Define common auth config once
-    const commonAuth = { auth: { jwt: { authorizer: jwtAuthorizer.id } } };
+    const commonAuth = {auth: {jwt: {authorizer: jwtAuthorizer.id}}};
 
     // === Management API Routes (Using Function ARNs) ===
 
@@ -659,20 +691,27 @@ export default $config({
         eventsBucket,
         queryResultsBucket
       ],
-       environment: { // Only pass values not available via linked resources
-            ATHENA_INITIAL_EVENTS_ICEBERG_TABLE: "initial_events_iceberg", // String constant
-            ATHENA_EVENTS_ICEBERG_TABLE: "events_iceberg",           // String constant
-        },
+      environment: { // Only pass values not available via linked resources
+        ATHENA_INITIAL_EVENTS_ICEBERG_TABLE: "initial_events_iceberg", // String constant
+        ATHENA_EVENTS_ICEBERG_TABLE: "events_iceberg",           // String constant
+      },
       permissions: [
-        { actions: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:GetWorkGroup"], resources: ["*"] }, // Specific Athena actions for OPTIMIZE/CTAS
-        { actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetBucketLocation", "s3:ListBucketMultipartUploads", "s3:AbortMultipartUpload"], resources: [ // Broad S3 access needed for compaction/manifests
+        {
+          actions: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:GetWorkGroup"],
+          resources: ["*"]
+        }, // Specific Athena actions for OPTIMIZE/CTAS
+        {
+          actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetBucketLocation", "s3:ListBucketMultipartUploads", "s3:AbortMultipartUpload"],
+          resources: [ // Broad S3 access needed for compaction/manifests
             eventsBucket.arn,
             $interpolate`${eventsBucket.arn}/*`,
             queryResultsBucket.arn, // Access results bucket too
             $interpolate`${queryResultsBucket.arn}/*`
           ]
         },
-        { actions: ["glue:GetDatabase", "glue:GetTable", "glue:GetPartitions", "glue:UpdateTable", "glue:UpdatePartition", "glue:BatchUpdatePartition"], resources: [ // Glue Read/Update for compaction metadata
+        {
+          actions: ["glue:GetDatabase", "glue:GetTable", "glue:GetPartitions", "glue:UpdateTable", "glue:UpdatePartition", "glue:BatchUpdatePartition"],
+          resources: [ // Glue Read/Update for compaction metadata
             analyticsDatabase.arn, // Database ARN from link
             $interpolate`arn:aws:glue:${region}:${accountId}:catalog`, // Catalog access
             $interpolate`arn:aws:glue:${region}:${accountId}:table/${analyticsDatabase.name}/*`, // Access to manage tables within the DB (incl. Iceberg)
@@ -693,33 +732,33 @@ export default $config({
     let chargeProcessorFn: sst.aws.Function | undefined;
     if (useStripe) {
       chargeProcessorFn = new sst.aws.Function("ChargeProcessorFn", {
-          handler: "functions/billing/chargeProcessor.handler",
-          timeout: "60 second", // Allow time for Stripe API calls and DB updates
-          memory: "256 MB",
-          architecture: "arm64",
-          link: [
-              sitesTable,
-              userPreferencesTable,
-              STRIPE_SECRET_KEY!, // Correct: Use non-null assertion
-          ],
-          environment: { // Step 7: Add USE_STRIPE (conditionally)
-              USE_STRIPE: useStripe.toString(),
-              // Inject placeholder value directly if Stripe is disabled and the function needs it
-              // (Though these functions only run if useStripe is true, so linking the real secret is sufficient)
-          },
-          permissions: [
-              // Query sites needing payment using the GSI
-              { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/planIndex`] },
-              // Get user preferences to find payment details
-              { actions: ["dynamodb:GetItem"], resources: [userPreferencesTable.arn] },
-              // Update site allowance/plan after successful charge
-              { actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn] },
-              // Update user payment status after failed charge
-              { actions: ["dynamodb:UpdateItem"], resources: [userPreferencesTable.arn] },
-          ],
-          nodejs: {
-              install: ["stripe", "@aws-sdk/client-dynamodb"], // Add necessary SDKs
-          }
+        handler: "functions/billing/chargeProcessor.handler",
+        timeout: "60 second", // Allow time for Stripe API calls and DB updates
+        memory: "256 MB",
+        architecture: "arm64",
+        link: [
+          sitesTable,
+          userPreferencesTable,
+          STRIPE_SECRET_KEY!, // Correct: Use non-null assertion
+        ],
+        environment: { // Step 7: Add USE_STRIPE (conditionally)
+          USE_STRIPE: useStripe.toString(),
+          // Inject placeholder value directly if Stripe is disabled and the function needs it
+          // (Though these functions only run if useStripe is true, so linking the real secret is sufficient)
+        },
+        permissions: [
+          // Query sites needing payment using the GSI
+          {actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/planIndex`]},
+          // Get user preferences to find payment details
+          {actions: ["dynamodb:GetItem"], resources: [userPreferencesTable.arn]},
+          // Update site allowance/plan after successful charge
+          {actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn]},
+          // Update user payment status after failed charge
+          {actions: ["dynamodb:UpdateItem"], resources: [userPreferencesTable.arn]},
+        ],
+        nodejs: {
+          install: ["stripe", "@aws-sdk/client-dynamodb"], // Add necessary SDKs
+        }
       });
 
       new sst.aws.Cron("ChargeCron", {

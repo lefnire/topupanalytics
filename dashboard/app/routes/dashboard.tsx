@@ -1,11 +1,11 @@
 import React, { useEffect } from 'react';
 import { Navigate } from 'react-router'; // Import Navigate for redirection
-import { useAuth } from '../contexts/AuthContext'; // Import the auth hook
-import { useStore } from '../stores/analyticsStore';
+import { useAuth } from '~/contexts/AuthContext'; // Import the auth hook
+import { useStore } from '~/stores/analyticsStore';
 // Keep Select imports for DashboardHeader (even though Header is separate, imports might be shared or needed indirectly) - NOTE: Removing the actual imports as they are unused in *this* file.
 
-import { DashboardHeader } from '../components/dashboard/DashboardHeader'; // Import the new header component
-import { DashboardContent } from '../components/dashboard/DashboardContent'; // Import the new content component
+import { DashboardHeader } from '~/components/dashboard/DashboardHeader'; // Import the new header component
+import { DashboardContent } from '~/components/dashboard/DashboardContent'; // Import the new content component
 
 
 // --- Constants ---

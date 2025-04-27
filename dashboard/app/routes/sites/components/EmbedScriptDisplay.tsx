@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { useApiClient } from '../../../lib/api';
-import { Button } from '../../../components/ui/button';
+import { useApiClient } from '~/lib/api';
+import { Button } from '~/components/ui/button';
 import { toast } from 'sonner';
 import { Copy } from 'lucide-react'; // Icon for copy button
 
