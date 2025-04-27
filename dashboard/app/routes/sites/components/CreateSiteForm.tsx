@@ -3,7 +3,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
 import { useNavigate } from 'react-router';
-import { useApiClient } from '../../../lib/api';
+import { useApiClient, type Site } from '../../../lib/api'; // Import Site type
 import { Button } from '../../../components/ui/button';
 import { Input } from '../../../components/ui/input';
 import { Label } from '../../../components/ui/label';
@@ -28,9 +28,13 @@ const formSchema = z.object({
 
 type FormData = z.infer<typeof formSchema>;
 
-export function CreateSiteForm() {
+interface CreateSiteFormProps {
+  onSuccess?: (newSite: Site) => void; // Optional success callback
+}
+
+export function CreateSiteForm({ onSuccess }: CreateSiteFormProps) {
   const { post } = useApiClient();
-  const navigate = useNavigate();
+  const navigate = useNavigate(); // Keep navigate for fallback if onSuccess is not provided
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const form = useForm<FormData>({
@@ -47,18 +51,20 @@ export function CreateSiteForm() {
     try {
       // Parse the JSON string into an array and use the correct key 'domains'
       const domainsArray = JSON.parse(values.allowed_domains);
-      const newSite = await post('/api/sites', {
-        // name: values.name, // Keep sending name, even if backend doesn't explicitly use it yet
+      const newSite: Site = await post('/api/sites', { // Add type annotation
+        name: values.name, // Send name
         domains: domainsArray,
         // allowed_fields: JSON.parse(values.allowed_fields), // Include and parse if part of the schema/API
       });
       toast.success(`Site "${values.name}" created successfully!`);
-      // Navigate to the new site's detail page or back to the list
-      // Assuming the API returns the new site object with its ID
-      if (newSite?.site_id) {
+      // If an onSuccess callback is provided, call it instead of navigating
+      if (onSuccess) {
+        onSuccess(newSite);
+      } else if (newSite?.site_id) {
+        // Default behavior: navigate if no callback provided
         navigate(`/sites/${newSite.site_id}`);
       } else {
-        navigate('/sites'); // Fallback to list if ID isn't returned
+        navigate('/sites'); // Fallback
       }
     } catch (error: any) {
       console.error("Failed to create site:", error);

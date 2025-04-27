@@ -1,18 +1,34 @@
-import React, { useMemo } from 'react';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
+import React, { useState, useMemo } from 'react'; // Added useState
+// Removed unused Select imports
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Calendar } from '../ui/calendar';
 import { Button } from '../ui/button';
-import { Calendar as CalendarIcon } from 'lucide-react';
+import { Calendar as CalendarIcon, User, LogOut, PlusCircle } from 'lucide-react'; // Added icons
 import { cn } from '../../lib/utils';
 import { format } from 'date-fns';
-// Removed unused Site import
-import { useStore, type AnalyticsState } from '../../stores/analyticsStore'; // Import Zustand hooks and state type
-import type { Segment } from '../../stores/analyticsTypes'; // Import Segment type separately
-import { useShallow } from 'zustand/shallow'; // Import useShallow from zustand
+import { useStore, type AnalyticsState } from '../../stores/analyticsStore';
+import type { Segment } from '../../stores/analyticsTypes';
+import { useShallow } from 'zustand/shallow';
 import { type DateRange } from 'react-day-picker';
-import { useAuth } from '../../contexts/AuthContext'; // Import useAuth
-
+import { useAuth } from '../../contexts/AuthContext';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu'; // Use relative path
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog'
+import { SiteSelectorDropdownContent } from '../sites/SiteSelectorDropdownContent'; // Added SiteSelectorDropdownContent
+import { SiteSettingsModal } from '../sites/SiteSettingsModal'; // Added SiteSettingsModal
+import { AddSiteModal } from '../sites/AddSiteModal'; // Added AddSiteModal
+import { AccountModal } from '../account/AccountModal'; // Added AccountModal
 
 export const DashboardHeader = () => {
   const {
@@ -26,7 +42,7 @@ export const DashboardHeader = () => {
     removeSegment,
     clearSegments,
     setSelectedRange,
-  } = useStore(useShallow((state: AnalyticsState) => ({ // Add type annotation here
+  } = useStore(useShallow((state: AnalyticsState) => ({
     selectedSiteId: state.selectedSiteId,
     sites: state.sites,
     status: state.status,
@@ -37,131 +53,196 @@ export const DashboardHeader = () => {
     removeSegment: state.removeSegment,
     clearSegments: state.clearSegments,
     setSelectedRange: state.setSelectedRange,
-  }))); // Add type annotation for state
+  })));
 
   const { user, logout } = useAuth();
+
+  // State for modals
+  const [isSiteSettingsModalOpen, setIsSiteSettingsModalOpen] = useState(false);
+  const [isAddSiteModalOpen, setIsAddSiteModalOpen] = useState(false);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
+  const [selectedSiteIdForModal, setSelectedSiteIdForModal] = useState<string | null>(null);
 
   // Derive isLoading state locally based on status
   const isLoading = status === 'initializing' || status === 'loading_data' || status === 'aggregating';
 
-  // Derive selectedSite inside the component for the avatar
+  // Derive selectedSite for display purposes if needed (e.g., avatar in trigger)
   const selectedSite = useMemo(() => sites.find(site => site.site_id === selectedSiteId), [sites, selectedSiteId]);
 
-  return (
-    <header className="mb-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-      {/* Left Side: Site Selector and Segments */}
-      <div className="flex flex-col items-start gap-2">
-          {/* Site Selector */}
-          <Select
-              value={selectedSiteId ?? ''}
-              onValueChange={(value) => setSelectedSiteId(value || null)}
-              disabled={sites.length === 0 || isLoading || isRefreshing} // Disable while loading/refreshing
-          >
-              <SelectTrigger className="w-auto min-w-[180px] h-9 text-lg font-semibold border-none shadow-none focus:ring-0 p-0 gap-2">
-                  <div className="flex items-center gap-2">
-                       {/* Avatar */}
-                       <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold ${selectedSite ? 'bg-blue-500' : 'bg-gray-400'}`}>
-                           {selectedSite?.name?.charAt(0).toUpperCase() || '?'}
-                       </div>
-                       {/* Site Name */}
-                       <SelectValue placeholder="Select a site..." />
-                  </div>
-              </SelectTrigger>
-              <SelectContent>
-                  {sites.length > 0 ? (
-                      sites.map((site) => (
-                          <SelectItem key={site.site_id} value={site.site_id}>
-                              {site.name} ({site.site_id}) {/* Display name and ID */}
-                          </SelectItem>
-                      ))
-                  ) : (
-                      <SelectItem value="loading" disabled>
-                        {status === 'error' ? 'Error loading sites' : 'Loading sites...'}
-                      </SelectItem>
-                  )}
-              </SelectContent>
-          </Select>
-          {/* Segment Display Area */}
-          {segments.length > 0 && (
-              <div className="flex flex-wrap items-center gap-2 mt-1">
-                  {segments.map((segment, index) => (
-                      <span key={index} className="flex items-center gap-1 bg-blue-100 text-blue-800 text-xs font-medium px-2 py-0.5 rounded-full">
-                          {segment.label}
-                          <button
-                              onClick={() => removeSegment(segment)}
-                              className="ml-1 text-blue-600 hover:text-blue-800 focus:outline-none"
-                              aria-label={`Remove filter: ${segment.label}`}
-                              title={`Remove filter: ${segment.label}`}
-                          >
-                              &times; {/* Cross icon */}
-                          </button>
-                      </span>
-                  ))}
-                  {/* Optional: Add a "Clear All" button */}
-                  {segments.length > 1 && (
-                      <button
-                          onClick={clearSegments}
-                          className="text-xs text-gray-500 hover:text-gray-700 underline focus:outline-none ml-1"
-                          title="Clear all filters"
-                      >
-                          Clear all
-                      </button>
-                  )}
-              </div>
-          )}
-      </div>
+  const handleOpenSiteSettings = (siteId: string) => {
+    setSelectedSiteIdForModal(siteId);
+    setIsSiteSettingsModalOpen(true);
+  };
 
-      {/* Right Side: Date Range Picker & Logout */}
-      <div className="flex items-center gap-4 text-sm text-gray-600 flex-shrink-0">
-          {/* Refresh Indicator */}
-          {isRefreshing && <span className="text-xs text-gray-400 animate-pulse">(syncing...)</span>}
-          {/* User Info & Logout */}
-          {user && (
-            <span className="text-xs text-gray-500 hidden sm:inline">
-              Logged in as: {user.username}
-            </span>
-          )}
-          <Button onClick={logout} variant="outline" size="sm">Logout</Button>
-          {/* Date Range Picker */}
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button
-                id="date"
-                variant={"outline"}
-                className={cn(
-                  "w-[260px] justify-start text-left font-normal",
-                  !selectedRange && "text-muted-foreground"
-                )}
-                disabled={isLoading || !selectedSiteId} // Disable if loading or no site selected
-              >
-                <CalendarIcon className="mr-2 h-4 w-4" />
-                {selectedRange?.from ? (
-                  selectedRange.to ? (
-                    <>
-                      {format(selectedRange.from, "LLL dd, y")} -{" "}
-                      {format(selectedRange.to, "LLL dd, y")}
-                    </>
+  return (
+    <>
+      <header className="mb-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        {/* Left Side: Current Site Name and Segments */}
+        <div className="flex flex-col items-start gap-2">
+           {/* Display Current Site Name */}
+           <div className="flex items-center gap-2">
+               <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold ${selectedSite ? 'bg-blue-500' : 'bg-gray-400'}`}>
+                   {selectedSite?.name?.charAt(0).toUpperCase() || '?'}
+               </div>
+               <h1 className="text-lg font-semibold">
+                   {selectedSite ? selectedSite.name : (sites.length > 0 ? 'Select a site' : 'No sites yet')}
+               </h1>
+           </div>
+           {/* Segment Display Area */}
+           {segments.length > 0 && (
+               <div className="flex flex-wrap items-center gap-2 mt-1">
+                   {segments.map((segment, index) => (
+                       <span key={index} className="flex items-center gap-1 bg-blue-100 text-blue-800 text-xs font-medium px-2 py-0.5 rounded-full">
+                           {segment.label}
+                           <button
+                               onClick={() => removeSegment(segment)}
+                               className="ml-1 text-blue-600 hover:text-blue-800 focus:outline-none"
+                               aria-label={`Remove filter: ${segment.label}`}
+                               title={`Remove filter: ${segment.label}`}
+                           >
+                               &times; {/* Cross icon */}
+                           </button>
+                       </span>
+                   ))}
+                   {segments.length > 1 && (
+                       <button
+                           onClick={clearSegments}
+                           className="text-xs text-gray-500 hover:text-gray-700 underline focus:outline-none ml-1"
+                           title="Clear all filters"
+                       >
+                           Clear all
+                       </button>
+                   )}
+               </div>
+           )}
+        </div>
+
+        {/* Right Side: Date Range Picker & User Dropdown */}
+        <div className="flex items-center gap-4 text-sm text-gray-600 flex-shrink-0">
+            {/* Refresh Indicator */}
+            {isRefreshing && <span className="text-xs text-gray-400 animate-pulse">(syncing...)</span>}
+
+            {/* Date Range Picker */}
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  id="date"
+                  variant={"outline"}
+                  className={cn(
+                    "w-[260px] justify-start text-left font-normal",
+                    !selectedRange && "text-muted-foreground"
+                  )}
+                  disabled={isLoading || !selectedSiteId} // Disable if loading or no site selected
+                >
+                  <CalendarIcon className="mr-2 h-4 w-4" />
+                  {selectedRange?.from ? (
+                    selectedRange.to ? (
+                      <>
+                        {format(selectedRange.from, "LLL dd, y")} -{" "}
+                        {format(selectedRange.to, "LLL dd, y")}
+                      </>
+                    ) : (
+                      format(selectedRange.from, "LLL dd, y")
+                    )
                   ) : (
-                    format(selectedRange.from, "LLL dd, y")
-                  )
-                ) : (
-                  <span>Pick a date</span>
-                )}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-auto p-0" align="end">
-              <Calendar
-                initialFocus
-                mode="range"
-                defaultMonth={selectedRange?.from}
-                selected={selectedRange}
-                onSelect={setSelectedRange} // Use store action directly
-                numberOfMonths={2}
-                disabled={(date) => date > new Date() || date < new Date("2000-01-01")} // Example disabled dates
-              />
-            </PopoverContent>
-          </Popover>
-      </div>
-    </header>
+                    <span>Pick a date</span>
+                  )}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-0" align="end">
+                <Calendar
+                  initialFocus
+                  mode="range"
+                  defaultMonth={selectedRange?.from}
+                  selected={selectedRange}
+                  onSelect={setSelectedRange} // Use store action directly
+                  numberOfMonths={2}
+                  disabled={(date) => date > new Date() || date < new Date("2000-01-01")} // Example disabled dates
+                />
+              </PopoverContent>
+            </Popover>
+
+            {/* User Dropdown Menu */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="rounded-full">
+                  {/* Use a generic user icon or potentially user avatar if available */}
+                  <User className="h-5 w-5" />
+                  <span className="sr-only">Open user menu</span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuLabel>Sites</DropdownMenuLabel>
+                {/* Pass only required callbacks, assuming component handles data internally */}
+                <SiteSelectorDropdownContent
+                  onSiteSelect={setSelectedSiteId}
+                  onSettingsClick={handleOpenSiteSettings}
+                />
+                 <DropdownMenuItem onSelect={() => setIsAddSiteModalOpen(true)}>
+                  <PlusCircle className="mr-2 h-4 w-4" />
+                  <span>Add New Site</span>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => setIsAccountModalOpen(true)}>
+                  <User className="mr-2 h-4 w-4" />
+                  <span>Account</span>
+                  {user?.username && <span className="ml-auto text-xs text-muted-foreground">{user.username}</span>}
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={logout}>
+                  <LogOut className="mr-2 h-4 w-4" />
+                  <span>Logout</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+        </div>
+      </header>
+
+      {/* Modals wrapped in Dialog components */}
+      <Dialog open={isSiteSettingsModalOpen} onOpenChange={setIsSiteSettingsModalOpen}>
+        <DialogContent className="sm:max-w-[600px]"> {/* Adjust width as needed */}
+          {/* Render SiteSettingsModal only when siteId is available and modal is open */}
+          {selectedSiteIdForModal && isSiteSettingsModalOpen && (
+            <SiteSettingsModal
+              siteId={selectedSiteIdForModal}
+              onClose={() => setIsSiteSettingsModalOpen(false)} // Optional: Pass close handler
+              // onSiteUpdate={handleSiteUpdate} // Optional: Handle updates if needed
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isAddSiteModalOpen} onOpenChange={setIsAddSiteModalOpen}>
+        <DialogContent className="sm:max-w-[425px]"> {/* Adjust width as needed */}
+           <DialogHeader>
+             <DialogTitle>Add New Site</DialogTitle>
+           </DialogHeader>
+           {/* Render AddSiteModal only when modal is open */}
+           {isAddSiteModalOpen && (
+             <AddSiteModal
+               onClose={() => setIsAddSiteModalOpen(false)} // Pass close handler
+               // onSiteCreated={handleSiteCreated} // Optional: Handle creation
+             />
+           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isAccountModalOpen} onOpenChange={setIsAccountModalOpen}>
+         <DialogContent className="sm:max-w-[425px]"> {/* Adjust width as needed */}
+           <DialogHeader>
+             <DialogTitle>Account</DialogTitle>
+           </DialogHeader>
+           {/* Render AccountModal only when modal is open and user exists */}
+           {isAccountModalOpen && user && (
+             <AccountModal
+               userEmail={user.username} // Pass required email
+               billingStatus={'loading'} // Pass placeholder status - TODO: Get actual status
+               onClose={() => setIsAccountModalOpen(false)} // Pass close handler
+               // onSetupBilling={...} // TODO: Implement if needed
+               // onManageBilling={...} // TODO: Implement if needed
+             />
+           )}
+         </DialogContent>
+      </Dialog>
+    </>
   );
 };
