@@ -297,15 +297,38 @@ export default $config({
       extendedS3Configuration: {
         roleArn: firehoseRole.arn, bucketArn: eventsBucket.arn,
         prefix: "events/site_id=!{partitionKeyFromQuery:site_id}/dt=!{timestamp:yyyy-MM-dd}/", // Phase 3.1: Use partitionKeyFromQuery
-        errorOutputPrefix: "errors/events/site_id=!{partitionKeyFromQuery:site_id}/dt=!{timestamp:yyyy-MM-dd}/!{firehose:error-output-type}/", // Phase 3.1: Use partitionKeyFromQuery
-        bufferingInterval: 60, bufferingSize: 64, compressionFormat: "UNCOMPRESSED",
+        errorOutputPrefix: "errors/events/dt=!{timestamp:yyyy-MM-dd}/!{firehose:error-output-type}/", // Removed dynamic partition key
+        bufferingInterval: 60, bufferingSize: 64, // compressionFormat: "UNCOMPRESSED", // Removed - Handled by Parquet SerDe
+        processingConfiguration: { // Replace processors array
+          enabled: true,
+          processors: [
+            {
+              type: "MetadataExtraction",
+              parameters: [
+                {
+                  parameterName: "JsonParsingEngine",
+                  parameterValue: "JQ-1.6",
+                },
+                {
+                  parameterName: "MetadataExtractionQuery",
+                  parameterValue: "{site_id:.site_id}", // Extract site_id
+                },
+              ],
+            },
+            {
+              type: "AppendDelimiterToRecord",
+              parameters: [
+                { parameterName: "Delimiter", parameterValue: "\\n" }, // Note double backslash for newline in string
+              ],
+            },
+          ],
+        },
         dynamicPartitioningConfiguration: { enabled: true }, // Phase 3.1: Enable dynamic partitioning
         dataFormatConversionConfiguration: {
           enabled: true, inputFormatConfiguration: { deserializer: { openXJsonSerDe: {} } },
           outputFormatConfiguration: { serializer: { parquetSerDe: { compression: "SNAPPY" } } },
           schemaConfiguration: { databaseName: analyticsDatabase.name, tableName: eventsTable.name, roleArn: firehoseRole.arn },
         },
-        // processingConfiguration removed in Phase 3.1
       },
     });
 
@@ -314,15 +337,38 @@ export default $config({
       extendedS3Configuration: {
         roleArn: firehoseRole.arn, bucketArn: eventsBucket.arn,
         prefix: "initial_events/site_id=!{partitionKeyFromQuery:site_id}/dt=!{timestamp:yyyy-MM-dd}/", // Phase 3.1: Use partitionKeyFromQuery
-        errorOutputPrefix: "errors/initial_events/site_id=!{partitionKeyFromQuery:site_id}/dt=!{timestamp:yyyy-MM-dd}/!{firehose:error-output-type}/", // Phase 3.1: Use partitionKeyFromQuery
-        bufferingInterval: 60, bufferingSize: 64, compressionFormat: "UNCOMPRESSED",
+        errorOutputPrefix: "errors/initial_events/dt=!{timestamp:yyyy-MM-dd}/!{firehose:error-output-type}/", // Removed dynamic partition key
+        bufferingInterval: 60, bufferingSize: 64, // compressionFormat: "UNCOMPRESSED", // Removed - Handled by Parquet SerDe
+        processingConfiguration: { // Replace processors array
+          enabled: true,
+          processors: [
+            {
+              type: "MetadataExtraction",
+              parameters: [
+                {
+                  parameterName: "JsonParsingEngine",
+                  parameterValue: "JQ-1.6",
+                },
+                {
+                  parameterName: "MetadataExtractionQuery",
+                  parameterValue: "{site_id:.site_id}", // Extract site_id
+                },
+              ],
+            },
+            {
+              type: "AppendDelimiterToRecord",
+              parameters: [
+                { parameterName: "Delimiter", parameterValue: "\\n" }, // Note double backslash for newline in string
+              ],
+            },
+          ],
+        },
         dynamicPartitioningConfiguration: { enabled: true }, // Phase 3.1: Enable dynamic partitioning
         dataFormatConversionConfiguration: {
           enabled: true, inputFormatConfiguration: { deserializer: { openXJsonSerDe: {} } },
           outputFormatConfiguration: { serializer: { parquetSerDe: { compression: "SNAPPY" } } },
           schemaConfiguration: { databaseName: analyticsDatabase.name, tableName: initialEventsTable.name, roleArn: firehoseRole.arn },
         },
-        // processingConfiguration removed in Phase 3.1
       },
     });
 
@@ -340,12 +386,14 @@ export default $config({
       fields: {
         site_id: "string", // PK
         owner_sub: "string", // GSI PK
-        domains: "string", // JSON stringified list of allowed referer domains
-        plan: "string", // 'free_tier', 'active_paid', 'payment_failed', 'cancelled', 'needs_payment' // Added 'needs_payment'
-        // stripe_subscription_id: "string", // Removed - Replaced by payment method on user
-        request_allowance: "number", // Added - Usage-based billing allowance
-        is_active: "number", // 0 or 1: Is the site allowed to ingest data?
-        allowed_fields: "string", // JSON stringified list of event fields allowed (for GDPR/filtering)
+        plan: "string", // GSI PK for planIndex
+        // Other fields like are still valid attributes but don't need to be listed here
+        // unless they are part of a primary or secondary index key.
+        // domains: "string", // JSON stringified list of allowed referer domains
+        // // stripe_subscription_id: "string", // Removed - Replaced by payment method on user
+        // request_allowance: "number", // Added - Usage-based billing allowance
+        // is_active: "number", // 0 or 1: Is the site allowed to ingest data?
+        // allowed_fields: "string", // JSON stringified list of event fields allowed (for GDPR/filtering)
       },
       primaryIndex: { hashKey: "site_id" },
       globalIndexes: {
@@ -356,15 +404,16 @@ export default $config({
       },
     });
     const userPreferencesTable = new sst.aws.Dynamo("UserPreferencesTable", {
-      // ... existing fields ...
+      // Only define the primary key field here
       fields: {
         cognito_sub: "string", // PK
-        theme: "string",
-        email_notifications: "string",
-        stripe_customer_id: "string",
-        stripe_payment_method_id: "string",
-        stripe_last4: "string",
-        is_payment_active: "number",
+        // Other fields are still valid attributes but don't need to be listed here.
+        // theme: "string",
+        // email_notifications: "string",
+        // stripe_customer_id: "string",
+        // stripe_payment_method_id: "string",
+        // stripe_last4: "string",
+        // is_payment_active: "number",
       },
       primaryIndex: { hashKey: "cognito_sub" },
     });
@@ -506,8 +555,8 @@ export default $config({
         // redirects property removed - not valid for ApiGatewayV2
       } : undefined,
       cors: { // CORS needed for dashboard interaction
-        allowOrigins: isProd ? [`https://${domain}`] : ["*"], // Allow origin from the main dashboard domain
-        allowCredentials: true, // Important if auth cookies/headers are used
+        allowOrigins: isProd ? [`https://${domain}`] : ["*"], // Allow origin from the main dashboard domain or wildcard for dev
+        allowCredentials: isProd ? true : false, // Set to false when allowOrigins is "*"
         allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"], // Allow necessary methods
         allowHeaders: ["Content-Type", "Authorization"], // Allow standard headers + Auth
       },
