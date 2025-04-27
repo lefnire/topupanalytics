@@ -7,7 +7,8 @@ import { Calendar as CalendarIcon } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { format } from 'date-fns';
 // Removed unused Site import
-import { useStore, type Segment, type AnalyticsState } from '../../stores/analyticsStore'; // Import Zustand hooks and types
+import { useStore, type AnalyticsState } from '../../stores/analyticsStore'; // Import Zustand hooks and state type
+import type { Segment } from '../../stores/analyticsTypes'; // Import Segment type separately
 import { useShallow } from 'zustand/shallow'; // Import useShallow from zustand
 import { type DateRange } from 'react-day-picker';
 import { useAuth } from '../../contexts/AuthContext'; // Import useAuth

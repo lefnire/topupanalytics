@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import type { CardDataItem, Segment } from '~/stores/analyticsStore'; // Adjusted path
+import type { CardDataItem, Segment } from '~/stores/analyticsTypes'; // Adjusted path for types
 
 // --- Helper Functions ---
 // Copied from dashboard.tsx as it's simple

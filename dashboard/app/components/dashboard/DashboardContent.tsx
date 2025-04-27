@@ -9,7 +9,8 @@ import { EventsCard } from './EventsCard';
 import { UsageCard } from '../UsageCard';
 import { useApiClient } from '../../lib/api';
 import { toast } from 'sonner';
-import { useStore, type Segment, type AggregatedData, type AnalyticsState } from '../../stores/analyticsStore';
+import { useStore, type AnalyticsState } from '../../stores/analyticsStore'; // Import hook and state
+import type { Segment, AggregatedData } from '../../stores/analyticsTypes'; // Import types separately
 import { useShallow } from 'zustand/shallow'; // Import useShallow from zustand
 import { type Site } from '../../lib/api'; // Import Site type
 

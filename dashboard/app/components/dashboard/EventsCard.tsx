@@ -1,7 +1,7 @@
 import React, { useCallback } from 'react';
 import { useShallow } from 'zustand/shallow'; // Import from zustand/shallow
 import { useStore, type AnalyticsState } from '../../stores/analyticsStore'; // Adjusted path, added AnalyticsState
-import type { CardDataItem, Segment } from '../../stores/analyticsStore'; // Adjusted path
+import type { CardDataItem, Segment } from '../../stores/analyticsTypes'; // Import types from analyticsTypes
 
 // Helper function (defined locally as per instructions)
 const formatNumber = (num: number) => num.toLocaleString();
