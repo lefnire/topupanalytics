@@ -194,17 +194,21 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
         return createResponse(404, { error: "Site not found or access denied" });
       }
 
-      const publicIngestUrl = process.env.PUBLIC_INGEST_URL; // Passed from sst.config.ts route definition
-      if (!publicIngestUrl) {
-          console.error("PUBLIC_INGEST_URL environment variable not set!");
+      // Use the new ROUTER_URL environment variable
+      const routerUrl = process.env.ROUTER_URL;
+      if (!routerUrl) {
+          console.error("ROUTER_URL environment variable not set!");
           return createResponse(500, { error: "Internal Server Error: Configuration missing." });
       }
+
+      // Construct the full ingest URL
+      const ingestUrl = `${routerUrl.replace(/\/$/, '')}/api/event`; // Ensure no double slash
 
       // Simple script example - enhance as needed
       const scriptContent = `
 (function() {
   var d = document, s = d.createElement('script');
-  s.src = '${publicIngestUrl}?sid=${siteId}'; // Use 'sid' query param as decided for ingestFn
+  s.src = '${ingestUrl}?sid=${siteId}'; // Use 'sid' query param as decided for ingestFn
   s.async = true;
   d.getElementsByTagName('head')[0].appendChild(s);
   console.log('TopUp Analytics Loaded for site: ${siteId}');

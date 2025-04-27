@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom'; // Correct import for react-router-dom v6+
+import { Link, useNavigate } from 'react-router'; // Correct import for react-router-dom v6+
 import { useApiClient, type Site } from '../../lib/api';
 import { Button } from '../../components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '../../components/ui/card';

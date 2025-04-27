@@ -1,4 +1,4 @@
-import { useContext } from 'react';
+import { useContext, useCallback } from 'react';
 import { AuthContext } from '../contexts/AuthContext';
 import { fetchAuthSession } from 'aws-amplify/auth'; // Import fetchAuthSession
 
@@ -58,14 +58,15 @@ export function useApiClient() {
 
   const { token } = auth;
 
-  const request = async <T = any>(
+  // Memoize the core request function
+  const request = useCallback(async <T = any>(
     method: 'GET' | 'POST' | 'PUT' | 'DELETE',
     endpoint: string,
     data?: any
   ): Promise<T> => {
     const options: RequestOptions = {
       method,
-      token,
+      token, // token dependency here
     };
 
     if (data) {
@@ -91,14 +92,15 @@ export function useApiClient() {
     }
 
     return await response.json() as T;
-  };
+  }, [token]); // Dependency: re-create if token changes
 
-  return {
-    get: <T = any>(endpoint: string) => request<T>('GET', endpoint),
-    post: <T = any>(endpoint: string, data: any) => request<T>('POST', endpoint, data),
-    put: <T = any>(endpoint: string, data: any) => request<T>('PUT', endpoint, data),
-    del: <T = any>(endpoint: string) => request<T>('DELETE', endpoint), // Using 'del' to avoid reserved keyword
-  };
+  // Memoize the returned API methods
+  const get = useCallback(<T = any>(endpoint: string) => request<T>('GET', endpoint), [request]);
+  const post = useCallback(<T = any>(endpoint: string, data: any) => request<T>('POST', endpoint, data), [request]);
+  const put = useCallback(<T = any>(endpoint: string, data: any) => request<T>('PUT', endpoint, data), [request]);
+  const del = useCallback(<T = any>(endpoint: string) => request<T>('DELETE', endpoint), [request]);
+
+  return { get, post, put, del };
 }
 
 // --- Standalone API Client for non-component usage (e.g., Zustand stores) ---

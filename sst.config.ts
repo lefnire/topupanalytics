@@ -521,7 +521,8 @@ export default $config({
             { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] },
         ],
         environment: {
-            // PUBLIC_INGEST_URL is handled by route linking below
+            // PUBLIC_INGEST_URL is handled by route linking below // Keep comment for context
+            ROUTER_URL: router.url, // Pass the base router URL
             USE_STRIPE: useStripe.toString(), // Step 7: Add USE_STRIPE
         },
         nodejs: {
