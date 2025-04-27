@@ -42,42 +42,50 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
       // We still extract domains, is_active, allowed_fields from the body if provided.
       const { domains, is_active = true, allowed_fields = [] } = body;
 
-      if (!domains || !Array.isArray(domains)) { // Allow empty domains array
-        return createResponse(400, { error: "Bad Request: 'domains' must be an array." });
+      // --- Validation ---
+      // Domains: Must be a non-empty array of strings
+      if (!domains || !Array.isArray(domains) || domains.length === 0) {
+        return createResponse(400, { error: "Bad Request: 'domains' must be a non-empty array." });
       }
+      if (!domains.every(d => typeof d === 'string' && d.trim().length > 0)) {
+          return createResponse(400, { error: "Bad Request: 'domains' must contain only non-empty strings." });
+      }
+      // is_active: Must be a boolean
       if (typeof is_active !== 'boolean') {
           return createResponse(400, { error: "Bad Request: 'is_active' must be a boolean." });
       }
+      // allowed_fields: Must be an array (can be empty) of strings
       if (!Array.isArray(allowed_fields)) {
           return createResponse(400, { error: "Bad Request: 'allowed_fields' must be an array." });
       }
+       if (!allowed_fields.every(f => typeof f === 'string')) {
+          return createResponse(400, { error: "Bad Request: 'allowed_fields' must contain only strings." });
+      }
+      // --- End Validation ---
 
       const newSiteId = ulid();
+      const itemToSave = {
+        site_id: newSiteId,
+        owner_sub: userSub,
+        domains: domains, // Store as native list
+        plan: 'free_tier', // Default plan
+        request_allowance: 10000, // Default request allowance (updated)
+        is_active: is_active, // Store as native boolean
+        allowed_fields: allowed_fields, // Store as native list
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
       const putParams = new PutCommand({
         TableName: tableName,
-        Item: {
-          site_id: newSiteId,
-          owner_sub: userSub,
-          domains: JSON.stringify(domains), // Store as JSON string
-          plan: 'free_tier', // Set default plan directly
-          request_allowance: 1000, // Set default request allowance
-          is_active: is_active ? 1 : 0, // Store boolean as number
-          allowed_fields: JSON.stringify(allowed_fields), // Store as JSON string
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(), // Add updated_at on creation
-        },
+        Item: itemToSave,
         ConditionExpression: "attribute_not_exists(site_id)", // Ensure it doesn't overwrite
       });
+
       await docClient.send(putParams);
-      // Return the created item structure, including defaults
-      return createResponse(201, {
-          site_id: newSiteId,
-          domains, // Return original array
-          plan: 'free_tier', // Return the default plan
-          request_allowance: 1000, // Return the default allowance
-          is_active, // Return original boolean
-          allowed_fields // Return original array
-      });
+
+      // Return the created item structure
+      return createResponse(201, itemToSave);
     }
 
     // --- List Sites ---

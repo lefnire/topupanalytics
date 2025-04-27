@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router'; // Import from 'react-router' for v7
-import { useApiClient, type Site } from '../../lib/api'; // Use type-only import for Site
+import { Link, useNavigate } from 'react-router-dom'; // Correct import for react-router-dom v6+
+import { useApiClient, type Site } from '../../lib/api';
 import { Button } from '../../components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '../../components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table';
@@ -47,7 +47,12 @@ function SitesListPageContent() {
         {isLoading && <p>Loading sites...</p>}
         {error && <p className="text-red-500">{error}</p>}
         {!isLoading && !error && sites.length === 0 && (
-          <p>You haven't created any sites yet.</p>
+          <div className="text-center py-8">
+            <p className="mb-4">No sites found. Get started by creating your first one!</p>
+            <Button asChild>
+              <Link to="/sites/new">Create Your First Site</Link>
+            </Button>
+          </div>
         )}
         {!isLoading && !error && sites.length > 0 && (
           <Table>

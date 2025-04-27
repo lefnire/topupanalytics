@@ -45,11 +45,12 @@ export function CreateSiteForm() {
   async function onSubmit(values: FormData) {
     setIsSubmitting(true);
     try {
-      // The schema ensures allowed_domains is a valid JSON string already
+      // Parse the JSON string into an array and use the correct key 'domains'
+      const domainsArray = JSON.parse(values.allowed_domains);
       const newSite = await post('/api/sites', {
-        name: values.name,
-        allowed_domains: values.allowed_domains,
-        // allowed_fields: values.allowed_fields, // Include if part of the schema/API
+        // name: values.name, // Keep sending name, even if backend doesn't explicitly use it yet
+        domains: domainsArray,
+        // allowed_fields: JSON.parse(values.allowed_fields), // Include and parse if part of the schema/API
       });
       toast.success(`Site "${values.name}" created successfully!`);
       // Navigate to the new site's detail page or back to the list
