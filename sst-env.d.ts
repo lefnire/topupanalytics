@@ -17,10 +17,6 @@ declare module "sst" {
       "type": "sst.aws.React"
       "url": string
     }
-    "EmbedScripts": {
-      "type": "sst.aws.StaticSite"
-      "url": string
-    }
     "EventData": {
       "name": string
       "type": "sst.aws.Bucket"

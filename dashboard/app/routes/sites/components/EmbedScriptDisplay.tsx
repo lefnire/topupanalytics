@@ -56,11 +56,6 @@ export function EmbedScriptDisplay({ siteId }: EmbedScriptDisplayProps) {
   useEffect(() => {
     if (siteData) {
       try {
-        const cdnUrl = import.meta.env.VITE_EMBED_SCRIPT_CDN_URL;
-        if (!cdnUrl) {
-          throw new Error("Embed script CDN URL is not configured.");
-        }
-
         let filename: string;
         let level: string;
 
@@ -80,7 +75,8 @@ export function EmbedScriptDisplay({ siteId }: EmbedScriptDisplayProps) {
             break;
         }
 
-        const generatedTag = `<script defer data-site="${siteData.site_id}" data-level="${level}" src="${cdnUrl}/${filename}"></script>`;
+        // Construct the full URL for the script src using VITE_APP_URL
+        const generatedTag = `<script defer data-site="${siteData.site_id}" data-level="${level}" src="${import.meta.env.VITE_APP_URL}/${filename}"></script>`;
         setScriptTag(generatedTag);
         setError(null); // Clear any previous errors if script generation succeeds
       } catch (err: any) {
