@@ -13,17 +13,11 @@ import {
   TransactWriteCommand, // Corrected import for batching
 } from "@aws-sdk/lib-dynamodb";
 import {
-  colsCompliant,
-  colsAll as colsAll_,
-  isCompliant,
-  initialColsAll,
-  eventsColsAll
-} from './schema'
-import {log} from './utils'
-
-const colsAll = Object.fromEntries(colsAll_.map(c => [c, true]));
-const initialColsMap = Object.fromEntries(initialColsAll.map(c => [c, true]));
-const eventsColsMap = Object.fromEntries(eventsColsAll.map(c => [c, true]));
+  commonSchema,
+  initialOnlySchema,
+  SchemaField
+} from './schema';
+import { log } from './utils';
 
 // Initialize Firehose client
 const firehoseClient = new FirehoseClient({});
@@ -40,7 +34,8 @@ interface SiteConfig {
   site_id: string;
   is_active: number;
   domains?: string; // JSON stringified array
-  allowed_fields?: string; // JSON stringified array
+  // allowed_fields?: string; // Replaced by compliance_level
+  compliance_level?: 'yes' | 'maybe' | 'no'; // Updated compliance levels
   request_allowance: number;
   owner_sub?: string; // Needed for Stripe check if enabled
 }
@@ -79,11 +74,47 @@ async function loadFromDynamo(siteId: string): Promise<SiteConfig> {
     site_id: Item.site_id,
     is_active: Item.is_active,
     domains: Item.domains,
-    allowed_fields: Item.allowed_fields,
+    // allowed_fields: Item.allowed_fields, // Removed
+    compliance_level: Item.compliance_level, // Default removed as per greenfield project requirements
     request_allowance: request_allowance,
     owner_sub: Item.owner_sub,
-  } as SiteConfig; // Cast needed if Item is loosely typed
+  } as SiteConfig;
 }
+
+// Helper function to determine allowed fields based on compliance level
+function getAllowedFieldsSet(complianceLevel: 'yes' | 'maybe' | 'no', isInitialEvent: boolean): Set<string> {
+  const baseSchema: SchemaField[] = [...commonSchema];
+  if (isInitialEvent) {
+    baseSchema.push(...initialOnlySchema);
+  }
+
+  const allowedFields = new Set<string>();
+  for (const field of baseSchema) {
+    switch (complianceLevel) {
+      case 'yes':
+        if (field.safe === 'yes') {
+          allowedFields.add(field.name);
+        }
+        break;
+      case 'maybe':
+        if (field.safe === 'yes' || field.safe === 'maybe') {
+          allowedFields.add(field.name);
+        }
+        break;
+      case 'no':
+        // 'no' level allows all defined fields ('yes', 'maybe', 'no')
+        allowedFields.add(field.name);
+        break;
+    }
+  }
+
+  // Ensure essential fields are always included, although schema should cover them
+  allowedFields.add('site_id');
+  allowedFields.add('timestamp');
+
+  return allowedFields;
+}
+
 
 async function flush() {
   const updates = Object.entries(allowanceDelta).map(([site_id, cnt]) => ({
@@ -219,23 +250,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
       }
     }
 
-    // --- Fetch Allowed Fields Configuration (from cache) ---
-    const allowedFieldsStringFromCache = cfg.allowed_fields;
-    let allowedFields: string[] = [];
-    if (allowedFieldsStringFromCache) {
-        try {
-            allowedFields = JSON.parse(allowedFieldsStringFromCache);
-            log(`Using cached allowed_fields for site ${siteId}: ${allowedFields.join(', ')}`);
-        } catch (e) {
-            console.error(`Error parsing cached allowed_fields for site ${siteId}: ${allowedFieldsStringFromCache}`, e);
-            return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error: Cannot parse site configuration' }) };
-        }
-    } else {
-        log(`No allowed_fields configured in cache for site ${siteId}, allowing all.`);
-        allowedFields = Object.keys(colsAll); // Allow all known fields if not specified
-    }
-
-
     // --- Event Body Processing ---
     if (!event.body) {
       return { statusCode: 400, body: JSON.stringify({ message: 'Missing event body' }) };
@@ -296,23 +310,43 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
         };
       }
 
+      // --- Referer Handling (Conditional Scrubbing) ---
       const refererProps = (() => {
-        const origin = headers.origin;
-        const originDomain = origin ? new URL(origin).hostname : null;
-        const referer = body.referer || headers['referer'];
-        if (!referer) return { referer: "$direct", referer_domain: "$direct" };
+        const rawReferer = body.referer || headers['referer'];
+        if (!rawReferer || rawReferer === "$direct") {
+          return { referer: "$direct", referer_domain: "$direct" };
+        }
+
         try {
-          const refererUrl = new URL(referer);
+          const refererUrl = new URL(rawReferer);
+          const originalReferer = rawReferer; // Keep original
           const referer_domain = refererUrl.hostname;
+
+          // Check if referer is same as origin (if origin header exists)
+          const origin = headers.origin;
+          const originDomain = origin ? new URL(origin).hostname : null;
           if (originDomain && referer_domain === originDomain) {
-            return { referer: "$direct", referer_domain: "$direct" };
+            return { referer: "$direct", referer_domain: "$direct" }; // Treat same-origin as direct
           }
-          return { referer, referer_domain };
+
+          // Apply scrubbing only for 'yes' and 'maybe' compliance levels
+          const complianceLevel = cfg.compliance_level || 'maybe'; // Default to 'maybe' if not set
+          if (complianceLevel === 'yes' || complianceLevel === 'maybe') {
+            const scrubbedReferer = refererUrl.origin + refererUrl.pathname; // Keep only origin + path
+            log(`Scrubbing referer for compliance level: ${complianceLevel}`);
+            return { referer: scrubbedReferer, referer_domain };
+          } else {
+            // For 'no' compliance level, keep the original referer
+            log(`Keeping original referer for compliance level: ${complianceLevel}`);
+            return { referer: originalReferer, referer_domain };
+          }
         } catch (e) {
-          console.warn("Invalid referer URL:", referer, e);
-          return { referer: "$invalid", referer_domain: "$invalid" };
+          console.warn("Invalid referer URL:", rawReferer, e);
+          // Keep original invalid value if parsing fails, but mark domain as invalid
+          return { referer: rawReferer, referer_domain: "$invalid" };
         }
       })();
+
 
       dataToSend = {
         // Client-provided mandatory fields
@@ -323,7 +357,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
         // Server-enriched geo & device data
         ...geoProps,
         ...deviceProps,
-        ...refererProps,
+        ...refererProps, // Use potentially scrubbed referer data
 
         // Screen dimensions: Client only (ensure string)
         screen_height: body.screen_height?.toString(),
@@ -356,37 +390,27 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
       };
     }
 
-    log("Raw dataToSend", dataToSend);
+    log("Data before compliance filtering", dataToSend);
 
-    // --- Field Filtering based on Site Configuration ---
-    const essentialFields = new Set(['site_id', 'timestamp', 'event', 'session_id', 'pathname']); // Fields always kept
-    const allowedFieldsSet = new Set(allowedFields);
-    const filteredDataToSend: Record<string, any> = {};
+    // --- Compliance-Based Filtering ---
+    const complianceLevel = cfg.compliance_level || 'maybe'; // Default to 'maybe' if not set in config
+    const allowedFieldsSet = getAllowedFieldsSet(complianceLevel, isInitialEvent);
+    log(`Applying filtering for compliance level: ${complianceLevel}. Allowed fields:`, Array.from(allowedFieldsSet));
 
+    const filteredData: Record<string, any> = {};
     for (const key in dataToSend) {
-        if (essentialFields.has(key) || allowedFieldsSet.has(key)) {
-            filteredDataToSend[key] = dataToSend[key];
+      if (allowedFieldsSet.has(key)) {
+        // Additionally, remove null/undefined values here (except for properties object)
+        if ((dataToSend[key] !== undefined && dataToSend[key] !== null) || key === 'properties') {
+          filteredData[key] = dataToSend[key];
+        } else {
+           log(`Removing null/undefined field (post-filter): ${key}`);
         }
-    }
-    log("Data after site-specific field filtering", filteredDataToSend);
-    dataToSend = filteredDataToSend; // Replace original data with filtered data
-
-    // --- Common Cleanup (Null/Undefined Removal) ---
-    Object.keys(dataToSend).forEach(key => {
-      // // Compliance filter removed - handled by allowed_fields now
-      // if (ONLY_COMPLIANT && !isCompliant[key]) {
-      //   delete dataToSend[key]; // Remove non-compliant fields directly
-      //   return; // Continue to next key
-      // }
-
-      // Remove null or undefined values (except for properties object itself)
-      if ((dataToSend[key] === undefined || dataToSend[key] === null) && key !== 'properties') {
-         // Sending null might cause issues with Parquet conversion depending on schema nullability.
-         // Sending an empty string '' is often safer for string columns.
-         // We choose to delete the key entirely for cleanliness.
-        delete dataToSend[key];
+      } else {
+        log(`Filtering out field due to compliance level ${complianceLevel}: ${key}`);
       }
-    });
+    }
+    dataToSend = filteredData; // Replace with filtered data
 
     // Ensure stream name is defined
     if (!streamName) {

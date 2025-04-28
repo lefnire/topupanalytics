@@ -13,6 +13,21 @@ import { ulid } from "ulid"; // For generating unique site IDs
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
 
+// Define a type for the Site object for clarity
+type Site = {
+  site_id: string;
+  owner_sub: string;
+  name: string;
+  domains: string[];
+  plan: string;
+  request_allowance: number;
+  is_active: boolean;
+  allowed_fields: string[];
+  compliance_level?: 'yes' | 'maybe' | 'no'; // Updated compliance levels
+  created_at: string;
+  updated_at: string;
+};
+
 // Helper function for standard responses
 const createResponse = (statusCode: number, body: any) => ({
   statusCode,
@@ -39,8 +54,8 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
     if (routeKey === "POST /api/sites") {
       const body = event.body ? JSON.parse(event.body) : {};
       // Note: 'plan' default is now handled directly in the Item below.
-      // We extract name, domains, is_active, allowed_fields from the body if provided.
-      const { name, domains, is_active = true, allowed_fields = [] } = body;
+      // We extract name, domains, is_active, allowed_fields, compliance_level from the body if provided.
+      const { name, domains, is_active = true, allowed_fields = [], compliance_level } = body;
 
       // --- Validation ---
       // Name: Must be a non-empty string
@@ -64,22 +79,30 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
       }
        if (!allowed_fields.every(f => typeof f === 'string')) {
           return createResponse(400, { error: "Bad Request: 'allowed_fields' must contain only strings." });
-      }
-      // --- End Validation ---
+     }
+     // compliance_level: Must be 'yes', 'maybe', or 'no' if provided
+     const validComplianceLevels = ['yes', 'maybe', 'no'];
+     if (compliance_level !== undefined && (typeof compliance_level !== 'string' || !validComplianceLevels.includes(compliance_level))) {
+         return createResponse(400, { error: "Bad Request: 'compliance_level' must be either 'yes', 'maybe', or 'no'." });
+     }
+     // --- End Validation ---
 
-      const newSiteId = ulid();
-      const itemToSave = {
-        site_id: newSiteId,
-        owner_sub: userSub,
-        name: name.trim(), // Store trimmed name
-        domains: domains, // Store as native list
-        plan: 'free_tier', // Default plan
-        request_allowance: 10000, // Default request allowance (updated)
-        is_active: is_active, // Store as native boolean
-        allowed_fields: allowed_fields, // Store as native list
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
+     const newSiteId = ulid();
+     // Use the Site type for the item
+     const itemToSave: Site = {
+       site_id: newSiteId,
+       owner_sub: userSub,
+       name: name.trim(), // Store trimmed name
+       domains: domains, // Store as native list
+       plan: 'free_tier', // Default plan
+       request_allowance: 10000, // Default request allowance (updated)
+       is_active: is_active, // Store as native boolean
+       allowed_fields: allowed_fields, // Store as native list
+       // Default to 'maybe' if not provided or invalid (though validation catches invalid)
+       compliance_level: compliance_level && validComplianceLevels.includes(compliance_level) ? compliance_level : 'maybe',
+       created_at: new Date().toISOString(),
+       updated_at: new Date().toISOString(),
+     };
 
       const putParams = new PutCommand({
         TableName: tableName,
@@ -106,6 +129,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
         // ProjectionExpression: "site_id, domains, created_at"
       });
       const { Items } = await docClient.send(queryParams);
+      // Default compliance_level removed as per greenfield project requirements
       return createResponse(200, Items || []);
     }
 
@@ -125,16 +149,17 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
       if (!Item || Item.owner_sub !== userSub) {
         return createResponse(404, { error: "Site not found or access denied" });
       }
+      // Default compliance_level removed as per greenfield project requirements
       return createResponse(200, Item);
     }
 
     // --- Update Site ---
     if (routeKey === "PUT /api/sites/{site_id}") {
         const body = event.body ? JSON.parse(event.body) : {};
-        const { name, domains, plan, is_active, allowed_fields } = body; // Add 'name'
+        const { name, domains, plan, is_active, allowed_fields, compliance_level } = body; // Add 'name' and 'compliance_level'
 
-        if (name === undefined && domains === undefined && plan === undefined && is_active === undefined && allowed_fields === undefined) {
-            return createResponse(400, { error: "Bad Request: Requires 'name', 'domains', 'plan', 'is_active', or 'allowed_fields' in body." });
+        if (name === undefined && domains === undefined && plan === undefined && is_active === undefined && allowed_fields === undefined && compliance_level === undefined) {
+            return createResponse(400, { error: "Bad Request: Requires 'name', 'domains', 'plan', 'is_active', 'allowed_fields', or 'compliance_level' in body." });
         }
 
         let updateExpression = "SET updated_at = :now";
@@ -182,6 +207,15 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
             }
             updateExpression += ", allowed_fields = :allowed_fields";
             expressionAttributeValues[":allowed_fields"] = allowed_fields; // Store as native list
+        }
+        if (compliance_level !== undefined) {
+            const validComplianceLevels = ['yes', 'maybe', 'no'];
+            if (typeof compliance_level !== 'string' || !validComplianceLevels.includes(compliance_level)) {
+                return createResponse(400, { error: "Bad Request: 'compliance_level' must be either 'yes', 'maybe', or 'no'." });
+            }
+            // Only update if a valid value is provided
+            updateExpression += ", compliance_level = :compliance_level";
+            expressionAttributeValues[":compliance_level"] = compliance_level;
         }
 
         const updateParams = new UpdateCommand({

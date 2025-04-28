@@ -9,7 +9,8 @@ import { Button } from '../../../components/ui/button';
 import { Input } from '../../../components/ui/input';
 import { Label } from '../../../components/ui/label';
 import { Textarea } from '../../../components/ui/textarea';
-import { Checkbox } from '../../../components/ui/checkbox'; // Need to add this
+import { Checkbox } from '../../../components/ui/checkbox';
+// Removed incorrect RadioGroup import
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from '../../../components/ui/form';
 import { toast } from 'sonner';
 
@@ -17,10 +18,11 @@ import { toast } from 'sonner';
 const formSchema = z.object({
   name: z.string().min(2, { message: "Site name must be at least 2 characters." }),
   allowed_domains: z.string().optional(), // Accept string, parse in onSubmit
-  allowed_fields: z.array(z.string()).optional(), // Expect an array of strings for checkboxes
+  compliance_level: z.enum(['yes', 'maybe', 'no'], { required_error: "Compliance level is required." }), // Updated compliance level
   is_active: z.boolean(),
 });
 
+// Infer the type directly, including the new field
 type FormData = z.infer<typeof formSchema>;
 
 interface SiteSettingsFormProps {
@@ -40,8 +42,8 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
       name: site.name || "",
       // Join array into newline-separated string for textarea
       allowed_domains: Array.isArray(site.allowed_domains) ? site.allowed_domains.join('\n') : "",
-      // Use the array directly, default to empty array if null/undefined
-      allowed_fields: Array.isArray(site.allowed_fields) ? site.allowed_fields : [],
+      // Initialize compliance_level, default to 'enhanced' if not set
+      compliance_level: site.compliance_level || 'maybe', // Default to 'maybe'
       is_active: site.is_active ?? true, // Default to true if undefined/null
     },
   });
@@ -52,8 +54,8 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
       name: site.name || "",
       // Join array into newline-separated string for textarea
       allowed_domains: Array.isArray(site.allowed_domains) ? site.allowed_domains.join('\n') : "",
-       // Use the array directly, default to empty array if null/undefined
-      allowed_fields: Array.isArray(site.allowed_fields) ? site.allowed_fields : [],
+      // Reset compliance_level, default to 'enhanced' if not set
+      compliance_level: site.compliance_level || 'maybe', // Default to 'maybe'
       is_active: site.is_active ?? true,
     });
   }, [site, form]);
@@ -71,7 +73,7 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
       const updatedSiteData = {
         name: values.name,
         domains: domainsArray, // Use parsed array and correct key
-        allowed_fields: values.allowed_fields || [], // Send the array directly
+        compliance_level: values.compliance_level, // Send the selected compliance level
         is_active: values.is_active,
       };
 
@@ -130,49 +132,91 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
             </FormItem>
           )}
         />
-        {/* Allowed Fields Checkboxes */}
+        {/* Compliance Level Radio Group */}
+        {/* Compliance Level Radio Group - Updated for yes/maybe/no */}
         <FormField
           control={form.control}
-          name="allowed_fields"
+          name="compliance_level"
           render={({ field }) => (
-            <FormItem>
-              <FormLabel>Allowed Data Fields</FormLabel>
-              <FormDescription>
-                Select the URL parameters or custom event data fields you want to collect.
-              </FormDescription>
-              <div className="space-y-2 pt-2">
-                {initialEventsSchema.map((schemaField) => (
-                  <FormField
-                    key={schemaField.name}
-                    control={form.control}
-                    name="allowed_fields"
-                    render={({ field: checkboxField }) => { // Rename inner field to avoid conflict
-                      return (
-                        <FormItem className="flex flex-row items-start space-x-3 space-y-0">
-                          <FormControl>
-                            <Checkbox
-                              checked={checkboxField.value?.includes(schemaField.name)}
-                              onCheckedChange={(checked) => {
-                                return checked
-                                  ? checkboxField.onChange([...(checkboxField.value || []), schemaField.name])
-                                  : checkboxField.onChange(
-                                      (checkboxField.value || []).filter(
-                                        (value) => value !== schemaField.name
-                                      )
-                                    );
-                              }}
-                              disabled={isSubmitting}
-                            />
-                          </FormControl>
-                          <FormLabel className="font-normal">
-                            {schemaField.name}
-                          </FormLabel>
-                        </FormItem>
-                      );
-                    }}
-                  />
-                ))}
+            <FormItem className="space-y-3">
+              <FormLabel>Compliance Level</FormLabel>
+              {/* Use standard HTML radio inputs */}
+              <div className="space-y-3">
+                {/* Yes Option */}
+                <div className="flex items-start space-x-3"> {/* Changed to items-start for better alignment with multi-line descriptions */}
+                  <FormControl>
+                    <input
+                      type="radio"
+                      {...field}
+                      value="yes"
+                      checked={field.value === 'yes'}
+                      onChange={field.onChange}
+                      disabled={isSubmitting}
+                      id="compliance-yes"
+                      className="form-radio h-4 w-4 text-indigo-600 transition duration-150 ease-in-out mt-1" // Added mt-1 for alignment
+                    />
+                  </FormControl>
+                  <div className="flex flex-col"> {/* Wrap label and description */}
+                    <Label htmlFor="compliance-yes" className="font-medium"> {/* Use standard Label, slightly bolder */}
+                      Yes (Maximum Privacy)
+                    </Label>
+                    <FormDescription className="text-sm"> {/* Removed pl-7, handled by flex container */}
+                      Collects only essential, anonymous data (e.g., country, page path, device class). Fields marked 'maybe' or 'no' in the schema are excluded. No cookie banner needed.
+                    </FormDescription>
+                  </div>
+                </div>
+
+                {/* Maybe Option */}
+                <div className="flex items-start space-x-3">
+                  <FormControl>
+                    <input
+                      type="radio"
+                      {...field}
+                      value="maybe"
+                      checked={field.value === 'maybe'}
+                      onChange={field.onChange}
+                      disabled={isSubmitting}
+                      id="compliance-maybe"
+                      className="form-radio h-4 w-4 text-indigo-600 transition duration-150 ease-in-out mt-1"
+                    />
+                  </FormControl>
+                   <div className="flex flex-col">
+                    <Label htmlFor="compliance-maybe" className="font-medium">
+                      Maybe (Balanced - Default)
+                    </Label>
+                    <FormDescription className="text-sm">
+                      Collects essential data plus potentially identifying data (e.g., city, browser version, screen size) using privacy-preserving techniques where applicable (like referer scrubbing). Fields marked 'no' are excluded. Requires privacy policy + opt-out.
+                    </FormDescription>
+                  </div>
+                </div>
+
+                {/* No Option */}
+                <div className="flex items-start space-x-3">
+                  <FormControl>
+                    <input
+                      type="radio"
+                      {...field}
+                      value="no"
+                      checked={field.value === 'no'}
+                      onChange={field.onChange}
+                      disabled={isSubmitting}
+                      id="compliance-no"
+                      className="form-radio h-4 w-4 text-indigo-600 transition duration-150 ease-in-out mt-1"
+                    />
+                  </FormControl>
+                  <div className="flex flex-col">
+                    <Label htmlFor="compliance-no" className="font-medium">
+                      No (Full Data - Requires Consent)
+                    </Label>
+                    <FormDescription className="text-sm">
+                      Collects all available data defined in the schema, including potentially sensitive fields (e.g., device model, manufacturer). <strong>Requires explicit user consent (cookie banner).</strong>
+                    </FormDescription>
+                  </div>
+                </div>
               </div>
+              <FormDescription className="pt-2"> {/* Keep the general note */}
+                Note: Changing the compliance level only affects data collected going forward. It does not alter historical data.
+              </FormDescription>
               <FormMessage />
             </FormItem>
           )}

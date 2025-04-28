@@ -179,7 +179,8 @@ export interface Site {
     user_id: string;
     name: string;
     allowed_domains: string; // JSON string array
-    allowed_fields: string; // JSON string array
+    // allowed_fields: string; // Removed - Replaced by compliance_level
+    compliance_level?: 'yes' | 'maybe' | 'no'; // Updated to three levels
     is_active: boolean;
     created_at: string;
     updated_at: string;
