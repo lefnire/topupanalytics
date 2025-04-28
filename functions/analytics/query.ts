@@ -61,8 +61,16 @@ console.log({Resource})
 const DATABASE = Resource.GlueCatalogDatabase.name;
 const INITIAL_EVENTS_TABLE = process.env.ATHENA_INITIAL_EVENTS_ICEBERG_TABLE;
 const EVENTS_TABLE = process.env.ATHENA_EVENTS_ICEBERG_TABLE;
-const OUTPUT_LOCATION = process.env.ATHENA_OUTPUT_LOCATION;
+const OUTPUT_LOCATION = Resource.AthenaResults.name;
 const SITES_TABLE_NAME = Resource.SitesTable.name;
+console.log({
+  DATABASE,
+  INITIAL_EVENTS_TABLE,
+  EVENTS_TABLE,
+  OUTPUT_LOCATION,
+  SITES_TABLE_NAME
+})
+
 
 // Helper function for sleep
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));

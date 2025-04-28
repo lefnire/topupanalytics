@@ -22,13 +22,13 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
   const method = event.requestContext.http.method;
   const routeKey = event.routeKey;
   // Log the entire authorizer context for debugging
-  console.log("Authorizer Context:", JSON.stringify(event.requestContext.authorizer, null, 2));
+  // console.log("Authorizer Context:", JSON.stringify(event.requestContext.authorizer, null, 2));
 
   const claims = event.requestContext.authorizer?.jwt.claims;
   const userSub = claims?.sub as string | undefined;
 
-  console.log("Extracted Claims:", JSON.stringify(claims, null, 2));
-  console.log("Extracted userSub:", userSub);
+  // console.log("Extracted Claims:", JSON.stringify(claims, null, 2));
+  // console.log("Extracted userSub:", userSub);
 
   if (!userSub) {
     console.error("User identifier (sub) is missing from authorizer claims.");

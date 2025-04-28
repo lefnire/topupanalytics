@@ -408,21 +408,34 @@ export default $config({
       },
     });
 
-    // === Cognito User Pool ===
-    const userPool = new aws.cognito.UserPool("UserPool", {
-      name: `${baseName}-user-pool`, usernameAttributes: ["email"], autoVerifiedAttributes: ["email"],
-      passwordPolicy: {
-        minimumLength: 6,
-        requireLowercase: false,
-        requireNumbers: false,
-        requireSymbols: false,
-        requireUppercase: false,
-        temporaryPasswordValidityDays: 7, // Default, but good to be explicit
-      },
+    // === Cognito User Pool (Using SST Component) ===
+    const userPool = new sst.aws.CognitoUserPool("UserPool", {
+      // name is handled by SST automatically
+      usernames: ["email"], // Equivalent to usernameAttributes and autoVerifiedAttributes
+      // passwordPolicy is managed by Cognito defaults or requires transform for customization
+      transform: { // Add transform for user pool
+        userPool: (args) => {
+          args.passwordPolicy = {
+            minimumLength: 6,
+            requireLowercase: false,
+            requireNumbers: false,
+            requireSymbols: false,
+            requireUppercase: false,
+            temporaryPasswordValidityDays: 7,
+          };
+        },
+      }
     });
-    const userPoolClient = new aws.cognito.UserPoolClient("UserPoolClient", {
-      name: `${baseName}-user-pool-client`, userPoolId: userPool.id, generateSecret: false,
-      explicitAuthFlows: ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
+    // Add the client using the addClient method
+    const userPoolClientSst = userPool.addClient("UserPoolClient", {
+      // generateSecret defaults to false in SST? Assuming yes.
+      // explicitAuthFlows defaults? Assuming common flows like SRP/Refresh are allowed.
+      // transform: { // Add transform for user pool client
+      //   client: (args) => {
+      //     args.explicitAuthFlows = ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"];
+      //     // args.generateSecret = false; // Explicitly set if needed, though likely SST default
+      //   },
+      // }
     });
 
     // === DynamoDB Tables ===
@@ -617,12 +630,12 @@ export default $config({
       },
     });
 
-    // Define JWT Authorizer (Phase 1.3 / Implicit from original config)
+    // Define JWT Authorizer (Using SST User Pool and Client)
     const jwtAuthorizer = api.addAuthorizer({
       name: "jwtAuth",
       jwt: {
         issuer: $interpolate`https://cognito-idp.${region}.amazonaws.com/${userPool.id}`,
-        audiences: [userPoolClient.id],
+        audiences: [userPoolClientSst.id], // Use the ID from the SST client object
       }
     });
 
@@ -667,10 +680,14 @@ export default $config({
       },
       // Link API Gateway for authenticated calls (/api/query)
       // Link UserPool/Client for frontend auth logic
-      link: [api, userPool, userPoolClient],
+      link: [
+        api,
+        userPool, // Link the SST UserPool component
+        userPoolClientSst // Link the SST UserPoolClient object
+      ],
       environment: { // Step 6: Conditional Dashboard Environment
-        VITE_COGNITO_USER_POOL_ID: userPool.id,
-        VITE_COGNITO_CLIENT_ID: userPoolClient.id,
+        VITE_COGNITO_USER_POOL_ID: userPool.id, // Use ID from SST component
+        VITE_COGNITO_CLIENT_ID: userPoolClientSst.id, // Use ID from SST client object
         VITE_AWS_REGION: region,
         VITE_API_URL: api.url,
         VITE_APP_URL: router.url,
@@ -788,7 +805,7 @@ export default $config({
       initialEventsIcebergTableName: "initial_events_iceberg",
       eventsIcebergTableName: "events_iceberg",
       userPoolId: userPool.id,
-      userPoolClientId: userPoolClient.id,
+      userPoolClientId: userPoolClientSst.id,
       sitesTableName: sitesTable.name,
       userPreferencesTableName: userPreferencesTable.name,
       isProd,

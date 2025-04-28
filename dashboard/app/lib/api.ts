@@ -108,11 +108,11 @@ export function useApiClient() {
 // Re-usable function to get the token
 const getAuthToken = async (): Promise<string | null> => {
  try {
-   console.log("Standalone API: Attempting to fetch auth session...");
+   // console.log("Standalone API: Attempting to fetch auth session...");
    const session = await fetchAuthSession();
-   console.log("Standalone API: Auth session fetched:", session);
+   // console.log("Standalone API: Auth session fetched:", session);
    const idToken = session.tokens?.idToken?.toString();
-   console.log("Standalone API: Extracted ID Token:", idToken);
+   // console.log("Standalone API: Extracted ID Token:", idToken);
    return idToken || null;
  } catch (error) {
    console.error("Standalone API: Failed to get auth token during fetchAuthSession", error);
@@ -127,7 +127,7 @@ const standaloneRequest = async <T = any>(
  data?: any
 ): Promise<T> => {
  const token = await getAuthToken();
- console.log(`Standalone API: Token for ${method} ${endpoint}:`, token); // Log the token being used
+ // console.log(`Standalone API: Token for ${method} ${endpoint}:`, token); // Log the token being used
   // Basic error handling if token fetch fails, might need more robust handling
   if (!token && !endpoint.includes('/public/')) { // Allow public endpoints if needed
       console.error(`Standalone API: No token available for protected endpoint ${endpoint}`);
