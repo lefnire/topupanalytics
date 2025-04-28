@@ -14,10 +14,50 @@ const TestIngestRoute: React.FC = () => {
 
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isScriptLoaded, setIsScriptLoaded] = useState(false); // State to track script loading
 
   useEffect(() => {
-    injectScript()
-  }, [])
+    const scriptId = 'topup-embed-script';
+    // Check if the script already exists to avoid duplicates during HMR or strict mode double-invocation
+    let existingScript = document.getElementById(scriptId);
+    if (existingScript) {
+      console.log('TopUp script already present, skipping injection.');
+      // Optionally, you might want to ensure attributes are correct if script exists
+      // but this basic check prevents duplicate script tags.
+    } else {
+      const script = document.createElement('script');
+      script.id = scriptId; // Add an ID for easy removal
+      script.src = '/topup-enhanced.min.js'; // Load the dynamically generated script
+      script.defer = true;
+      script.setAttribute('data-site', '01JSTZ5PKC8T3NE2RH0ZYWJWM3'); // Site ID from old injectScript
+      script.setAttribute('data-level', 'enhanced'); // Specify the level
+
+      // Add onload and onerror handlers BEFORE appending
+      script.onload = () => {
+        console.log('TopUp script loaded successfully.');
+        setIsScriptLoaded(true);
+      };
+      script.onerror = () => {
+        console.error('Failed to load TopUp script.');
+        setError('Failed to load the analytics script.');
+        // Consider setting isScriptLoaded to false or handling differently if needed
+      };
+
+      document.body.appendChild(script);
+      console.log('TopUp script injected.');
+    }
+
+    // Cleanup function to remove the script when the component unmounts
+    return () => {
+      const scriptToRemove = document.getElementById(scriptId);
+      if (scriptToRemove) {
+        document.body.removeChild(scriptToRemove);
+        console.log('TopUp script removed on unmount.');
+        // Consider if cleaning window.topup is necessary or handled by the script itself
+        // delete window.topup;
+      }
+    };
+  }, []); // Empty dependency array ensures this runs only once on mount and cleans up on unmount
 
   const handleSendEvent = useCallback(() => {
     setFeedback(null); // Clear previous feedback
@@ -54,7 +94,15 @@ const TestIngestRoute: React.FC = () => {
         This page sends a test event (<code>test_dogfood_event</code>) associated with the site ID{' '}
         <code>01JSTPAD505QAGBCMBVRBPP6DP</code> using the global <code>window.topup.event</code> function.
       </p>
-      <button onClick={handleSendEvent} style={{ padding: '10px 15px', cursor: 'pointer' }}>
+      <button
+        onClick={handleSendEvent}
+        disabled={!isScriptLoaded}
+        style={{
+          padding: '10px 15px',
+          cursor: isScriptLoaded ? 'pointer' : 'not-allowed',
+          opacity: isScriptLoaded ? 1 : 0.6
+        }}
+      >
         Send Test Event
       </button>
       {feedback && <p style={{ color: 'green', marginTop: '10px' }}>{feedback}</p>}
@@ -64,83 +112,3 @@ const TestIngestRoute: React.FC = () => {
 };
 
 export default TestIngestRoute;
-
-function injectScript() {
-  (function() {
-    if (window.topup) {
-      console.warn('TopUp script already loaded.');
-      return;
-    }
-
-    const siteId = '01JSTZ5PKC8T3NE2RH0ZYWJWM3';
-    const ingestUrl = 'https://d214ciuro9isnp.cloudfront.net/api/event'; // Use the dynamically generated ingest URL
-
-    // Simple session ID management using sessionStorage
-    function getSessionId() {
-      let sid = sessionStorage.getItem('topup_sid');
-      let isNewSession = false;
-      if (!sid) {
-        sid = Date.now() + '-' + Math.random().toString(36).substring(2);
-        sessionStorage.setItem('topup_sid', sid);
-        isNewSession = true;
-      }
-      return { sessionId: sid, isNewSession: isNewSession };
-    }
-
-    // Function to extract basic UTM parameters
-    function getUtmParams() {
-      const params = new URLSearchParams(window.location.search);
-      const utm = {};
-      ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'].forEach(key => {
-        if (params.has(key)) {
-          utm[key] = params.get(key);
-        }
-      });
-      return utm;
-    }
-
-    window.topup = {
-      event: function(eventName, payload = {}) {
-        try {
-          const { sessionId, isNewSession } = getSessionId();
-          const data = {
-            site_id: siteId,
-            session_id: sessionId,
-            event: eventName,
-            pathname: window.location.pathname,
-            timestamp: new Date().toISOString(),
-            properties: payload,
-          };
-
-          if (isNewSession) {
-            data.is_initial_event = true;
-            data.referer = document.referrer || null; // Use null if empty
-            data.screen_width = window.screen.width;
-            data.screen_height = window.screen.height;
-            const utmParams = getUtmParams();
-            if (Object.keys(utmParams).length > 0) {
-              data.utm_params = utmParams; // Nest UTM params under a key
-            }
-          }
-
-          // Use keepalive: true for reliability on page unload
-          fetch(ingestUrl + '?site=' + siteId, { // Pass siteId in query param as well for potential routing/filtering
-            method: 'POST',
-            body: JSON.stringify(data),
-            headers: { 'Content-Type': 'application/json' },
-            keepalive: true
-          }).catch(console.error); // Basic error handling
-
-        } catch (error) {
-          console.error('TopUp Error:', error);
-        }
-      }
-    };
-
-    // Track initial pageview automatically
-    window.topup.event('pageview');
-
-    console.log('TopUp Analytics Initialized for site: ' + siteId);
-
-  })();
-}

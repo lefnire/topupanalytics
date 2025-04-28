@@ -32,7 +32,6 @@ const USER_PREFERENCES_TABLE_NAME = process.env.USER_PREFERENCES_TABLE_NAME;
 // --- Caching & Batching Implementation ---
 interface SiteConfig {
   site_id: string;
-  is_active: number;
   domains?: string; // JSON stringified array
   // allowed_fields?: string; // Replaced by compliance_level
   compliance_level?: 'yes' | 'maybe' | 'no'; // Updated compliance levels
@@ -60,19 +59,12 @@ async function loadFromDynamo(siteId: string): Promise<SiteConfig> {
     throw new Error('Forbidden: Invalid site identifier'); // Throw error to be caught by handler
   }
 
-  // Expecting is_active to be 1 (true) or 0 (false) from DynamoDB
-  if (Item.is_active !== 1) {
-    log(`Site ${siteId} is not active.`);
-    throw new Error('Forbidden: Site inactive'); // Throw error
-  }
-
   // Basic validation passed, return the config
   // Ensure request_allowance is a number, default to 0 if missing/invalid
   const request_allowance = typeof Item.request_allowance === 'number' ? Item.request_allowance : 0;
 
   return {
     site_id: Item.site_id,
-    is_active: Item.is_active,
     domains: Item.domains,
     // allowed_fields: Item.allowed_fields, // Removed
     compliance_level: Item.compliance_level, // Default removed as per greenfield project requirements

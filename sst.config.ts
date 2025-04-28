@@ -436,7 +436,6 @@ export default $config({
         // domains: "string", // JSON stringified list of allowed referer domains
         // // stripe_subscription_id: "string", // Removed - Replaced by payment method on user
         // request_allowance: "number", // Added - Usage-based billing allowance
-        // is_active: "number", // 0 or 1: Is the site allowed to ingest data?
         // allowed_fields: "string", // JSON stringified list of event fields allowed (for GDPR/filtering)
       },
       primaryIndex: {hashKey: "site_id"},

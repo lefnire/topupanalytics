@@ -19,7 +19,6 @@ const formSchema = z.object({
   name: z.string().min(2, { message: "Site name must be at least 2 characters." }),
   allowed_domains: z.string().optional(), // Accept string, parse in onSubmit
   compliance_level: z.enum(['yes', 'maybe', 'no'], { required_error: "Compliance level is required." }), // Updated compliance level
-  is_active: z.boolean(),
 });
 
 // Infer the type directly, including the new field
@@ -44,7 +43,6 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
       allowed_domains: Array.isArray(site.allowed_domains) ? site.allowed_domains.join('\n') : "",
       // Initialize compliance_level, default to 'enhanced' if not set
       compliance_level: site.compliance_level || 'maybe', // Default to 'maybe'
-      is_active: site.is_active ?? true, // Default to true if undefined/null
     },
   });
 
@@ -56,7 +54,6 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
       allowed_domains: Array.isArray(site.allowed_domains) ? site.allowed_domains.join('\n') : "",
       // Reset compliance_level, default to 'enhanced' if not set
       compliance_level: site.compliance_level || 'maybe', // Default to 'maybe'
-      is_active: site.is_active ?? true,
     });
   }, [site, form]);
 
@@ -74,7 +71,6 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
         name: values.name,
         domains: domainsArray, // Use parsed array and correct key
         compliance_level: values.compliance_level, // Send the selected compliance level
-        is_active: values.is_active,
       };
 
       const updatedSite = await put<Site>(`/api/sites/${site.site_id}`, updatedSiteData);
@@ -217,30 +213,6 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
               <FormDescription className="pt-2"> {/* Keep the general note */}
                 Note: Changing the compliance level only affects data collected going forward. It does not alter historical data.
               </FormDescription>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-        <FormField
-          control={form.control}
-          name="is_active"
-          render={({ field }) => (
-            <FormItem className="flex flex-row items-start space-x-3 space-y-0 rounded-md border p-4">
-               <FormControl>
-                <Checkbox
-                  checked={field.value}
-                  onCheckedChange={field.onChange}
-                  disabled={isSubmitting}
-                />
-              </FormControl>
-              <div className="space-y-1 leading-none">
-                <FormLabel>
-                  Active Status
-                </FormLabel>
-                <FormDescription>
-                  Enable or disable tracking for this site. Inactive sites will not collect data.
-                </FormDescription>
-              </div>
               <FormMessage />
             </FormItem>
           )}

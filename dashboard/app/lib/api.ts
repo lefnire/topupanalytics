@@ -181,7 +181,6 @@ export interface Site {
     allowed_domains: string; // JSON string array
     // allowed_fields: string; // Removed - Replaced by compliance_level
     compliance_level?: 'yes' | 'maybe' | 'no'; // Updated to three levels
-    is_active: boolean;
     created_at: string;
     updated_at: string;
     request_allowance: number; // Added

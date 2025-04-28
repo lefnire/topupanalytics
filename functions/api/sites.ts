@@ -21,7 +21,6 @@ type Site = {
   domains: string[];
   plan: string;
   request_allowance: number;
-  is_active: boolean;
   allowed_fields: string[];
   compliance_level?: 'yes' | 'maybe' | 'no'; // Updated compliance levels
   created_at: string;
@@ -55,7 +54,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
       const body = event.body ? JSON.parse(event.body) : {};
       // Note: 'plan' default is now handled directly in the Item below.
       // We extract name, domains, is_active, allowed_fields, compliance_level from the body if provided.
-      const { name, domains, is_active = true, allowed_fields = [], compliance_level } = body;
+      const { name, domains, allowed_fields = [], compliance_level } = body;
 
       // --- Validation ---
       // Name: Must be a non-empty string
@@ -68,10 +67,6 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
       }
       if (!domains.every(d => typeof d === 'string' && d.trim().length > 0)) {
           return createResponse(400, { error: "Bad Request: 'domains' must contain only non-empty strings." });
-      }
-      // is_active: Must be a boolean
-      if (typeof is_active !== 'boolean') {
-          return createResponse(400, { error: "Bad Request: 'is_active' must be a boolean." });
       }
       // allowed_fields: Must be an array (can be empty) of strings
       if (!Array.isArray(allowed_fields)) {
@@ -96,7 +91,6 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
        domains: domains, // Store as native list
        plan: 'free_tier', // Default plan
        request_allowance: 10000, // Default request allowance (updated)
-       is_active: is_active, // Store as native boolean
        allowed_fields: allowed_fields, // Store as native list
        // Default to 'maybe' if not provided or invalid (though validation catches invalid)
        compliance_level: compliance_level && validComplianceLevels.includes(compliance_level) ? compliance_level : 'maybe',
@@ -156,10 +150,10 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
     // --- Update Site ---
     if (routeKey === "PUT /api/sites/{site_id}") {
         const body = event.body ? JSON.parse(event.body) : {};
-        const { name, domains, plan, is_active, allowed_fields, compliance_level } = body; // Add 'name' and 'compliance_level'
+        const { name, domains, plan, allowed_fields, compliance_level } = body; // Add 'name' and 'compliance_level'
 
-        if (name === undefined && domains === undefined && plan === undefined && is_active === undefined && allowed_fields === undefined && compliance_level === undefined) {
-            return createResponse(400, { error: "Bad Request: Requires 'name', 'domains', 'plan', 'is_active', 'allowed_fields', or 'compliance_level' in body." });
+        if (name === undefined && domains === undefined && plan === undefined && allowed_fields === undefined && compliance_level === undefined) {
+            return createResponse(400, { error: "Bad Request: Requires 'name', 'domains', 'plan', 'allowed_fields', or 'compliance_level' in body." });
         }
 
         let updateExpression = "SET updated_at = :now";
@@ -192,11 +186,6 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
             }
             updateExpression += ", plan = :plan"; // Use direct attribute name if not reserved
             expressionAttributeValues[":plan"] = plan;
-        }
-        if (is_active !== undefined) {
-            if (typeof is_active !== 'boolean') return createResponse(400, { error: "Bad Request: 'is_active' must be a boolean." });
-            updateExpression += ", is_active = :is_active";
-            expressionAttributeValues[":is_active"] = is_active; // Store as native boolean
         }
         if (allowed_fields !== undefined) {
             if (!Array.isArray(allowed_fields)) {

@@ -1,16 +1,12 @@
 // Core tracking logic for Topup Analytics
-interface TopupAnalyticsAPI {
-  track: (eventName: string, eventData?: Record<string, any>) => void;
-  init: (siteId: string) => void;
-  _q?: Array<['track' | 'init', ...any[]]>;
-  _siteId?: string;
-}
+// Core tracking logic for Topup Analytics
 
-// Use a more unique name to avoid potential conflicts
+// Define window interface for TypeScript
 interface TopupWindow extends Window {
-  _topupAnalytics?: TopupAnalyticsAPI;
+  topup?: {
+    event: (eventName: string, eventData?: Record<string, any>) => void;
+  };
 }
-
 declare let window: TopupWindow;
 
 const INGEST_URL = import.meta.env.VITE_PUBLIC_INGEST_URL;
@@ -20,7 +16,7 @@ if (!INGEST_URL) {
 }
 
 function sendEvent(eventName: string, siteId: string, eventData?: Record<string, any>) {
-  if (!INGEST_URL) return;
+  if (!INGEST_URL || !siteId) return; // Also check for siteId here
 
   const payload = {
     siteId: siteId,
@@ -34,11 +30,14 @@ function sendEvent(eventName: string, siteId: string, eventData?: Record<string,
     language: navigator.language,
   };
 
+  // Construct the target URL with the siteId query parameter
+  const targetUrl = `${INGEST_URL}?site=${encodeURIComponent(siteId)}`;
+
   // Use sendBeacon if available, otherwise fallback to fetch
   if (navigator.sendBeacon) {
-    navigator.sendBeacon(INGEST_URL, JSON.stringify(payload));
+    navigator.sendBeacon(targetUrl, JSON.stringify(payload));
   } else {
-    fetch(INGEST_URL, {
+    fetch(targetUrl, {
       method: 'POST',
       body: JSON.stringify(payload),
       headers: { 'Content-Type': 'application/json' },
@@ -47,82 +46,51 @@ function sendEvent(eventName: string, siteId: string, eventData?: Record<string,
   }
 }
 
-// --- Public API ---
-const topupApi: TopupAnalyticsAPI = {
-  track: (eventName: string, eventData?: Record<string, any>) => {
-    const analytics = window._topupAnalytics;
-    if (!analytics?._siteId) {
-      console.warn("Topup Analytics: 'init' must be called before 'track'. Queuing event.");
-      // Ensure the analytics object and its queue exist before pushing
-      if (!window._topupAnalytics) {
-        window._topupAnalytics = { ...topupApi, _q: [] }; // Initialize if totally missing
-      } else if (!window._topupAnalytics._q) {
-        window._topupAnalytics._q = [];
-      }
-      // Assign to a const after checks to help TS narrow the type
-      const currentAnalytics = window._topupAnalytics;
-      // We know currentAnalytics and currentAnalytics._q are defined here
-      currentAnalytics._q!.push(['track', eventName, eventData]); // Use non-null assertion for certainty
-      return;
-    }
-    // If we reach here, analytics (now currentAnalytics) and _siteId must be defined
-    sendEvent(eventName, analytics._siteId, eventData);
-  },
-  init: (siteId: string) => {
-    if (!siteId) {
-      console.error("Topup Analytics: Site ID is required for initialization.");
-      return;
-    }
-    // Ensure the object exists
-    if (!window._topupAnalytics) {
-        window._topupAnalytics = { ...topupApi }; // Initialize with API methods
-    }
+// --- Initialization & API ---
+(function() {
+  const script = document.currentScript as HTMLScriptElement | null;
 
-    const analytics = window._topupAnalytics;
-
-    if (analytics._siteId) {
-        console.warn(`Topup Analytics: Already initialized with site ID ${analytics._siteId}. Ignoring new init call.`);
-        return;
-    }
-    analytics._siteId = siteId;
-    console.log(`Topup Analytics: Initialized for site ${siteId}`);
-
-    // Process any queued events
-    const queue = analytics._q;
-    if (queue) {
-      queue.forEach(args => {
-        const [command, ...params] = args;
-        if (command === 'track') {
-          // Call track directly now that siteId is set
-          topupApi.track(params[0] as string, params[1] as Record<string, any>);
-        }
-        // Add other commands here if needed
-      });
-      delete analytics._q; // Clear queue after processing
-    }
-
-    // Automatically track page view on init
-    topupApi.track('pageview');
+  if (!script) {
+    console.error("Topup Analytics: Could not find the executing script tag. Initialization failed.");
+    // Fallback attempt (less reliable)
+    // const scripts = document.querySelectorAll('script[src*="/topup-"]');
+    // script = scripts[scripts.length - 1] as HTMLScriptElement | null;
+    // if (!script) {
+    //   console.error("Topup Analytics: Fallback script tag search also failed.");
+    //   return;
+    // }
+    return; // Exit if script tag cannot be found
   }
-};
 
-// --- Initialization ---
-// Expose the API and handle pre-existing queue
-const existingQueue = window._topupAnalytics?._q || [];
-// Ensure the global object exists and merge API methods, preserving queue
-window._topupAnalytics = {
-    ...topupApi, // Add API methods
-    ...window._topupAnalytics, // Preserve existing properties like _siteId if already init'd somehow
-    _q: existingQueue // Ensure queue is preserved or initialized
-};
+  const siteId = script.dataset.site;
+  const level = script.dataset.level || 'basic'; // Default level if not provided
 
+  if (!siteId) {
+    console.error("Topup Analytics: 'data-site' attribute is missing on the script tag. Initialization failed.");
+    return;
+  }
 
-// Process queue if init was called before script loaded
-const initCall = existingQueue.find(args => args[0] === 'init');
-if (initCall && !window._topupAnalytics._siteId) { // Check if not already initialized
-    window._topupAnalytics.init(initCall[1] as string);
-}
+  console.log(`Topup Analytics: Initializing for site ${siteId} (level: ${level})`);
 
-// Exporting for potential module usage, though these scripts are IIFE
-// For IIFE, this export isn't strictly necessary but doesn't hurt
-export { topupApi };
+  // Define the public API
+  const topupApi = {
+    event: (eventName: string, eventData?: Record<string, any>) => {
+      if (!siteId) {
+        // This should theoretically not happen due to the check above, but good for safety
+        console.error("Topup Analytics: Cannot send event, Site ID is missing.");
+        return;
+      }
+      sendEvent(eventName, siteId, eventData);
+    }
+  };
+
+  // Expose the API on window.topup
+  if (window.topup) {
+    console.warn("Topup Analytics: window.topup already exists. Overwriting.");
+  }
+  window.topup = topupApi;
+
+  // Automatically track page view after initialization
+  window.topup.event('pageview');
+
+})(); // Immediately invoke the function
