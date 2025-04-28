@@ -52,12 +52,14 @@ const initialAnalyticsState: AnalyticsStateBase = {
     selectedSiteId: null as string | null,
     userPreferences: null as UserPreferences | null,
     isRefreshing: false,
+    // isAddSiteModalOpen: false, // Initial state defined below in create()
 };
 
 // Define the full state interface including DB handles and actions
 export interface AnalyticsState extends AnalyticsStateBase {
    db: duckdb.AsyncDuckDB | null;
     connection: duckdb.AsyncDuckDBConnection | null;
+    isAddSiteModalOpen: boolean; // Added for Add Site Modal control
 
     // Actions
     resetAnalyticsState: () => Partial<AnalyticsState>;
@@ -77,6 +79,7 @@ export interface AnalyticsState extends AnalyticsStateBase {
     addSegment: (segment: Segment) => void;
     removeSegment: (segmentToRemove: Segment) => void;
     clearSegments: () => void;
+    setAddSiteModalOpen: (isOpen: boolean) => void; // Added for Add Site Modal control
 }
 
 // --- Zustand Store ---
@@ -86,6 +89,7 @@ export const useStore = create<AnalyticsState>()(
             db: null,
             connection: null,
             ...initialAnalyticsState, // Spread the initial state
+            isAddSiteModalOpen: false, // Initialize the modal state
 
             // --- Core State Actions ---
 
@@ -163,8 +167,27 @@ export const useStore = create<AnalyticsState>()(
                         };
                     });
 
+                    // --- Auto-select site or open Add Site modal ---
+                    const newlySelectedSiteId = get().selectedSiteId; // Get the ID possibly set above
+                    if (fetchedSites.length === 0) {
+                        // No sites found, trigger modal open
+                        console.log("No sites found, opening Add Site modal.");
+                        get().setAddSiteModalOpen(true);
+                    } else if (fetchedSites.length === 1 && !newlySelectedSiteId) {
+                        // Exactly one site found, and it wasn't already selected (edge case?)
+                        // Auto-select it (the set call above should handle this, but double-check)
+                        console.log("One site found, ensuring it's selected:", fetchedSites[0].site_id);
+                        // The set call above already handles selecting the first site if none was selected.
+                        // We just need to ensure the modal is closed.
+                        get().setAddSiteModalOpen(false);
+                    } else {
+                        // Multiple sites, or one site already selected, ensure modal isn't open automatically
+                        get().setAddSiteModalOpen(false);
+                    }
+                    // ----------------------------------------------------
+
                     // Trigger data load only if a site is now selected
-                    if (get().selectedSiteId) {
+                    if (newlySelectedSiteId) { // Use the potentially updated ID
                         get().fetchAndLoadData();
                     } else if (fetchedSites.length === 0) {
                          set({ status: 'idle', error: 'No sites found for this user.', aggregatedData: null });
@@ -444,6 +467,12 @@ export const useStore = create<AnalyticsState>()(
                  console.log("Clearing all segments.");
                  set({ segments: [] });
                  get().runAggregations(); // Re-run aggregations with no segments
+            },
+
+            // --- Add Site Modal Control ---
+            setAddSiteModalOpen: (isOpen: boolean) => {
+                console.log(`Setting Add Site Modal open state to: ${isOpen}`);
+                set({ isAddSiteModalOpen: isOpen });
             },
         }),
         {

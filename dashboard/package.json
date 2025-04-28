@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build:embed": "esbuild embed-script/src/topup-basic.ts embed-script/src/topup-enhanced.ts embed-script/src/topup-full.ts --bundle --format=iife --minify --outdir=dist-embed --entry-names=[name].min --define:import.meta.env.VITE_PUBLIC_INGEST_URL='\"$VITE_PUBLIC_INGEST_URL\"'",
-    "build:embed:dev": "esbuild embed-script/src/topup-basic.ts embed-script/src/topup-enhanced.ts embed-script/src/topup-full.ts --bundle --format=iife --outdir=public --entry-names=[name].min --define:import.meta.env.VITE_PUBLIC_INGEST_URL='\"https://d214ciuro9isnp.cloudfront.net/api/event\"'",
+    "build:embed:dev": "esbuild embed-script/src/topup-basic.ts embed-script/src/topup-enhanced.ts embed-script/src/topup-full.ts --bundle --format=iife --outdir=public --entry-names=[name].min --define:import.meta.env.VITE_PUBLIC_INGEST_URL='\"https://d3be3pijyxdly7.cloudfront.net/api/event\"'",
     "build": "npm run build:embed && react-router build",
     "dev": "npm run build:embed:dev && react-router dev",
     "start": "react-router-serve ./build/server/index.js",

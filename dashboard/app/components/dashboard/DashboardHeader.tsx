@@ -42,6 +42,8 @@ export const DashboardHeader = () => {
     removeSegment,
     clearSegments,
     setSelectedRange,
+    isAddSiteModalOpen, // Added from store
+    setAddSiteModalOpen, // Added from store
   } = useStore(useShallow((state: AnalyticsState) => ({
     selectedSiteId: state.selectedSiteId,
     sites: state.sites,
@@ -53,13 +55,15 @@ export const DashboardHeader = () => {
     removeSegment: state.removeSegment,
     clearSegments: state.clearSegments,
     setSelectedRange: state.setSelectedRange,
+    isAddSiteModalOpen: state.isAddSiteModalOpen, // Added selector
+    setAddSiteModalOpen: state.setAddSiteModalOpen, // Added selector
   })));
 
   const { user, logout } = useAuth();
 
-  // State for modals
+  // State for modals (Removed AddSiteModal state)
   const [isSiteSettingsModalOpen, setIsSiteSettingsModalOpen] = useState(false);
-  const [isAddSiteModalOpen, setIsAddSiteModalOpen] = useState(false);
+  // const [isAddSiteModalOpen, setIsAddSiteModalOpen] = useState(false); // Removed, now using store
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
   const [selectedSiteIdForModal, setSelectedSiteIdForModal] = useState<string | null>(null);
 
@@ -111,10 +115,10 @@ export const DashboardHeader = () => {
                  <DropdownMenuLabel>Sites</DropdownMenuLabel>
                  {/* Pass only required callbacks, assuming component handles data internally */}
                  <SiteSelectorDropdownContent
-                   onSiteSelect={setSelectedSiteId}
+                   // onSiteSelect={setSelectedSiteId} // Removed: Component uses store action directly
                    onSettingsClick={handleOpenSiteSettings}
                  />
-                  <DropdownMenuItem onSelect={() => setIsAddSiteModalOpen(true)}>
+                  <DropdownMenuItem onSelect={() => setAddSiteModalOpen(true)}> {/* Use store action */}
                    <PlusCircle className="mr-2 h-4 w-4" />
                    <span>Add New Site</span>
                  </DropdownMenuItem>
@@ -221,15 +225,15 @@ export const DashboardHeader = () => {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={isAddSiteModalOpen} onOpenChange={setIsAddSiteModalOpen}>
+      <Dialog open={isAddSiteModalOpen} onOpenChange={setAddSiteModalOpen}> {/* Use store state/action */}
         <DialogContent className="sm:max-w-[425px]"> {/* Adjust width as needed */}
            <DialogHeader>
              <DialogTitle>Add New Site</DialogTitle>
            </DialogHeader>
            {/* Render AddSiteModal only when modal is open */}
-           {isAddSiteModalOpen && (
+           {isAddSiteModalOpen && ( // Use store state
              <AddSiteModal
-               onClose={() => setIsAddSiteModalOpen(false)} // Pass close handler
+               onClose={() => setAddSiteModalOpen(false)} // Use store action
                // onSiteCreated={handleSiteCreated} // Optional: Handle creation
              />
            )}
