@@ -38,7 +38,7 @@ export function SiteForm({ mode, site, onSuccess, onCancel }: SiteFormProps) {
     resolver: zodResolver(formSchema),
     defaultValues: {
       name: isUpdateMode ? site?.name || "" : "",
-      allowed_domains: isUpdateMode && Array.isArray(site?.allowed_domains) ? site.allowed_domains.join('\n') : "",
+      allowed_domains: isUpdateMode && Array.isArray(site?.domains) ? site.domains.join('\\n') : "",
       compliance_level: isUpdateMode ? site?.compliance_level || 'maybe' : 'maybe', // Default 'maybe' for create
     },
   });
@@ -48,7 +48,7 @@ export function SiteForm({ mode, site, onSuccess, onCancel }: SiteFormProps) {
     if (isUpdateMode && site) {
         form.reset({
             name: site.name || "",
-            allowed_domains: Array.isArray(site.allowed_domains) ? site.allowed_domains.join('\n') : "",
+            allowed_domains: Array.isArray(site.domains) ? site.domains.join('\\n') : "",
             compliance_level: site.compliance_level || 'maybe',
         });
     } else if (!isUpdateMode) {
