@@ -51,15 +51,23 @@ export async function handler(event: any): Promise<{ status: string; message?: s
         return { status: "Failed", message: errorMessage };
     }
 
+    // const queries = [
+    //     `OPTIMIZE "${ATHENA_DATABASE}"."${ATHENA_INITIAL_EVENTS_ICEBERG_TABLE}"
+    //      REWRITE DATA USING BIN_PACK
+    //      WHERE dt < current_date
+    //        AND dt >= date_add('day', -7, current_date)
+    //      `,
+    //     `OPTIMIZE "${ATHENA_DATABASE}"."${ATHENA_EVENTS_ICEBERG_TABLE}"
+    //     REWRITE DATA USING BIN_PACK
+    //      WHERE dt < current_date
+    //        AND dt >= date_add('day', -7, current_date)
+    //      `
+    // ];
     const queries = [
-        `OPTIMIZE "${ATHENA_DATABASE}"."${ATHENA_INITIAL_EVENTS_ICEBERG_TABLE}"
-         WHERE dt < current_date
-           AND dt >= date_add('day', -7, current_date)
-         REWRITE DATA USING BIN_PACK`,
-        `OPTIMIZE "${ATHENA_DATABASE}"."${ATHENA_EVENTS_ICEBERG_TABLE}"
-         WHERE dt < current_date
-           AND dt >= date_add('day', -7, current_date)
-         REWRITE DATA USING BIN_PACK`
+    `OPTIMIZE ${ATHENA_DATABASE}.${ATHENA_INITIAL_EVENTS_ICEBERG_TABLE}
+     REWRITE DATA USING BIN_PACK`,
+    `OPTIMIZE ${ATHENA_DATABASE}.${ATHENA_EVENTS_ICEBERG_TABLE}
+     REWRITE DATA USING BIN_PACK`
     ];
 
     const queryExecutionIds: (string | undefined)[] = [];

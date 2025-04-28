@@ -720,9 +720,11 @@ export default $config({
         eventsBucket,
         athenaResultsBucket
       ],
-      environment: { // Only pass values not available via linked resources
-        ATHENA_INITIAL_EVENTS_ICEBERG_TABLE: "initial_events_iceberg", // String constant
-        ATHENA_EVENTS_ICEBERG_TABLE: "events_iceberg",           // String constant
+      environment: {
+        ATHENA_DATABASE: glueCatalogDatabase.name, // Added
+        ATHENA_OUTPUT_LOCATION: $interpolate`s3://${athenaResultsBucket.name}/compact-results/`, // Added
+        ATHENA_INITIAL_EVENTS_ICEBERG_TABLE: "initial_events_iceberg",
+        ATHENA_EVENTS_ICEBERG_TABLE: "events_iceberg",
       },
       permissions: [
         {
