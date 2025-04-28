@@ -646,9 +646,6 @@ export default $config({
     // isn't directly possible when using the ARN. If the handler needs this,
     // it might need to construct it or receive it differently.
     // For now, we assume the ARN linking is sufficient.
-    api.route("GET /api/sites/{site_id}/script", sitesFn.arn, commonAuth);
-
-
     // --- User Preferences Routes ---
     api.route("GET /api/user/preferences", preferencesFn.arn, commonAuth);
     api.route("PUT /api/user/preferences", preferencesFn.arn, commonAuth);
@@ -660,6 +657,21 @@ export default $config({
     }
 
 
+    // === Embed Script Hosting (Static Site) ===
+    const embedScriptsSite = new sst.aws.StaticSite("EmbedScripts", {
+      path: "packages/embed-script",
+      // Ensure dependencies are installed before build in the package dir
+      build: {
+        command: "npm install && npm run build",
+        output: "dist",
+      },
+      domain: isProd ? `cdn.${domain}` : undefined, // Use cdn subdomain eg cdn.topupanalytics.com
+      // waitForInvalidation removed - handled automatically by StaticSite component
+      environment: { // Pass env vars to build command if needed
+        // Add the public ingest URL for the build process
+        VITE_PUBLIC_INGEST_URL: $interpolate`${router.url}/api/event`,
+      },
+    });
     // === Dashboard (React Frontend) ===
     const dashboard = new sst.aws.React("Dashboard", {
       path: "dashboard/",
@@ -679,6 +691,8 @@ export default $config({
         VITE_APP_URL: router.url,
         VITE_STRIPE_PUBLISHABLE_KEY: useStripe ? STRIPE_PUBLISHABLE_KEY!.value : DUMMY_STRIPE_PUBLISHABLE_KEY_PLACEHOLDER, // Correct: Use real value or placeholder string
         VITE_USE_STRIPE: useStripe.toString(), // Add the flag
+        VITE_EMBED_SCRIPT_CDN_URL: embedScriptsSite.url, // Add the embed script CDN URL
+        VITE_PUBLIC_INGEST_URL: $interpolate`${router.url}/api/event`, // Add the public ingest URL
       },
     });
 
@@ -767,7 +781,6 @@ export default $config({
       });
     }
 
-
     // === Outputs ===
     return {
       appName: $app.name,
@@ -801,6 +814,7 @@ export default $config({
       // Ensure other Stripe-related outputs are handled if needed, though none were explicitly defined before
       // Conditionally export real secret names/ARNs if needed, otherwise omit or use placeholders
       stripeSecretKeyName: useStripe ? STRIPE_SECRET_KEY!.name : undefined, // Example
+      embedScriptUrl: embedScriptsSite.url, // Add the URL for the embed scripts CDN
     }
   },
 });
