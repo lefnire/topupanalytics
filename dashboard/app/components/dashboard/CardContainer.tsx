@@ -3,7 +3,7 @@ import { useStore } from '../../stores/analyticsStore'; // Adjusted path
 import { useShallow } from 'zustand/shallow'; // Import useShallow from zustand
 import type { AnalyticsState } from '../../stores/analyticsStore'; // Import state
 import type { AggregatedData, CardDataItem, Segment } from '../../stores/analyticsTypes'; // Import types separately
-import { BaseCard } from '../BaseCard'; // Adjusted path
+import { BaseCard } from './BaseCard'; // Adjusted path
 
 // ===================== Generic Card machinery =====================
 export type CardMeta = { // Added export

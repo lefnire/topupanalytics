@@ -6,7 +6,7 @@ import {
 } from 'recharts';
 import { CardContainer, CARD_META } from './CardContainer';
 import { EventsCard } from './EventsCard';
-import { UsageCard } from '../UsageCard';
+import { UsageCard } from './UsageCard';
 import { useApiClient } from '../../lib/api';
 import { toast } from 'sonner';
 import { useStore, type AnalyticsState } from '../../stores/analyticsStore'; // Import hook and state
@@ -20,7 +20,7 @@ const isServer = typeof window === 'undefined';
 
 // Dynamically import the SankeyCard for client-side rendering only
 const LazySankeyCard = lazy(() =>
-  import('../SankeyCard').then(module => ({ default: module.SankeyCard }))
+  import('./SankeyCard').then(module => ({ default: module.SankeyCard }))
 );
 
 

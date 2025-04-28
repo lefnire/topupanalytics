@@ -486,6 +486,7 @@ export default $config({
       memory: "128 MB",
       // url: true, // Keep url enabled, but attach to router for public access
       url: {
+        cors: true,
         router: {
           instance: router,
           path: "/api/event", // Route /api/event via Router

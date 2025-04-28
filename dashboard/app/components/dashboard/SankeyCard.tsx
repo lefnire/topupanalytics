@@ -1,7 +1,7 @@
 import React from 'react';
 import { ResponsiveSankey } from '@nivo/sankey';
 import type { SankeyNodeDatum, SankeyLinkDatum } from '@nivo/sankey'; // Import specific types if needed for tooltips
-import { useStore, type SankeyNode, type SankeyLink, type AnalyticsStatus } from '../stores/analyticsStore'; // Adjust path as needed
+import { useStore, type SankeyNode, type SankeyLink, type AnalyticsStatus } from '../../stores/analyticsStore'; // Adjust path as needed
 import { useShallow } from 'zustand/shallow';
 
 // Helper to map store status + data availability to display state

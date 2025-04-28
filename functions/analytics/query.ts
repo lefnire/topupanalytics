@@ -27,49 +27,12 @@ const athenaClient = new AthenaClient({});
 const ddbClient = new DynamoDBClient({});
 const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
 
-// Environment Variables
-console.log({Resource})
-/*
-{
-  Resource: {
-    App: { name: 'topupanalytics', stage: 'lefnire' },
-    AthenaResults: {
-      name: 'topupanalytics-lefnire-athenaresultsbucket-zxxnxubn',
-      type: 'sst:aws:Bucket'
-    },
-    EventData: {
-      name: 'topupanalytics-lefnire-eventdatabucket-udsmnmuk',
-      type: 'sst:aws:Bucket'
-    },
-    SitesTable: {
-      name: 'topupanalytics-lefnire-SitesTableTable-vmadrvmb',
-      type: 'sst:aws:Dynamo'
-    },
-    UserPreferencesTable: {
-      name: 'topupanalytics-lefnire-UserPreferencesTableTable-dawochds',
-      type: 'sst:aws:Dynamo'
-    },
-    'topupanalytics-lefnire-db': {
-      name: 'topupanalytics-lefnire_analytics_db',
-      arn: 'arn:aws:glue:us-east-1:412204475590:database/topupanalytics-lefnire_analytics_db',
-      type: 'aws:glue/catalogDatabase:CatalogDatabase'
-    }
-  }
-}
- */
 
 const DATABASE = Resource.GlueCatalogDatabase.name;
 const INITIAL_EVENTS_TABLE = process.env.ATHENA_INITIAL_EVENTS_ICEBERG_TABLE;
 const EVENTS_TABLE = process.env.ATHENA_EVENTS_ICEBERG_TABLE;
 const OUTPUT_LOCATION = Resource.AthenaResults.name;
 const SITES_TABLE_NAME = Resource.SitesTable.name;
-console.log({
-  DATABASE,
-  INITIAL_EVENTS_TABLE,
-  EVENTS_TABLE,
-  OUTPUT_LOCATION,
-  SITES_TABLE_NAME
-})
 
 
 // Helper function for sleep
