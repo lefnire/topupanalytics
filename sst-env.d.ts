@@ -9,10 +9,6 @@ declare module "sst" {
       "name": string
       "type": "sst.aws.Bucket"
     }
-    "CompactionFn": {
-      "name": string
-      "type": "sst.aws.Function"
-    }
     "Dashboard": {
       "type": "sst.aws.React"
       "url": string
@@ -25,20 +21,10 @@ declare module "sst" {
       "name": string
       "type": "aws.kinesis/firehoseDeliveryStream.FirehoseDeliveryStream"
     }
-    "EventsGlueTable": {
-      "arn": string
-      "databaseName": string
-      "name": string
-      "type": "aws.glue/catalogTable.CatalogTable"
-    }
     "GlueCatalogDatabase": {
       "arn": string
       "name": string
       "type": "aws.glue/catalogDatabase.CatalogDatabase"
-    }
-    "IcebergInitFn": {
-      "name": string
-      "type": "sst.aws.Function"
     }
     "IngestFn": {
       "name": string
@@ -48,12 +34,6 @@ declare module "sst" {
     "InitialEventsFirehoseStream": {
       "name": string
       "type": "aws.kinesis/firehoseDeliveryStream.FirehoseDeliveryStream"
-    }
-    "InitialEventsGlueTable": {
-      "arn": string
-      "databaseName": string
-      "name": string
-      "type": "aws.glue/catalogTable.CatalogTable"
     }
     "ManagementApi": {
       "type": "sst.aws.ApiGatewayV2"
@@ -70,6 +50,18 @@ declare module "sst" {
     "QueryFn": {
       "name": string
       "type": "sst.aws.Function"
+    }
+    "S3TableEvents": {
+      "arn": string
+      "databaseName": string
+      "name": string
+      "type": "aws.glue/catalogTable.CatalogTable"
+    }
+    "S3TableInitialEvents": {
+      "arn": string
+      "databaseName": string
+      "name": string
+      "type": "aws.glue/catalogTable.CatalogTable"
     }
     "SitesFn": {
       "name": string
