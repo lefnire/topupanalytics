@@ -1,11 +1,10 @@
 import { AthenaClient, StartQueryExecutionCommand, GetQueryExecutionCommand, QueryExecutionState } from "@aws-sdk/client-athena";
-import { GlueClient, GetTableCommand, Column } from "@aws-sdk/client-glue"; // Removed unused Glue imports
+import { GlueClient, DeleteTableCommand, GetTableCommand } from "@aws-sdk/client-glue"; // Added DeleteTableCommand
 import { setTimeout } from "timers/promises";
+import { initialGlueColumns, eventsGlueColumns } from './analytics/schema'; // Import schemas directly
 
-// Environment variables expected from SST link bindings
+// Environment variables expected from SST link bindings or Invocation payload
 const GLUE_DATABASE_NAME = process.env.GLUE_DATABASE_NAME;
-const SOURCE_INITIAL_EVENTS_TABLE_NAME = process.env.SOURCE_INITIAL_EVENTS_TABLE_NAME;
-const SOURCE_EVENTS_TABLE_NAME = process.env.SOURCE_EVENTS_TABLE_NAME;
 const EVENTS_BUCKET_NAME = process.env.EVENTS_BUCKET_NAME;
 const QUERY_RESULTS_BUCKET_NAME = process.env.QUERY_RESULTS_BUCKET_NAME;
 
@@ -17,10 +16,10 @@ const POLL_INTERVAL_MS = 5000;
 interface IcebergInitEvent {
   INITIAL_EVENTS_ICEBERG_TABLE_NAME: string;
   EVENTS_ICEBERG_TABLE_NAME: string;
-  ATHENA_WORKGROUP: string;
+  ATHENA_WORKGROUP: string; // Typically 'primary'
 }
 
-// Helper function to wait for Athena query completion (simplified error handling)
+// Helper function to wait for Athena query completion
 async function waitForQueryCompletion(queryExecutionId: string): Promise<void> {
   for (let i = 0; i < MAX_POLL_ATTEMPTS; i++) {
     try {
@@ -39,15 +38,18 @@ async function waitForQueryCompletion(queryExecutionId: string): Promise<void> {
       }
     } catch (error) {
       console.error(`Error polling query ${queryExecutionId}:`, error);
-      throw error; // Rethrow for Lambda failure
+      // Don't rethrow immediately, allow polling to continue unless it's the last attempt
+      if (i === MAX_POLL_ATTEMPTS - 1) {
+          throw error; // Rethrow final error
+      }
     }
     await setTimeout(POLL_INTERVAL_MS);
   }
   throw new Error(`Query ${queryExecutionId} did not complete within the maximum polling time.`);
 }
 
-// Helper function to execute a query and wait for completion (simplified error handling)
-async function executeAthenaQuery(queryString: string, databaseName: string, workgroup: string, outputLocation: string): Promise<void> {
+// Helper function to execute a query and wait for completion
+async function executeAthenaQuery(queryString: string, databaseName: string, workgroup: string, outputLocation: string): Promise<string> {
     console.log(`Executing Athena query in workgroup ${workgroup}, database ${databaseName}:\n${queryString}`);
     const startCommand = new StartQueryExecutionCommand({
         QueryString: queryString,
@@ -65,42 +67,50 @@ async function executeAthenaQuery(queryString: string, databaseName: string, wor
         }
         console.log(`Started query execution with ID: ${queryExecutionId}`);
         await waitForQueryCompletion(queryExecutionId);
+        return queryExecutionId; // Return ID on success
 
     } catch (error) {
         console.error("Athena query execution failed:", error);
-        // Throw the original error or a generic one
-        throw error instanceof Error ? error : new Error("Unknown Athena execution error occurred.");
+        throw error instanceof Error ? error : new Error(`Unknown Athena execution error occurred: ${error}`);
     }
 }
 
-// Helper to get schema definition string from source table
-async function getSourceSchemaDefinition(tableName: string): Promise<string> {
-    console.log(`Getting schema definition for source table: ${tableName}`);
-    const getTableCmd = new GetTableCommand({ DatabaseName: GLUE_DATABASE_NAME, Name: tableName });
-    const getTableResponse = await glue.send(getTableCmd);
-    const storageCols = getTableResponse.Table?.StorageDescriptor?.Columns ?? [];
-    const partitionCols = getTableResponse.Table?.PartitionKeys ?? [];
-
-    const allCols = [...storageCols, ...partitionCols];
-
-    if (allCols.length === 0) {
-        throw new Error(`Could not retrieve any columns for source table ${tableName}`);
+// Helper to check if a table exists and optionally delete it
+async function ensureTableDoesNotExist(databaseName: string, tableName: string): Promise<void> {
+    try {
+        await glue.send(new GetTableCommand({ DatabaseName: databaseName, Name: tableName }));
+        console.log(`Table ${databaseName}.${tableName} exists. Deleting for idempotency...`);
+        await glue.send(new DeleteTableCommand({ DatabaseName: databaseName, Name: tableName }));
+        console.log(`Table ${databaseName}.${tableName} deleted.`);
+        // Add a small delay to allow Glue metastore to update
+        await setTimeout(5000);
+    } catch (error: any) {
+        if (error.name === 'EntityNotFoundException') {
+            console.log(`Table ${databaseName}.${tableName} does not exist. Proceeding with creation.`);
+        } else {
+            console.error(`Error checking or deleting table ${databaseName}.${tableName}:`, error);
+            throw error; // Rethrow unexpected errors
+        }
     }
+}
 
-    // Format as \"col_name\" col_type - Use double quotes for safety
-    return allCols.map(col => `\"${col.Name}\" ${col.Type}`).join(',\n  ');
+// Helper to format columns for CREATE TABLE statement
+function formatColumnsForDDL(columns: { name: string; type: string }[]): string {
+    // Ensure proper quoting and type mapping if necessary (basic types assumed here)
+    // Athena/Glue types are generally compatible with Parquet/JSON types used
+    return columns.map(col => `\`${col.name}\` ${col.type}`).join(',\n  ');
 }
 
 export async function handler(event: IcebergInitEvent): Promise<any> {
   console.log("Received event:", JSON.stringify(event, null, 2));
 
   // Validate environment variables
-  if (!GLUE_DATABASE_NAME || !SOURCE_INITIAL_EVENTS_TABLE_NAME || !SOURCE_EVENTS_TABLE_NAME || !EVENTS_BUCKET_NAME || !QUERY_RESULTS_BUCKET_NAME) {
-    throw new Error("Missing required environment variables from SST bindings.");
+  if (!GLUE_DATABASE_NAME || !EVENTS_BUCKET_NAME || !QUERY_RESULTS_BUCKET_NAME) {
+    throw new Error("Missing required environment variables GLUE_DATABASE_NAME, EVENTS_BUCKET_NAME, or QUERY_RESULTS_BUCKET_NAME.");
   }
   // Validate event payload
   if (!event.INITIAL_EVENTS_ICEBERG_TABLE_NAME || !event.EVENTS_ICEBERG_TABLE_NAME || !event.ATHENA_WORKGROUP) {
-      throw new Error("Missing required properties in the event payload.");
+      throw new Error("Missing required properties in the event payload: INITIAL_EVENTS_ICEBERG_TABLE_NAME, EVENTS_ICEBERG_TABLE_NAME, ATHENA_WORKGROUP.");
   }
 
   const {
@@ -110,50 +120,60 @@ export async function handler(event: IcebergInitEvent): Promise<any> {
   } = event;
 
   const queryOutputLocation = `s3://${QUERY_RESULTS_BUCKET_NAME}/iceberg-init-ddl/`;
+  const initialEventsTableLocation = `s3://${EVENTS_BUCKET_NAME}/managed_iceberg/initial_events/`; // Match sst.config location
+  const eventsTableLocation = `s3://${EVENTS_BUCKET_NAME}/managed_iceberg/events/`; // Match sst.config location
 
   try {
-      // --- Create Initial Events Iceberg Table (Empty via CTAS) ---
-      console.log("--- Initializing Initial Events Iceberg Table (CTAS) ---");
+      // --- Create Initial Events Iceberg Table ---
+      console.log(`--- Initializing Initial Events Iceberg Table: ${INITIAL_EVENTS_ICEBERG_TABLE_NAME} ---`);
+      await ensureTableDoesNotExist(GLUE_DATABASE_NAME, INITIAL_EVENTS_ICEBERG_TABLE_NAME); // Ensure idempotency
 
+      const initialEventsColumnsDDL = formatColumnsForDDL(initialGlueColumns);
       const initialEventsQuery = `
-        CREATE TABLE IF NOT EXISTS ${INITIAL_EVENTS_ICEBERG_TABLE_NAME}
-        WITH (
-          table_type = 'ICEBERG',
-          is_external = false, -- Explicitly create a managed table
-          location = 's3://${EVENTS_BUCKET_NAME}/${INITIAL_EVENTS_ICEBERG_TABLE_NAME}/', -- Explicit location required
-          partitioning = ARRAY['site_id','dt']
-        ) AS
-        SELECT * FROM ${SOURCE_INITIAL_EVENTS_TABLE_NAME} WHERE 1 = 0
+        CREATE TABLE ${INITIAL_EVENTS_ICEBERG_TABLE_NAME} (
+          ${initialEventsColumnsDDL}
+        )
+        PARTITIONED BY (site_id, dt) -- Define partitioning columns here
+        LOCATION '${initialEventsTableLocation}'
+        TBLPROPERTIES (
+          'table_type' = 'ICEBERG'
+          -- 'is_external' = 'false' is implied for managed tables created via Athena DDL
+          -- Add other properties like format if needed, though defaults are usually fine
+          -- 'write.format.default'='parquet'
+        )
       `;
 
-      await executeAthenaQuery(initialEventsQuery, GLUE_DATABASE_NAME!, ATHENA_WORKGROUP, queryOutputLocation);
-      console.log(`Successfully created or verified schema for table: ${INITIAL_EVENTS_ICEBERG_TABLE_NAME}`);
+      await executeAthenaQuery(initialEventsQuery, GLUE_DATABASE_NAME, ATHENA_WORKGROUP, queryOutputLocation);
+      console.log(`Successfully created table: ${INITIAL_EVENTS_ICEBERG_TABLE_NAME}`);
       console.log("--- Finished Initializing Initial Events Iceberg Table ---");
 
-      // --- Create Events Iceberg Table (Empty via CTAS) ---
-      console.log("--- Initializing Events Iceberg Table (CTAS) ---");
+      // --- Create Events Iceberg Table ---
+      console.log(`--- Initializing Events Iceberg Table: ${EVENTS_ICEBERG_TABLE_NAME} ---`);
+      await ensureTableDoesNotExist(GLUE_DATABASE_NAME, EVENTS_ICEBERG_TABLE_NAME); // Ensure idempotency
 
+      const eventsColumnsDDL = formatColumnsForDDL(eventsGlueColumns);
       const eventsQuery = `
-        CREATE TABLE IF NOT EXISTS ${EVENTS_ICEBERG_TABLE_NAME}
-        WITH (
-          table_type = 'ICEBERG',
-          is_external = false, -- Explicitly create a managed table
-          location = 's3://${EVENTS_BUCKET_NAME}/${EVENTS_ICEBERG_TABLE_NAME}/', -- Explicit location required
-          partitioning = ARRAY['site_id','dt']
-        ) AS
-        SELECT * FROM ${SOURCE_EVENTS_TABLE_NAME} WHERE 1 = 0
+        CREATE TABLE ${EVENTS_ICEBERG_TABLE_NAME} (
+          ${eventsColumnsDDL}
+        )
+        PARTITIONED BY (site_id, dt) -- Define partitioning columns here
+        LOCATION '${eventsTableLocation}'
+        TBLPROPERTIES (
+          'table_type' = 'ICEBERG'
+        )
       `;
 
-      await executeAthenaQuery(eventsQuery, GLUE_DATABASE_NAME!, ATHENA_WORKGROUP, queryOutputLocation);
-      console.log(`Successfully created or verified schema for table: ${EVENTS_ICEBERG_TABLE_NAME}`);
+      await executeAthenaQuery(eventsQuery, GLUE_DATABASE_NAME, ATHENA_WORKGROUP, queryOutputLocation);
+      console.log(`Successfully created table: ${EVENTS_ICEBERG_TABLE_NAME}`);
       console.log("--- Finished Initializing Events Iceberg Table ---");
 
       return {
-        statusCode: 200,
-        body: JSON.stringify({ message: "Empty Iceberg tables initialized successfully." }),
+          statusCode: 200,
+          body: JSON.stringify({ message: "Iceberg tables initialized successfully via Athena DDL." }),
       };
   } catch (error) {
-       console.error("Error during Iceberg schema initialization process:", error);
-       throw error instanceof Error ? error : new Error(`Unknown error during schema initialization: ${error}`);
+       console.error("Error during Iceberg table initialization process:", error);
+       // Ensure the error is propagated correctly for Lambda failure
+       throw error instanceof Error ? error : new Error(`Unknown error during table initialization: ${error}`);
   }
-} 
+}

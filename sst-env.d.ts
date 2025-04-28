@@ -26,6 +26,10 @@ declare module "sst" {
       "name": string
       "type": "aws.glue/catalogDatabase.CatalogDatabase"
     }
+    "IcebergInitFn": {
+      "name": string
+      "type": "sst.aws.Function"
+    }
     "IngestFn": {
       "name": string
       "type": "sst.aws.Function"
