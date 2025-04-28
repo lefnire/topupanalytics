@@ -60,7 +60,11 @@ const DashboardContent = () => {
   const dbInitError = isError && !db; // Moved dbInitError check here
   const selectedSite = useMemo(() => sites.find((site: Site) => site.site_id === selectedSiteId), [sites, selectedSiteId]); // Add Site type
   const isPaymentActive = userPreferences?.is_payment_active ?? false;
-  const requestAllowance = selectedSite?.request_allowance ?? 0;
+  const requestAllowance = selectedSite?.request_allowance ?? 0; // Remaining allowance
+  // TODO: Make initial allowance dynamic based on plan
+  const initialAllowance = selectedSite?.plan === 'free_tier' ? 10000 : 0; // Hardcoded for now
+  const requestsUsed = Math.max(0, initialAllowance - requestAllowance); // Calculate used, ensure non-negative
+
   const isLocked = useStripe && requestAllowance <= 0 && !isPaymentActive;
   const stats = aggregatedData?.stats;
   const chartData = aggregatedData?.chartData;
@@ -250,7 +254,9 @@ const DashboardContent = () => {
             {/* Add the new Usage Card with updated props */}
             {selectedSite && userPreferences && ( // Only render if site and prefs are loaded
                <UsageCard
-                 request_allowance={selectedSite.request_allowance}
+                 requests_used={requestsUsed} // Pass calculated used requests
+                 initial_allowance={initialAllowance} // Pass initial allowance
+                 request_allowance={selectedSite.request_allowance} // Still pass remaining for warning logic
                  plan={selectedSite.plan}
                  is_payment_active={userPreferences.is_payment_active}
                  stripe_last4={userPreferences.stripe_last4}

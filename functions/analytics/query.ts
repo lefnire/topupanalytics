@@ -135,10 +135,13 @@ async function executeAthenaQuery(
         throw new Error("Missing required environment variables for Athena query.");
     }
 
+    const s3OutputLocation = `s3://${OUTPUT_LOCATION}/`; // Construct the full path
+    console.log(`Using Athena Output Location: ${s3OutputLocation}`); // Add log statement
+
     const startQueryCmd = new StartQueryExecutionCommand({
         QueryString: finalQuery,
         QueryExecutionContext: { Database: DATABASE },
-        ResultConfiguration: { OutputLocation: OUTPUT_LOCATION },
+        ResultConfiguration: { OutputLocation: s3OutputLocation }, // Use the constructed path
     });
 
     let queryExecutionId: string | undefined;

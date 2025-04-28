@@ -3,10 +3,18 @@ import React from 'react';
 const useStripe = import.meta.env.VITE_USE_STRIPE === 'true';
 
 // Helper function (can be moved to a utils file later if needed)
-const formatNumber = (num: number) => num.toLocaleString();
+const formatNumber = (num: number | undefined | null): string => {
+  // Handle undefined, null, or NaN gracefully
+  if (typeof num !== 'number' || isNaN(num)) {
+    return '0';
+  }
+  return num.toLocaleString();
+};
 
 interface UsageCardProps {
-  request_allowance: number;
+  requests_used: number; // New: Number of requests used
+  initial_allowance: number; // New: Initial allowance for the plan
+  request_allowance: number; // Remaining allowance (used for depletion logic)
   plan: string; // Assuming plan is a string like 'free', 'paid', etc. - adjust if needed
   is_payment_active: boolean;
   stripe_last4?: string | null; // Optional, only present if payment is active
@@ -15,13 +23,16 @@ interface UsageCardProps {
 }
 
 export const UsageCard: React.FC<UsageCardProps> = ({
-  request_allowance,
+  requests_used,
+  initial_allowance,
+  request_allowance, // Keep for depletion logic
   plan, // plan might be used for future display logic, keeping it for now
   is_payment_active,
   stripe_last4,
   onSetupAutoPay,
   onManagePayment,
 }) => {
+  // Depletion logic still uses the remaining request_allowance
   const allowanceDepleted = request_allowance <= 0;
   const showSetupPrompt = !is_payment_active;
   const showDepletedWarning = allowanceDepleted && !is_payment_active;
@@ -32,9 +43,11 @@ export const UsageCard: React.FC<UsageCardProps> = ({
 
       <div className="mb-4">
         <div className="flex justify-between items-baseline mb-1 text-sm">
-          <span className="font-medium text-gray-700">Remaining Requests</span>
+          {/* Updated Label */}
+          <span className="font-medium text-gray-700">Requests Used</span>
+          {/* Updated Value: Used / Initial */}
           <span className={`font-semibold ${allowanceDepleted ? 'text-red-600' : 'text-gray-900'}`}>
-            {formatNumber(request_allowance)}
+            {formatNumber(requests_used)} / {formatNumber(initial_allowance)}
           </span>
         </div>
         {/* Progress bar removed as it's less relevant for a depleting balance model */}

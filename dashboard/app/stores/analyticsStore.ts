@@ -213,7 +213,7 @@ export const useStore = create<AnalyticsState>()(
                     set({ status: 'initializing' });
                     try {
                         const { db: newDb, connection: newConnection } = await initializeDb(); // Use imported function
-                        set({ db: newDb, connection: newConnection });
+                        set({ db: newDb, connection: newConnection, status: 'idle' }); // Reset status after init
                         // After DB init, fetch sites which might trigger this function again
                         await get().fetchSites();
                         return; // Exit, let the next call handle data fetching

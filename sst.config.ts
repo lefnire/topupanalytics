@@ -537,7 +537,20 @@ export default $config({
       },
       permissions: [
         {actions: ["athena:*"], resources: ["*"]},
-        // {actions: ["s3:ListBucket"], resources: [queryResultsBucket.arn, eventsBucket.arn]},
+        { // Add Glue permissions for Athena metadata access
+          actions: [
+            "glue:GetDatabase",
+            "glue:GetTable",
+            "glue:GetPartitions" // Add GetPartitions, often needed by Athena for partitioned tables
+          ],
+          resources: [
+            glueCatalogDatabase.arn, // Grant on specific DB ARN
+            $interpolate`arn:aws:glue:${region}:${accountId}:catalog`, // Keep catalog ARN
+            $interpolate`arn:aws:glue:${region}:${accountId}:database/${glueCatalogDatabase.name}`, // Grant on DB name ARN pattern
+            $interpolate`arn:aws:glue:${region}:${accountId}:table/${glueCatalogDatabase.name}/*` // Grant on table wildcard ARN
+          ]
+        },
+        // {actions: ["s3:ListBucket"], resources: [athenaResultsBucket.arn, eventsBucket.arn]}, // Corrected bucket variable name if uncommented
         // Permission to query sitesTable needed to scope results
         // {actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`]},
         // Permission to get user preferences

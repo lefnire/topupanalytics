@@ -1,5 +1,5 @@
 import React from 'react';
-import { useStore } from '../../stores/analyticsStore'; // Import the Zustand store
+import { useStore } from '~/stores/analyticsStore'; // Import the Zustand store
 import { useShallow } from 'zustand/react/shallow'; // Import useShallow for performance
 import { Settings } from 'lucide-react';
 import { type Site } from '../../stores/analyticsTypes'; // Import Site type from store types
