@@ -508,8 +508,6 @@ export const useStore = create<AnalyticsState>()(
                 // Trigger initial data load after rehydration if a site ID was persisted
                 if (state.selectedSiteId) {
                     console.log(`Rehydrated with selectedSiteId: ${state.selectedSiteId}. Triggering initial load.`);
-                    // Use setTimeout to ensure this runs after the store is fully initialized
-                    setTimeout(() => useStore.getState().fetchAndLoadData(), 0);
                 } else {
                     console.log("Rehydrated without selectedSiteId. Waiting for site selection or fetch.");
                      // Attempt to fetch sites if none are selected and none loaded yet
