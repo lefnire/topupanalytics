@@ -20,6 +20,7 @@ import {
   commonSchema
 } from './schema';
 import { log } from './utils';
+import { Resource } from 'sst'
 
 // Initialize AWS Clients
 const athenaClient = new AthenaClient({});
@@ -27,11 +28,41 @@ const ddbClient = new DynamoDBClient({});
 const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
 
 // Environment Variables
-const DATABASE = process.env.ATHENA_DATABASE;
+console.log({Resource})
+/*
+{
+  Resource: {
+    App: { name: 'topupanalytics', stage: 'lefnire' },
+    AthenaResults: {
+      name: 'topupanalytics-lefnire-athenaresultsbucket-zxxnxubn',
+      type: 'sst:aws:Bucket'
+    },
+    EventData: {
+      name: 'topupanalytics-lefnire-eventdatabucket-udsmnmuk',
+      type: 'sst:aws:Bucket'
+    },
+    SitesTable: {
+      name: 'topupanalytics-lefnire-SitesTableTable-vmadrvmb',
+      type: 'sst:aws:Dynamo'
+    },
+    UserPreferencesTable: {
+      name: 'topupanalytics-lefnire-UserPreferencesTableTable-dawochds',
+      type: 'sst:aws:Dynamo'
+    },
+    'topupanalytics-lefnire-db': {
+      name: 'topupanalytics-lefnire_analytics_db',
+      arn: 'arn:aws:glue:us-east-1:412204475590:database/topupanalytics-lefnire_analytics_db',
+      type: 'aws:glue/catalogDatabase:CatalogDatabase'
+    }
+  }
+}
+ */
+
+const DATABASE = Resource.GlueCatalogDatabase.name;
 const INITIAL_EVENTS_TABLE = process.env.ATHENA_INITIAL_EVENTS_ICEBERG_TABLE;
 const EVENTS_TABLE = process.env.ATHENA_EVENTS_ICEBERG_TABLE;
 const OUTPUT_LOCATION = process.env.ATHENA_OUTPUT_LOCATION;
-const SITES_TABLE_NAME = process.env.SITES_TABLE_NAME;
+const SITES_TABLE_NAME = Resource.SitesTable.name;
 
 // Helper function for sleep
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -209,7 +240,8 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     }
     log(`Authenticated user sub: ${userSub}`);
 
-    if (!SITES_TABLE_NAME || !DATABASE || !INITIAL_EVENTS_TABLE || !EVENTS_TABLE || !OUTPUT_LOCATION) {
+    // SITES_TABLE_NAME, DATABASE, INITIAL_EVENTS_TABLE, EVENTS_TABLE, OUTPUT_LOCATION are now accessed directly or via Resource
+    if (!INITIAL_EVENTS_TABLE || !EVENTS_TABLE || !OUTPUT_LOCATION) {
         console.error("Missing required environment variables.");
         return { statusCode: 500, body: JSON.stringify({ message: "Internal server configuration error." }) };
     }
