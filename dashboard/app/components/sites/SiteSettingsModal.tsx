@@ -4,7 +4,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '~/components/ui/card';
 import { DialogTitle, DialogDescription } from '~/components/ui/dialog'; // Added Dialog imports
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden'; // Added VisuallyHidden import
 import { toast } from 'sonner';
-import { SiteSettingsForm } from '~/routes/sites/components/SiteSettingsForm'; // Adjust path as needed
+import { SiteForm } from '~/routes/sites/components/SiteForm'; // Use the new unified form
 import { EmbedScriptDisplay } from '~/routes/sites/components/EmbedScriptDisplay'; // Adjust path as needed
 
 interface SiteSettingsModalProps {
@@ -95,7 +95,8 @@ export function SiteSettingsModal({ siteId, onClose, onSiteUpdate }: SiteSetting
           <CardTitle>Site Configuration</CardTitle>
         </CardHeader>
         <CardContent>
-           <SiteSettingsForm site={site} onUpdate={handleSiteUpdate} />
+          {/* Use SiteForm in update mode */}
+          <SiteForm mode="update" site={site} onSuccess={handleSiteUpdate} onCancel={onClose} />
         </CardContent>
       </Card>
 

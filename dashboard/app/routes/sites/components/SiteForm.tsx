@@ -2,60 +2,64 @@ import React, { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
-// import { loadStripe } from '@stripe/stripe-js'; // Removed as Stripe checkout logic is no longer in this form
+import { useNavigate } from 'react-router';
 import { useApiClient, type Site } from '../../../lib/api';
-import { initialEventsSchema } from '../../../../../functions/analytics/schema'; // Import the schema
 import { Button } from '../../../components/ui/button';
 import { Input } from '../../../components/ui/input';
 import { Label } from '../../../components/ui/label';
 import { Textarea } from '../../../components/ui/textarea';
-import { Checkbox } from '../../../components/ui/checkbox';
-// Removed incorrect RadioGroup import
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from '../../../components/ui/form';
 import { toast } from 'sonner';
 
-// Zod schema for validation
+// Unified Zod schema
 const formSchema = z.object({
   name: z.string().min(2, { message: "Site name must be at least 2 characters." }),
   allowed_domains: z.string().optional(), // Accept string, parse in onSubmit
-  compliance_level: z.enum(['yes', 'maybe', 'no'], { required_error: "Compliance level is required." }), // Updated compliance level
+  compliance_level: z.enum(['yes', 'maybe', 'no']).optional(), // Optional for create, defaults handled in onSubmit/API
 });
 
-// Infer the type directly, including the new field
 type FormData = z.infer<typeof formSchema>;
 
-interface SiteSettingsFormProps {
-  site: Site;
-  onUpdate?: (updatedSite: Site) => void; // Optional callback after successful update
+interface SiteFormProps {
+  mode: 'create' | 'update';
+  site?: Site; // Only provided in 'update' mode
+  onSuccess?: (site: Site) => void; // Callback on successful create/update
+  onCancel?: () => void; // Optional callback for cancelling
 }
 
-export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
-  const { put } = useApiClient(); // Remove 'post' if only used for upgrade
+export function SiteForm({ mode, site, onSuccess, onCancel }: SiteFormProps) {
+  const { post, put } = useApiClient();
+  const navigate = useNavigate();
   const [isSubmitting, setIsSubmitting] = useState(false);
-  // Remove isUpgrading state: const [isUpgrading, setIsUpgrading] = useState(false);
+
+  const isUpdateMode = mode === 'update';
 
   const form = useForm<FormData>({
     resolver: zodResolver(formSchema),
-    // Initialize with current site values
     defaultValues: {
-      name: site.name || "",
-      // Join array into newline-separated string for textarea
-      allowed_domains: Array.isArray(site.allowed_domains) ? site.allowed_domains.join('\n') : "",
-      // Initialize compliance_level, default to 'enhanced' if not set
-      compliance_level: site.compliance_level || 'maybe', // Default to 'maybe'
+      name: isUpdateMode ? site?.name || "" : "",
+      allowed_domains: isUpdateMode && Array.isArray(site?.allowed_domains) ? site.allowed_domains.join('\n') : "",
+      compliance_level: isUpdateMode ? site?.compliance_level || 'maybe' : 'maybe', // Default 'maybe' for create
     },
   });
 
-   // Reset form if the site prop changes (e.g., navigating between sites)
+   // Reset form if the site prop changes in update mode
    useEffect(() => {
-    form.reset({
-      name: site.name || "",
-      // Join array into newline-separated string for textarea
-      allowed_domains: Array.isArray(site.allowed_domains) ? site.allowed_domains.join('\n') : "",
-      // Reset compliance_level, default to 'enhanced' if not set
-      compliance_level: site.compliance_level || 'maybe', // Default to 'maybe'
-    });
-  }, [site, form]);
+    if (isUpdateMode && site) {
+        form.reset({
+            name: site.name || "",
+            allowed_domains: Array.isArray(site.allowed_domains) ? site.allowed_domains.join('\n') : "",
+            compliance_level: site.compliance_level || 'maybe',
+        });
+    } else if (!isUpdateMode) {
+        // Reset for create mode if needed (e.g., opening modal again)
+        form.reset({
+            name: "",
+            allowed_domains: "",
+            compliance_level: 'maybe',
+        });
+    }
+  }, [site, mode, form, isUpdateMode]); // Add mode and isUpdateMode dependencies
 
 
   async function onSubmit(values: FormData) {
@@ -66,34 +70,49 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
         ? values.allowed_domains.split('\n').map(d => d.trim()).filter(d => d.length > 0)
         : [];
 
-      // Prepare data for API (using 'domains' key)
-      const updatedSiteData = {
+      // Prepare data for API
+      const siteData = {
         name: values.name,
-        domains: domainsArray, // Use parsed array and correct key
-        compliance_level: values.compliance_level, // Send the selected compliance level
+        domains: domainsArray,
+        // Only send compliance_level if it's explicitly set or in update mode
+        // Backend defaults to 'maybe' on create if not provided
+        ...(values.compliance_level && { compliance_level: values.compliance_level }),
       };
 
-      const updatedSite = await put<Site>(`/api/sites/${site.site_id}`, updatedSiteData);
-      toast.success(`Site "${values.name}" updated successfully!`);
-      if (onUpdate && updatedSite) {
-         onUpdate(updatedSite); // Notify parent component if needed
+      let resultSite: Site;
+
+      if (isUpdateMode && site?.site_id) {
+        // Update existing site
+        resultSite = await put<Site>(`/api/sites/${site.site_id}`, siteData);
+        toast.success(`Site "${values.name}" updated successfully!`);
+      } else {
+        // Create new site
+        resultSite = await post<Site>('/api/sites', siteData);
+        toast.success(`Site "${values.name}" created successfully!`);
       }
-       // Optionally reset form to show updated values, though useEffect handles this if site prop updates
-       // form.reset(values); // Reset with the submitted values
+
+      // Call onSuccess callback if provided
+      if (onSuccess && resultSite) {
+        onSuccess(resultSite);
+      } else if (!isUpdateMode && resultSite?.site_id) {
+        // Default navigation for create mode if no callback
+        navigate(`/sites/${resultSite.site_id}`);
+      } else if (!isUpdateMode) {
+         navigate('/sites'); // Fallback for create
+      }
+
     } catch (error: any) {
-      console.error("Failed to update site:", error);
-      toast.error(`Failed to update site: ${error.message || 'Unknown error'}`);
+      console.error(`Failed to ${mode} site:`, error);
+      toast.error(`Failed to ${mode} site: ${error.message || 'Unknown error'}`);
     } finally {
       setIsSubmitting(false);
     }
   }
 
-   // Removed handleUpgradeClick function related to Stripe Checkout
-
   return (
     <Form {...form}>
       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
-        {/* --- Move handler above return --- */}
+        {/* Site Name */}
         <FormField
           control={form.control}
           name="name"
@@ -101,12 +120,19 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
             <FormItem>
               <FormLabel>Site Name</FormLabel>
               <FormControl>
-                <Input {...field} disabled={isSubmitting} />
+                <Input placeholder={isUpdateMode ? "" : "My Awesome Blog"} {...field} disabled={isSubmitting} />
               </FormControl>
+              {!isUpdateMode && (
+                <FormDescription>
+                  A descriptive name for your website.
+                </FormDescription>
+              )}
               <FormMessage />
             </FormItem>
           )}
         />
+
+        {/* Allowed Domains */}
         <FormField
           control={form.control}
           name="allowed_domains"
@@ -128,18 +154,17 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
             </FormItem>
           )}
         />
+
         {/* Compliance Level Radio Group */}
-        {/* Compliance Level Radio Group - Updated for yes/maybe/no */}
         <FormField
           control={form.control}
           name="compliance_level"
           render={({ field }) => (
             <FormItem className="space-y-3">
               <FormLabel>Compliance Level</FormLabel>
-              {/* Use standard HTML radio inputs */}
               <div className="space-y-3">
                 {/* Yes Option */}
-                <div className="flex items-start space-x-3"> {/* Changed to items-start for better alignment with multi-line descriptions */}
+                <div className="flex items-start space-x-3">
                   <FormControl>
                     <input
                       type="radio"
@@ -149,19 +174,18 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
                       onChange={field.onChange}
                       disabled={isSubmitting}
                       id="compliance-yes"
-                      className="form-radio h-4 w-4 text-indigo-600 transition duration-150 ease-in-out mt-1" // Added mt-1 for alignment
+                      className="form-radio h-4 w-4 text-indigo-600 transition duration-150 ease-in-out mt-1"
                     />
                   </FormControl>
-                  <div className="flex flex-col"> {/* Wrap label and description */}
-                    <Label htmlFor="compliance-yes" className="font-medium"> {/* Use standard Label, slightly bolder */}
+                  <div className="flex flex-col">
+                    <Label htmlFor="compliance-yes" className="font-medium">
                       Yes (Maximum Privacy)
                     </Label>
-                    <FormDescription className="text-sm"> {/* Removed pl-7, handled by flex container */}
-                      Collects only essential, anonymous data (e.g., country, page path, device class). Fields marked 'maybe' or 'no' in the schema are excluded. No cookie banner needed.
+                    <FormDescription className="text-sm">
+                      Collects only essential, anonymous data. Fields marked 'maybe' or 'no' are excluded. No cookie banner needed.
                     </FormDescription>
                   </div>
                 </div>
-
                 {/* Maybe Option */}
                 <div className="flex items-start space-x-3">
                   <FormControl>
@@ -181,11 +205,10 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
                       Maybe (Balanced - Default)
                     </Label>
                     <FormDescription className="text-sm">
-                      Collects essential data plus potentially identifying data (e.g., city, browser version, screen size) using privacy-preserving techniques where applicable (like referer scrubbing). Fields marked 'no' are excluded. Requires privacy policy + opt-out.
+                      Collects essential data plus potentially identifying data using privacy-preserving techniques. Fields marked 'no' are excluded. Requires privacy policy + opt-out.
                     </FormDescription>
                   </div>
                 </div>
-
                 {/* No Option */}
                 <div className="flex items-start space-x-3">
                   <FormControl>
@@ -205,25 +228,31 @@ export function SiteSettingsForm({ site, onUpdate }: SiteSettingsFormProps) {
                       No (Full Data - Requires Consent)
                     </Label>
                     <FormDescription className="text-sm">
-                      Collects all available data defined in the schema, including potentially sensitive fields (e.g., device model, manufacturer). <strong>Requires explicit user consent (cookie banner).</strong>
+                      Collects all available data. <strong>Requires explicit user consent (cookie banner).</strong>
                     </FormDescription>
                   </div>
                 </div>
               </div>
-              <FormDescription className="pt-2"> {/* Keep the general note */}
-                Note: Changing the compliance level only affects data collected going forward. It does not alter historical data.
+              <FormDescription className="pt-2">
+                Note: Changing the compliance level only affects data collected going forward.
               </FormDescription>
               <FormMessage />
             </FormItem>
           )}
         />
-        <div className="flex items-center space-x-2">
-            <Button type="submit" disabled={isSubmitting || !form.formState.isDirty}>
-              {isSubmitting ? 'Saving...' : 'Save Changes'}
+
+        {/* Submit/Cancel Buttons */}
+        <div className="flex items-center space-x-2 pt-2">
+            <Button type="submit" disabled={isSubmitting || (isUpdateMode && !form.formState.isDirty)}>
+              {isSubmitting ? (isUpdateMode ? 'Saving...' : 'Creating...') : (isUpdateMode ? 'Save Changes' : 'Create Site')}
             </Button>
-            {/* Removed Upgrade Button */}
+            {onCancel && (
+                 <Button type="button" variant="outline" onClick={onCancel} disabled={isSubmitting}>
+                    Cancel
+                 </Button>
+            )}
         </div>
-         {!form.formState.isDirty && !isSubmitting && (
+         {isUpdateMode && !form.formState.isDirty && !isSubmitting && (
             <p className="text-sm text-muted-foreground">No changes detected.</p>
         )}
       </form>

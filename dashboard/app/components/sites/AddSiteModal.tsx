@@ -1,5 +1,5 @@
 import React from 'react';
-import { CreateSiteForm } from '../../routes/sites/components/CreateSiteForm'; // Adjust path as needed
+import { SiteForm } from '../../routes/sites/components/SiteForm'; // Use the new unified form
 import { type Site } from '../../lib/api'; // Import Site type if needed for callback
 import { DialogTitle, DialogDescription } from '../../components/ui/dialog'; // Added Dialog imports
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden'; // Added VisuallyHidden import
@@ -28,8 +28,8 @@ export function AddSiteModal({ onClose, onSiteCreated }: AddSiteModalProps) {
         <DialogTitle>Add New Site</DialogTitle>
         <DialogDescription>Register a new website to start tracking analytics.</DialogDescription>
       </VisuallyHidden>
-      {/* Pass the success handler to the form */}
-      <CreateSiteForm onSuccess={handleSuccess} />
+      {/* Pass the success handler and mode to the new form */}
+      <SiteForm mode="create" onSuccess={handleSuccess} onCancel={onClose} />
       {/* Optional: Add Close button if modal doesn't provide one */}
       {/* <div className="flex justify-end pt-4">
         <Button variant="outline" onClick={onClose}>Close</Button>
