@@ -32,7 +32,7 @@ const USER_PREFERENCES_TABLE_NAME = process.env.USER_PREFERENCES_TABLE_NAME;
 // --- Caching & Batching Implementation ---
 interface SiteConfig {
   site_id: string;
-  domains?: string; // JSON stringified array
+  domains?: string[]; // Expect an array of strings directly from DynamoDB
   // allowed_fields?: string; // Replaced by compliance_level
   compliance_level?: 'yes' | 'maybe' | 'no'; // Updated compliance levels
   request_allowance: number;
@@ -191,11 +191,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 
     // --- Domain Validation (using cached config) ---
     const refererHeader = event.headers?.referer;
-    const allowedDomainsString = cfg.domains;
-    if (refererHeader && allowedDomainsString) {
+    const allowedDomains = cfg.domains;
+    if (refererHeader && allowedDomains && allowedDomains.length > 0) {
       try {
-        const allowedDomains: string[] = JSON.parse(allowedDomainsString);
-        if (allowedDomains.length > 0) {
           const refererUrl = new URL(refererHeader);
           const refererHostname = refererUrl.hostname;
           if (!allowedDomains.includes(refererHostname)) {
@@ -203,10 +201,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
             return { statusCode: 403, body: JSON.stringify({ message: 'Forbidden: Invalid referer' }) };
           }
           log(`Referer ${refererHostname} validated for site ${siteId}.`);
-        }
       } catch (e) {
-        console.error(`Error parsing cached domains for site ${siteId}: ${allowedDomainsString}`, e);
-        return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error: Cannot parse site domains' }) };
+        // Handle potential URL parsing errors for the referer itself
+        console.error(`Error parsing referer header for site ${siteId}: ${refererHeader}`, e);
+        // Depending on policy, might want to deny or allow if referer is malformed
+        return { statusCode: 400, body: JSON.stringify({ message: 'Bad Request: Malformed referer header' }) };
       }
     }
 

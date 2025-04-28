@@ -49,11 +49,34 @@ const validateDomains = (domains: any): { value?: string[]; error?: string } => 
   if (!Array.isArray(domains) || domains.length === 0) {
     return { error: "Bad Request: 'domains' must be a non-empty array." };
   }
-  if (!domains.every(d => typeof d === 'string' && d.trim().length > 0)) {
-    return { error: "Bad Request: 'domains' must contain only non-empty strings." };
+
+  const validatedHostnames: string[] = [];
+  for (const d of domains) {
+    if (typeof d !== 'string' || d.trim().length === 0) {
+      return { error: "Bad Request: 'domains' must contain only non-empty strings." };
+    }
+    const trimmedDomain = d.trim();
+    try {
+      // Attempt to parse as a full URL first
+      // If it doesn't have a protocol, prepend one for the parser
+      const urlString = trimmedDomain.includes('://') ? trimmedDomain : `http://${trimmedDomain}`;
+      const parsedUrl = new URL(urlString);
+      if (parsedUrl.hostname) {
+        validatedHostnames.push(parsedUrl.hostname);
+      } else {
+        // This case should be rare if URL parsing succeeds but hostname is empty
+        return { error: `Bad Request: Invalid domain format '${trimmedDomain}'. Could not extract hostname.` };
+      }
+    } catch (e) {
+      // If URL parsing fails, treat it as an invalid domain format
+      return { error: `Bad Request: Invalid domain format '${trimmedDomain}'. Use hostname (e.g., example.com) or full URL.` };
+    }
   }
-  // Trim domains just in case
-  return { value: domains.map(d => d.trim()) };
+
+  // Deduplicate hostnames
+  const uniqueHostnames = [...new Set(validatedHostnames)];
+
+  return { value: uniqueHostnames };
 };
 
 const validateAllowedFields = (allowed_fields: any): { value?: string[]; error?: string } => {

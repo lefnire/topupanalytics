@@ -38,7 +38,7 @@ export function SiteForm({ mode, site, onSuccess, onCancel }: SiteFormProps) {
     resolver: zodResolver(formSchema),
     defaultValues: {
       name: isUpdateMode ? site?.name || "" : "",
-      allowed_domains: isUpdateMode && Array.isArray(site?.domains) ? site.domains.join('\\n') : "",
+      allowed_domains: isUpdateMode && Array.isArray(site?.domains) ? site.domains.join('\n') : "",
       compliance_level: isUpdateMode ? site?.compliance_level || 'maybe' : 'maybe', // Default 'maybe' for create
     },
   });
@@ -48,7 +48,7 @@ export function SiteForm({ mode, site, onSuccess, onCancel }: SiteFormProps) {
     if (isUpdateMode && site) {
         form.reset({
             name: site.name || "",
-            allowed_domains: Array.isArray(site.domains) ? site.domains.join('\\n') : "",
+            allowed_domains: Array.isArray(site.domains) ? site.domains.join('\n') : "",
             compliance_level: site.compliance_level || 'maybe',
         });
     } else if (!isUpdateMode) {
@@ -64,11 +64,37 @@ export function SiteForm({ mode, site, onSuccess, onCancel }: SiteFormProps) {
 
   async function onSubmit(values: FormData) {
     setIsSubmitting(true);
+    const uniqueHostnames = new Set<string>();
+
     try {
-      // Parse allowed_domains string into array
-      const domainsArray = values.allowed_domains
-        ? values.allowed_domains.split('\n').map(d => d.trim()).filter(d => d.length > 0)
-        : [];
+      // Parse allowed_domains string into array of hostnames
+      if (values.allowed_domains) {
+        const lines = values.allowed_domains.split('\n');
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (trimmedLine.length > 0) {
+            try {
+              // Prepend http:// if no protocol exists, for URL parser
+              const urlString = trimmedLine.includes('://') ? trimmedLine : `http://${trimmedLine}`;
+              const parsedUrl = new URL(urlString);
+              if (parsedUrl.hostname) {
+                  uniqueHostnames.add(parsedUrl.hostname);
+              } else {
+                // Handle cases where parsing might succeed but hostname is empty (should be rare)
+                // Optionally show a specific error for this line?
+                console.warn(`Could not extract hostname from: ${trimmedLine}`);
+              }
+            } catch (e) {
+              // Handle invalid URL format - maybe show toast?
+              console.warn(`Invalid domain/URL format skipped: ${trimmedLine}`, e);
+              // Optionally, inform the user about the skipped line
+              // toast.warning(`Skipped invalid domain entry: ${trimmedLine}`);
+            }
+          }
+        }
+      }
+
+      const domainsArray = [...uniqueHostnames];
 
       // Prepare data for API
       const siteData = {
