@@ -1,29 +1,18 @@
 import { DynamoDBClient, QueryCommand, GetItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 import Stripe from 'stripe';
-// import { Resource } from "sst"; // Using process.env instead for linked resources
-import * as process from 'process'; // Import process for env vars
+import { Resource } from "sst"; // Added Resource import
 
 // Initialize DynamoDB Client
 const ddbClient = new DynamoDBClient({});
 
 // Initialize Stripe Client
-// SST automatically injects linked resource values into environment variables
-// Format: SST_<ResourceType>_<propertyName>_<ResourceName>
-const stripeSecretKeyValue = process.env.SST_Secret_value_StripeSecretKey;
-if (!stripeSecretKeyValue) {
-    throw new Error("Stripe secret key (SST_Secret_value_StripeSecretKey) is not configured in environment.");
-}
-const stripe = new Stripe(stripeSecretKeyValue, {
+const stripe = new Stripe(Resource.StripeSecretKey.value, {
   apiVersion: '2025-03-31.basil', // Updated based on TS error
 });
 
-const SITES_TABLE_NAME = process.env.SST_Table_tableName_SitesTable;
-const USER_PREFERENCES_TABLE_NAME = process.env.SST_Table_tableName_UserPreferencesTable;
-
-if (!SITES_TABLE_NAME || !USER_PREFERENCES_TABLE_NAME) {
-    throw new Error("DynamoDB table names (SitesTable or UserPreferencesTable) are not configured in environment.");
-}
+const SITES_TABLE_NAME = Resource.SitesTable.name;
+const USER_PREFERENCES_TABLE_NAME = Resource.UserPreferencesTable.name;
 
 const PLAN_INDEX_NAME = "planIndex"; // GSI name defined in sst.config.ts
 const TOPUP_AMOUNT_CENTS = 500; // $5.00

@@ -28,13 +28,6 @@ const ddbClient = new DynamoDBClient({});
 const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
 
 
-const DATABASE = Resource.GlueCatalogDatabase.name;
-const INITIAL_EVENTS_TABLE = process.env.ATHENA_INITIAL_EVENTS_ICEBERG_TABLE;
-const EVENTS_TABLE = process.env.ATHENA_EVENTS_ICEBERG_TABLE;
-const OUTPUT_LOCATION = Resource.AthenaResults.name;
-const SITES_TABLE_NAME = Resource.SitesTable.name;
-
-
 // Helper function for sleep
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -94,16 +87,12 @@ async function executeAthenaQuery(
 
     const finalQuery = queryString.replace(/\\s*--.*$/gm, '').trim().replace(/;$/, '');
 
-    if (!DATABASE || !OUTPUT_LOCATION) {
-        throw new Error("Missing required environment variables for Athena query.");
-    }
-
-    const s3OutputLocation = `s3://${OUTPUT_LOCATION}/`; // Construct the full path
-    console.log(`Using Athena Output Location: ${s3OutputLocation}`); // Add log statement
+    const s3OutputLocation = `s3://${Resource.AthenaResults.name}/`; // Construct the full path using the bucket name
+    console.log(`Using Athena Output Location: ${s3OutputLocation}`);
 
     const startQueryCmd = new StartQueryExecutionCommand({
         QueryString: finalQuery,
-        QueryExecutionContext: { Database: DATABASE },
+        QueryExecutionContext: { Database: Resource.GlueCatalogDatabase.name },
         ResultConfiguration: { OutputLocation: s3OutputLocation }, // Use the constructed path
     });
 
@@ -214,17 +203,11 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     }
     log(`Authenticated user sub: ${userSub}`);
 
-    // SITES_TABLE_NAME, DATABASE, INITIAL_EVENTS_TABLE, EVENTS_TABLE, OUTPUT_LOCATION are now accessed directly or via Resource
-    if (!INITIAL_EVENTS_TABLE || !EVENTS_TABLE || !OUTPUT_LOCATION) {
-        console.error("Missing required environment variables.");
-        return { statusCode: 500, body: JSON.stringify({ message: "Internal server configuration error." }) };
-    }
-
     // --- Get User's Owned Sites from DynamoDB ---
     let ownedSiteIds: string[] = [];
     try {
         const queryCommand = new QueryCommand({
-            TableName: SITES_TABLE_NAME,
+            TableName: Resource.SitesTable.name,
             IndexName: "ownerSubIndex",
             KeyConditionExpression: "owner_sub = :sub",
             ExpressionAttributeValues: { ":sub": userSub },
@@ -379,7 +362,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
         const initialEventsQuery = `
 SELECT
     ${initialSelectCols}
-FROM "${DATABASE}"."${INITIAL_EVENTS_TABLE}"
+FROM "${Resource.GlueCatalogDatabase.name}"."${Resource.GlueCatalogTableinitial_events.name}"
 WHERE ${dateFilterSql} AND ${siteIdFilterSql}
 ORDER BY "timestamp" DESC
         `;
@@ -387,7 +370,7 @@ ORDER BY "timestamp" DESC
         const eventsQuery = `
 SELECT
     ${eventsSelectCols}
-FROM "${DATABASE}"."${EVENTS_TABLE}"
+FROM "${Resource.GlueCatalogDatabase.name}"."${Resource.GlueCatalogTableevents.name}"
 WHERE ${dateFilterSql} AND ${siteIdFilterSql}
 ORDER BY "timestamp" DESC
         `;

@@ -1,12 +1,11 @@
 import { APIGatewayProxyHandlerV2, APIGatewayProxyEventV2 } from "aws-lambda";
-import { Config } from "sst/node/config";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, UpdateCommand, QueryCommand } from "@aws-sdk/lib-dynamodb"; // Added QueryCommand
 import Stripe from 'stripe';
-import { Table } from "sst/node/table";
+import { Resource } from "sst"; // Added Resource import
 
-// Initialize Stripe with the secret key from SST Config
-const stripe = new Stripe(Config.STRIPE_SECRET_KEY, {
+// Initialize Stripe with the secret key from SST Resource
+const stripe = new Stripe(Resource.StripeSecretKey.value, {
   apiVersion: '2025-03-31.basil', // Match expected version from TS error
 });
 
@@ -77,7 +76,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event: APIGatewayProxyEv
         stripeEvent = stripe.webhooks.constructEvent(
           rawBody,
           signature,
-          Config.STRIPE_WEBHOOK_SECRET // Use the webhook secret from SST Config
+          Resource.StripeWebhookSecret.value // Use the webhook secret from SST Resource
         );
         console.log(`Webhook event received: ${stripeEvent.type}`);
       } catch (err: any) {
@@ -119,7 +118,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event: APIGatewayProxyEv
 
             // Update UserPreferencesTable
             const updateParams = {
-              TableName: Table.UserPreferencesTable.tableName,
+              TableName: Resource.UserPreferencesTable.name,
               Key: { cognito_sub: userSubFromMetadata },
               UpdateExpression: "set stripe_payment_method_id = :pmId, stripe_last4 = :last4, is_payment_active = :active",
               ExpressionAttributeValues: {
@@ -169,7 +168,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event: APIGatewayProxyEv
              //   stripeCustomerIdIndex: { hashKey: "stripe_customer_id", projection: "all" },
              // },
              const queryParams = {
-                TableName: Table.UserPreferencesTable.tableName,
+                TableName: Resource.UserPreferencesTable.name,
                 IndexName: "stripeCustomerIdIndex", // ASSUMED GSI NAME
                 KeyConditionExpression: "stripe_customer_id = :customerId",
                 ExpressionAttributeValues: { ":customerId": pmCustomerId },
@@ -182,7 +181,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event: APIGatewayProxyEv
 
                 // Update UserPreferencesTable to deactivate payment
                 const updateParams = {
-                  TableName: Table.UserPreferencesTable.tableName,
+                  TableName: Resource.UserPreferencesTable.name,
                   Key: { cognito_sub: userSubToUpdate },
                   UpdateExpression: "set is_payment_active = :active, stripe_payment_method_id = :nullVal, stripe_last4 = :nullVal",
                   ExpressionAttributeValues: {
@@ -257,7 +256,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event: APIGatewayProxyEv
       // Check UserPreferencesTable for existing customer ID
       try {
         const getParams = {
-          TableName: Table.UserPreferencesTable.tableName,
+          TableName: Resource.UserPreferencesTable.name,
           Key: { cognito_sub: userSub },
         };
         const { Item } = await ddbDocClient.send(new GetCommand(getParams));
@@ -274,7 +273,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event: APIGatewayProxyEv
 
           // Store the new customer ID back in DynamoDB
           const updateParams = {
-            TableName: Table.UserPreferencesTable.tableName,
+            TableName: Resource.UserPreferencesTable.name,
             Key: { cognito_sub: userSub },
             UpdateExpression: "set stripe_customer_id = :customerId",
             ExpressionAttributeValues: { ":customerId": customerId },
@@ -305,14 +304,14 @@ export const handler: APIGatewayProxyHandlerV2 = async (event: APIGatewayProxyEv
             metadata: {
               // Include relevant IDs for webhook processing
               customer_id: customerId, // Link SetupIntent to Stripe Customer
-              user_sub: userSub,       // Link SetupIntent to Cognito User Sub
+              user_sub: userSub!,       // Link SetupIntent to Cognito User Sub (Assert non-null)
               // site_id: siteId, // siteId is not directly needed for setup intent, but could be added if required later
             }
           },
           // line_items removed for setup mode
           metadata: {
             // Metadata on the session itself (optional, but can be useful for context)
-            user_sub: userSub,
+            user_sub: userSub!, // Assert non-null
             // site_id: siteId, // Keep if needed for success/cancel page context
           },
         });

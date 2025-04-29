@@ -8,7 +8,7 @@ export default [
   route("terms-of-service", "routes/legal/terms-of-service.tsx"),
   route("docs/installation", "routes/docs/installation.tsx"),
   route("docs/cookieless-tracking", "routes/docs/cookieless-tracking.tsx"),
-  route("docs/architecture", "routes/docs/architecture.mdx"),
+  // route("docs/architecture", "routes/docs/architecture.mdx"),
   // --- End Static Content ---
   // Auth Routes
   route("login", "routes/login.tsx"),

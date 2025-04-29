@@ -18,16 +18,12 @@ import {
   SchemaField
 } from './schema';
 import { log } from './utils';
+import { Resource } from "sst";
 
 // Initialize Firehose client
 const firehoseClient = new FirehoseClient({});
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
-
-const EVENTS_FIREHOSE_STREAM_NAME = process.env.EVENTS_FIREHOSE_STREAM_NAME;
-const INITIAL_EVENTS_FIREHOSE_STREAM_NAME = process.env.INITIAL_EVENTS_FIREHOSE_STREAM_NAME;
-const SITES_TABLE_NAME = process.env.SITES_TABLE_NAME;
-const USER_PREFERENCES_TABLE_NAME = process.env.USER_PREFERENCES_TABLE_NAME;
 
 // --- Caching & Batching Implementation ---
 interface SiteConfig {
@@ -44,11 +40,8 @@ const allowanceDelta: Record<string, number> = {};
 const FLUSH = false; // Set to true to enable time-based flushing
 
 async function loadFromDynamo(siteId: string): Promise<SiteConfig> {
-  if (!SITES_TABLE_NAME) {
-    throw new Error("SITES_TABLE_NAME environment variable is not set.");
-  }
   const getParams = {
-    TableName: SITES_TABLE_NAME,
+    TableName: Resource.SitesTable.name,
     Key: { site_id: siteId },
   };
   const getSiteCommand = new GetCommand(getParams);
@@ -111,7 +104,7 @@ function getAllowedFieldsSet(complianceLevel: 'yes' | 'maybe' | 'no', isInitialE
 async function flush() {
   const updates = Object.entries(allowanceDelta).map(([site_id, cnt]) => ({
     Update: {
-      TableName: SITES_TABLE_NAME!, // Use non-null assertion as it's checked earlier
+      TableName: Resource.SitesTable.name,
       Key: { site_id },
       // Condition: Only decrement if current allowance is sufficient
       ConditionExpression: "attribute_exists(site_id) AND request_allowance >= :cnt",
@@ -150,7 +143,8 @@ async function flush() {
 // POST /api/events
 // Add 'context' to the handler signature
 export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
-  const now = Date.now();
+  const requestTime = new Date(); // Use a different name to avoid conflict with original 'now' usage if needed, but 'now' is fine here.
+  const nowTimestamp = requestTime.getTime(); // Get numeric timestamp for cache
   log('Received event:', JSON.stringify(event, null, 2));
 
   // --- Site ID Validation ---
@@ -160,20 +154,19 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     return { statusCode: 400, body: JSON.stringify({ message: 'Bad Request: Missing site parameter' }) };
   }
 
-  if (!SITES_TABLE_NAME) {
-      console.error("SITES_TABLE_NAME environment variable is not set.");
-      return { statusCode: 500, body: JSON.stringify({ message: 'Internal configuration error' }) };
-  }
-
   try {
     // --- 1. Get Site Config (Cache or Load) ---
     let entry = siteCache.get(siteId);
-    if (!entry || now - entry.ts > 10 * 60 * 1000) { // 10-min TTL
+    let cfg: SiteConfig; // Declare cfg here
+
+    if (!entry || nowTimestamp - entry.ts > 10 * 60 * 1000) { // 10-min TTL - Use nowTimestamp
       log(`Cache miss or expired for site ${siteId}. Fetching from DynamoDB.`);
       try {
         const loadedCfg = await loadFromDynamo(siteId);
-        entry = { cfg: loadedCfg, ts: now };
-        siteCache.set(siteId, entry);
+        // Assign cfg directly here
+        cfg = loadedCfg;
+        entry = { cfg: loadedCfg, ts: nowTimestamp }; // Use nowTimestamp for cache ts
+        siteCache.set(siteId, entry); // entry is guaranteed to be defined here
         log(`Cached config for site ${siteId}.`);
       } catch (loadError: any) {
         // Handle errors from loadFromDynamo (e.g., not found, inactive)
@@ -185,9 +178,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
       }
     } else {
       log(`Cache hit for site ${siteId}.`);
+      // Assign cfg from cached entry
+      cfg = entry.cfg; // entry is guaranteed to be defined here
     }
 
-    const cfg = entry.cfg;
+    // cfg is now guaranteed to be defined if we reach this point without erroring out
 
     // --- Domain Validation (using cached config) ---
     const refererHeader = event.headers?.referer;
@@ -261,11 +256,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     let dataToSend: Record<string, any>;
     let streamName: string | undefined;
 
-    const timestamp = (new Date()).toISOString();
+    // Use the requestTime Date object from the start of the handler
+    const timestamp = requestTime.toISOString();
+    const dt = requestTime.toISOString().split('T')[0]; // 'yyyy-MM-dd' format
 
     if (isInitialEvent) {
       // --- Initial Event: Collect all data ---
-      streamName = INITIAL_EVENTS_FIREHOSE_STREAM_NAME;
+      streamName = Resource.FirehoseStreaminitial_events.name;
 
       // Extract geographic information from CloudFront headers
       /*
@@ -365,11 +362,12 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
         timestamp: timestamp,
         properties: body.properties || {},
         site_id: siteId, // Inject validated site_id
+        dt: dt, // Add dt for partitioning
       };
 
     } else {
       // --- Regular Event: Collect minimal data ---
-      streamName = EVENTS_FIREHOSE_STREAM_NAME;
+      streamName = Resource.FirehoseStreamevents.name;
 
       dataToSend = {
         event: body.event,
@@ -378,6 +376,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
         properties: body.properties || {},
         timestamp: timestamp,
         site_id: siteId, // Inject validated site_id
+        dt: dt, // Add dt for partitioning
       };
     }
 
