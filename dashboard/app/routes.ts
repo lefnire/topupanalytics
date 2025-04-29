@@ -8,10 +8,11 @@ export default [
   route("terms-of-service", "routes/legal/terms-of-service.tsx"),
   route("docs/installation", "routes/docs/installation.tsx"),
   route("docs/cookieless-tracking", "routes/docs/cookieless-tracking.tsx"),
+  route("docs/architecture", "routes/docs/architecture.mdx"),
   // --- End Static Content ---
   // Auth Routes
   route("login", "routes/login.tsx"),
   route("signup", "routes/signup.tsx"),
   route("confirm-signup", "routes/confirm-signup.tsx"), // For email confirmation codes
-route("test-ingest", "routes/test-ingest.tsx"), // New route for testing ingestion
+  route("test-ingest", "routes/test-ingest.tsx"), // New route for testing ingestion
 ] satisfies RouteConfig;

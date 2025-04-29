@@ -1,0 +1,60 @@
+**Data Pipeline Evolution: Firehose -> S3 Analytics Store**
+
+**Objective:** To build a cost-effective, scalable data ingestion and analytics pipeline primarily using AWS serverless services, capable of handling potentially high event volumes and supporting analytical queries from a dashboard.
+
+**1. Initial Concept: Traditional Firehose -> S3 (Hive/Parquet) + Glue + Athena**
+
+*   **Architecture:**
+    *   **Ingestion:** Client -> Lambda (`ingestFn`) -> Kinesis Firehose (`extended_s3` destination).
+    *   **Firehose Config:** Uses `dynamicPartitioningConfiguration` based on keys extracted from the JSON payload (e.g., `site_id`, `dt` derived from timestamp) using `MetadataExtraction` processor. Writes Parquet files (via `dataFormatConversionConfiguration`) to S3 using Hive-style partition paths (`s3://bucket/table/site_id=XXX/dt=YYYY-MM-DD/`).
+    *   **Catalog:** AWS Glue Database and an AWS Glue `EXTERNAL TABLE` defined with `tableType: HIVE` and explicitly listing `partitionKeys` (`site_id`, `dt`).
+    *   **Partition Management:** Requires periodic runs of a Glue Crawler or `MSCK REPAIR TABLE` in Athena to discover new S3 partitions and register them in the Glue Catalog.
+    *   **Query:** Athena queries the Glue table. Pruning relies on Athena matching `WHERE` clause predicates to the partition values registered in Glue and the corresponding S3 paths.
+    *   **Maintenance:** Prone to the "small file problem" as Firehose writes batches. Requires a separate compaction process (e.g., scheduled Glue ETL job, Athena `INSERT OVERWRITE` or `CTAS`) to merge small files into larger ones for better query performance and cost. Schema evolution requires careful management.
+*   **Pros:** Well-established pattern, relatively straightforward Firehose configuration for partitioning.
+*   **Cons:** Significant operational overhead for partition management and compaction. Performance limitations at scale due to potential S3 listing bottlenecks and small files if not compacted. Schema evolution can be cumbersome.
+
+**2. Improved Approach: Firehose -> S3 (Iceberg) + Glue + Athena**
+
+*   **Architecture:**
+    *   **Ingestion:** Client -> Lambda (`ingestFn`) -> Kinesis Firehose (`iceberg` destination).
+    *   **Firehose Config:** Targets the `iceberg` destination. **Crucially, it does *not* use `dynamicPartitioningConfiguration` or a `prefix` with partition keys.** Firehose relies on the target Glue Table's definition and the data itself.
+    *   **Catalog:** AWS Glue Database and an AWS Glue `EXTERNAL TABLE` defined with `tableType: EXTERNAL_TABLE` and specific Iceberg parameters (`parameters: { "table_type": "ICEBERG", ... }`, `openTableFormatInput`). **It does *not* define top-level `partitionKeys`.** The partition columns (`site_id`, `dt`) are defined simply as regular columns within the `storageDescriptor.columns`.
+    *   **Partitioning:** Managed internally by Iceberg. The `ingestFn` ensures records sent to Firehose contain the partition columns (`site_id`, `dt` with correct format). Firehose, using Iceberg libraries, writes data files and updates Iceberg's own metadata manifests in S3, correctly associating files with partition values (`site_id='abc'`, `dt='2023-10-27'`). The physical layout is managed by Iceberg.
+    *   **Query:** Athena queries the Glue table (which points to the Iceberg metadata). Athena reads the Iceberg manifests to understand the layout and partition values, enabling efficient file skipping/pruning based on `WHERE` clauses (`WHERE site_id = '...' AND dt = '...'`).
+    *   **Maintenance:** Compaction is simpler, managed via Athena `OPTIMIZE <tablename> REWRITE DATA USING BIN_PACK` commands, runnable on a schedule (e.g., via EventBridge + Lambda). Iceberg offers robust schema evolution and time-travel capabilities.
+*   **Pros:** Transactional writes, better query performance (metadata-driven pruning), easier compaction, built-in schema evolution & time-travel. Reduced S3 API calls compared to Hive at scale.
+*   **Cons:** Requires understanding Iceberg concepts. Glue table definition is slightly different (no `partitionKeys`). Initial setup requires careful configuration (e.g., avoiding `partitionKeys` in Glue Table definition was a key finding).
+*   **Implementation Challenges:** Encountered errors when defining `partitionKeys` alongside Iceberg parameters in the Glue Table via IaC. Resolved by removing `partitionKeys` and ensuring partition columns were defined in the main schema (`storageDescriptor.columns`) and present in the data sent by `ingestFn`.
+
+**3. Next-Generation Goal: S3 Tables (Managed Iceberg)**
+
+*   **Architecture:**
+    *   **Storage Layer:** User defines `aws.s3tables.TableBucket`, `aws.s3tables.Namespace`, `aws.s3tables.Table` via IaC.
+    *   **Managed Services:** S3 Tables service *automatically* provisions and manages:
+        *   An underlying Glue Database and Glue Catalog Table configured for Iceberg format.
+        *   Automated compaction of small files.
+        *   Automated snapshot management/expiry.
+    *   **Ingestion:** Kinesis Firehose would ideally be configured to target the Glue resources *managed by* S3 Tables.
+    *   **Permissions:** Governed by Lake Formation, integrated with the S3 Tables resources.
+    *   **Query:** Athena queries the table via its managed Glue representation.
+*   **Pros:** Promises the simplest operational model by abstracting away Iceberg management (compaction, snapshots). Potential for deep performance optimizations integrated with S3. Leverages Lake Formation for fine-grained access control.
+*   **Cons / Current Blocker:** **Immature Infrastructure-as-Code (IaC) support (as of late 2023/early 2024) via Pulumi/SST (and likely Terraform/CloudFormation).**
+    *   **Schema Definition:** The Pulumi `aws.s3tables.Table` construct does not currently expose a way to define the table schema directly during creation, unlike the AWS CLI examples which show a `metadata.iceberg.schema` field. Relying solely on a *separate* `aws.glue.CatalogTable` definition to associate a schema feels disconnected from the S3 Tables managed model.
+    *   **Firehose Integration:** Configuring the Firehose `iceberg` destination requires ARNs for the Glue Catalog and Table. It's unclear how to reliably obtain the correct ARNs of the resources *managed internally by S3 Tables* via the current Pulumi constructs. Furthermore, attempts to use the S3 Table or Bucket ARNs directly with the Firehose `iceberg` destination failed, likely due to ARN format validation mismatches within the Firehose configuration or underlying API/CFN limitations. Firehose might require specific integration points or resource types related to S3 Tables that are not yet available/stable in IaC providers.
+*   **Implementation Challenges:** The inability to define the schema within the S3 Table construct and the failure to configure Firehose to target the (implicitly managed) S3 Table resources via Pulumi/SST proved to be insurmountable blockers for a fully automated deployment.
+
+**Temporary Conclusion (As of [Current Date/Approx Timeframe]):**
+
+Due to the current limitations in IaC support for reliably defining S3 Tables schemas and integrating them with Kinesis Firehose via Pulumi/SST, the S3 Tables approach is being **paused**. While promising significant operational benefits, the deployment and integration challenges make it currently impractical for this automated setup.
+
+**Path Forward:**
+
+*   **Short-Term:** Implement the data storage using **Aurora Serverless (PostgreSQL)**. This provides a well-understood, managed relational database that is relatively simple to set up and integrate with the existing Lambda functions (`ingestFn`, `queryFn`).
+*   **Long-Term Re-evaluation:** Revisit the **Firehose -> S3 (Iceberg)** or **S3 Tables** approaches when:
+    *   Aurora Serverless demonstrates significant cost, performance, or scalability bottlenecks for the analytics workload.
+    *   IaC support (Pulumi, Terraform, CloudFormation) for **S3 Tables** matures significantly, specifically enabling:
+        *   Clear schema definition within the S3 Table resource itself or a robust, documented way to link it.
+        *   Stable and documented integration patterns for Kinesis Firehose targeting S3 Tables resources via IaC.
+
+This temporary pivot allows project progress while acknowledging the future potential of S3 Tables/Iceberg once the ecosystem matures.
