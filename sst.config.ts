@@ -114,8 +114,49 @@ export default $config({
       ],
     }));
 
-    // === Configuration ===
-    // const baseName = `${$app.name}-${$app.stage}`; // Moved up
+    /*
+     I added a aws.s3tables* Pulumi constructs. S3 Tables (with a capital T) is a new AWS
+     Resource (Dec 2024) where you define an S3 Table Bucket (a brand new type of S3 Bucket);
+     a Namespace (which contains multiple tables), and any number of tables. S3 Tables are
+     automatically set to use Iceberg for the storage, they have compaction by default (though
+     I may have to define those config params?), and snapshot management / expirty (so I
+     don't think I even need intelligent tiering? I'm not sure). What I do know is that I no
+     longer have to set up an Iceberg table, via an initialization script, nor a cron
+     compaction function. S3 Tables are basically a construct that gets all the best-in-class
+     of LakeFormation, Iceberg, compaction, Athena performance improvements, and more.
+    */
+    const tableNames = ['events', 'initial_events'] as const;
+    const s3TableBucket = new aws.s3tables.TableBucket("S3TableBucket", {
+      name: "s3tablebucket-events" // only hyphens
+    });
+    const s3TableNamespace = new aws.s3tables.Namespace("S3TableNamespace", {
+        namespace: "s3tablenamespace_events", // only underscore
+        tableBucketArn: s3TableBucket.arn,
+    });
+    const s3Tables = Object.fromEntries(tableNames.map(tableName => [
+      tableName,
+      new aws.s3tables.Table(`S3Table${tableName}`, {
+          name: `s3table_${tableName}`, // only underscore
+          namespace: s3TableNamespace.namespace,
+          tableBucketArn: s3TableNamespace.tableBucketArn,
+          format: "ICEBERG",
+          // maintenanceConfiguration: {
+          //   icebergCompaction: {
+          //       settings: {
+          //           targetFileSizeMb: 0,
+          //       },
+          //       status: "string",
+          //   },
+          //   icebergSnapshotManagement: {
+          //       settings: {
+          //           maxSnapshotAgeHours: 0,
+          //           minSnapshotsToKeep: 0,
+          //       },
+          //       status: "string",
+          //   },
+          // },
+      })
+    ]))
 
     // === Secrets === Step 2: Use undefined for non-Stripe case
     const STRIPE_SECRET_KEY = useStripe ? new sst.Secret("StripeSecretKey") : undefined;
@@ -124,7 +165,6 @@ export default $config({
 
 
     // === S3 Buckets ===
-    const eventsBucket = new sst.aws.Bucket("EventData", {});
     const athenaResultsBucket = new sst.aws.Bucket("AthenaResults", {});
 
     // === Common S3 Lifecycle Rule for Intelligent Tiering ===
@@ -139,10 +179,10 @@ export default $config({
     }];
 
     // Apply lifecycle rule to Events Bucket
-    new aws.s3.BucketLifecycleConfigurationV2(`EventDataBucketLifecycle`, {
-      bucket: eventsBucket.name,
-      rules: intelligentTieringRule,
-    });
+    // new aws.s3.BucketLifecycleConfigurationV2(`EventDataBucketLifecycle`, {
+    //   bucket: eventsBucket.name,
+    //   rules: intelligentTieringRule,
+    // });
 
     // Apply lifecycle rule to Athena Results Bucket
     new aws.s3.BucketLifecycleConfigurationV2(`AthenaResultsBucketLifecycle`, {
@@ -152,9 +192,9 @@ export default $config({
 
     // === Glue Data Catalog ===
     const glueCatalogDatabase = new aws.glue.CatalogDatabase(`GlueCatalogDatabase`, {
-      name: `${baseName}_analytics_db`, // Glue names often use underscores
+      name: `${baseName}_glue_catalog_db`, // Glue names often use underscores
       // Add a default location for managed tables like Iceberg
-      locationUri: $interpolate`s3://${eventsBucket.name}/_glue_database/`,
+      locationUri: $interpolate`s3://${s3TableBucket.name}/_glue_database/`,
     });
 
     // Import schemas for both tables
@@ -166,69 +206,26 @@ export default $config({
       {name: "dt", type: "string"},
     ];
 
-    // === Iceberg Table Names (Managed by Init Lambda) ===
-    // These names must match the ones used in the IcebergInitFn and the invocation payload.
-    const initialEventsIcebergTableName = `initial_events_managed_iceberg`;
-    const eventsIcebergTableName = `events_managed_iceberg`;
-
-    // === Iceberg Table Initialization Function ===
-    const icebergInitFn = new sst.aws.Function("IcebergInitFn", {
-      handler: "functions/iceberg-init.handler",
-      timeout: "5 minute", // Allow ample time for Athena DDL and polling
-      memory: "256 MB",
-      architecture: "arm64",
-      link: [
-        glueCatalogDatabase,
-        eventsBucket,
-        athenaResultsBucket,
-      ],
-      environment: {
-        GLUE_DATABASE_NAME: glueCatalogDatabase.name,
-        EVENTS_BUCKET_NAME: eventsBucket.name,
-        QUERY_RESULTS_BUCKET_NAME: athenaResultsBucket.name,
-      },
-      permissions: [
-        // Athena permissions to run DDL
-        { actions: ["athena:StartQueryExecution", "athena:GetQueryExecution"], resources: ["*"] }, // Scoped down if specific workgroup ARN is known/needed
-        // Glue permissions to check/delete/create tables
-        { actions: ["glue:GetDatabase"], resources: [glueCatalogDatabase.arn] },
-        // Grant table actions on both the database and the table pattern within that database
-        {
-          actions: ["glue:GetTable", "glue:DeleteTable", "glue:CreateTable"],
-          resources: [
-            glueCatalogDatabase.arn, // Grant on the database itself
-            $interpolate`arn:aws:glue:${region}:${accountId}:table/${glueCatalogDatabase.name}/*`, // Grant on tables within the database
-            $interpolate`arn:aws:glue:${region}:${accountId}:catalog` // Also grant on the catalog for DeleteTable/CreateTable
-          ]
+    // Create table for initial events (contains all session data) - Original Glue Table
+    const glueTables = Object.fromEntries(tableNames.map(tableName => [
+      tableName,
+      new aws.glue.CatalogTable(`GlueCatalogTable${tableName}`, {
+        name: tableName, // Use a distinct name
+        databaseName: glueCatalogDatabase.name,
+        tableType: "ICEBERG", // Specify the table type as Iceberg
+        parameters: {
+          "table_type": "ICEBERG",
+          "classification": "iceberg",
         },
-        // The GetTable permission on the catalog is now covered above, removing redundant statement.
-        // S3 permissions for Athena results and table locations
-        { actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], resources: [$interpolate`${athenaResultsBucket.arn}/iceberg-init-ddl/*`] },
-        { actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"], resources: [eventsBucket.arn, $interpolate`${eventsBucket.arn}/*`] }, // For table data/metadata
-      ],
-      nodejs: {
-        install: [
-          "@aws-sdk/client-athena",
-          "@aws-sdk/client-glue",
-        ]
-      }
-    });
-
-    // === Invoke Iceberg Initialization Function ===
-    const icebergInitInvocation = new aws.lambda.Invocation("IcebergTableInitInvocation", {
-      functionName: icebergInitFn.name,
-      triggers: { // Use triggers to ensure it runs on deployment/update
-        redeployment: Date.now().toString(), // Force re-invocation on every deploy
-      },
-      // Payload should be a plain JS object, SST handles serialization
-      input: $jsonStringify({ // Input needs to be JSON stringified
-        INITIAL_EVENTS_ICEBERG_TABLE_NAME: initialEventsIcebergTableName,
-        EVENTS_ICEBERG_TABLE_NAME: eventsIcebergTableName,
-        ATHENA_WORKGROUP: "primary", // Assuming default workgroup, adjust if needed
-      }),
-      // dependsOn: [icebergInitFn, glueCatalogDatabase, eventsBucket, athenaResultsBucket], // Removed: dependsOn is not a direct arg here; dependencies are inferred or handled via triggers/inputs
-    });
-
+        storageDescriptor: {
+          location: $interpolate`s3://${s3TableBucket.name}/${tableName}/`,
+          columns: eventsGlueColumns,
+          compressed: false,
+          storedAsSubDirectories: false,
+        },
+        partitionKeys: commonPartitionKeys,
+      })
+    ]))
 
     // === IAM Role for Firehose ===
     const firehoseDeliveryRole = new aws.iam.Role(`FirehoseDeliveryRole`, {
@@ -241,129 +238,62 @@ export default $config({
     // Allow Firehose to write to S3 and access Glue
     new aws.iam.RolePolicy(`FirehoseDeliveryPolicy`, {
       role: firehoseDeliveryRole.id,
-      // Use Pulumi's structured policy definition for better type safety and interpolation
-      policy: $jsonStringify({ // Use SST's $jsonStringify
-        Version: "2012-10-17",
-        Statement: [
-          { // S3 Permissions
-            Effect: "Allow",
-            Action: [
-              "s3:AbortMultipartUpload",
-              "s3:GetBucketLocation",
-              "s3:GetObject",
-              "s3:ListBucket",
-              "s3:ListBucketMultipartUploads",
-              "s3:PutObject"
-            ],
-            Resource: [eventsBucket.arn, $interpolate`${eventsBucket.arn}/*`], // Use SST's $interpolate
-          },
-          { // Glue Permissions (using resource names)
-            Effect: "Allow",
-            Action: [
-              "glue:GetTable",
-              "glue:GetTableVersion",
-              "glue:GetTableVersions"
-            ],
-            Resource: [
-              glueCatalogDatabase.arn,
-              $interpolate`arn:aws:glue:${region}:${accountId}:table/${glueCatalogDatabase.name}/${initialEventsIcebergTableName}`, // Use SST's $interpolate
-              $interpolate`arn:aws:glue:${region}:${accountId}:table/${glueCatalogDatabase.name}/${eventsIcebergTableName}`, // Use SST's $interpolate
-              $interpolate`arn:aws:glue:${region}:${accountId}:catalog`, // Use SST's $interpolate
-            ],
-          },
-          { // CloudWatch Logs Permissions
-            Effect: "Allow",
-            Action: ["logs:PutLogEvents"],
-            Resource: "arn:aws:logs:*:*:log-group:/aws/kinesisfirehose/*:*",
-          },
-        ],
-      }),
+      policy: $interpolate`{
+        "Version": "2012-10-17",
+        "Statement": [
+          { "Effect": "Allow", "Action": ["s3:AbortMultipartUpload", "s3:GetBucketLocation", "s3:GetObject", "s3:ListBucket", "s3:ListBucketMultipartUploads", "s3:PutObject"], "Resource": ["${s3TableBucket.arn}", "${s3TableBucket.arn}/*"] },
+          { "Effect": "Allow", "Action": ["glue:GetTable", "glue:GetTableVersion", "glue:GetTableVersions"], "Resource": ["${glueCatalogDatabase.arn}", "${glueTables.events.arn}", "${glueTables.initial_events.arn}", "arn:aws:glue:${region}:${accountId}:catalog"] },
+          { "Effect": "Allow", "Action": [ "logs:PutLogEvents" ], "Resource": "arn:aws:logs:*:*:log-group:/aws/kinesisfirehose/*:*" }
+        ]
+      }`,
     });
 
     // === Kinesis Data Firehose Delivery Streams ===
-    const eventsFirehoseStream = new aws.kinesis.FirehoseDeliveryStream(`EventsFirehoseStream`, {
-      destination: "extended_s3",
-      extendedS3Configuration: {
-        roleArn: firehoseDeliveryRole.arn, bucketArn: eventsBucket.arn,
-        prefix: "managed_iceberg/events/!{partitionKeyFromQuery:site_id}/!{timestamp:yyyy-MM-dd}/",
-        errorOutputPrefix: "firehose-errors/events_managed_iceberg/!{firehose:error-output-type}/",
-        bufferingInterval: 60, bufferingSize: 64,
-        processingConfiguration: { // Keep metadata extraction and delimiter
-          enabled: true,
-          processors: [
-            {
-              type: "MetadataExtraction",
-              parameters: [
-                { parameterName: "JsonParsingEngine", parameterValue: "JQ-1.6" },
-                { parameterName: "MetadataExtractionQuery", parameterValue: "{site_id:.site_id}" },
-              ],
-            },
-            {
-              type: "AppendDelimiterToRecord",
-              parameters: [{ parameterName: "Delimiter", parameterValue: "\\n" }],
-            },
-          ],
-        },
-        dynamicPartitioningConfiguration: { enabled: true }, // Keep dynamic partitioning enabled
-        dataFormatConversionConfiguration: {
-          enabled: true,
-          inputFormatConfiguration: { deserializer: { openXJsonSerDe: {} } },
-          outputFormatConfiguration: { serializer: { parquetSerDe: { compression: "SNAPPY" } } },
-          schemaConfiguration: {
-            databaseName: glueCatalogDatabase.name,
-            tableName: eventsIcebergTableName, // Use the defined variable name
-            roleArn: firehoseDeliveryRole.arn,
-          },
-        },
-        cloudwatchLoggingOptions: { // Add CloudWatch logging
+    const firehoses = Object.fromEntries(tableNames.map(tableName => [
+      tableName,
+      new aws.kinesis.FirehoseDeliveryStream(`FirehoseStream${tableName}`, {
+        destination: "extended_s3",
+        extendedS3Configuration: {
+          roleArn: firehoseDeliveryRole.arn, bucketArn: s3TableBucket.arn,
+          prefix: `${tableName}/!{partitionKeyFromQuery:site_id}/!{timestamp:yyyy-MM-dd}/`,
+          errorOutputPrefix: `firehose-errors/${tableName}/!{firehose:error-output-type}/`,
+          bufferingInterval: 60, bufferingSize: 64,
+          processingConfiguration: { // Keep metadata extraction and delimiter
             enabled: true,
-            logGroupName: `/aws/kinesisfirehose/${baseName}-events-stream-managed`,
-            logStreamName: "S3Delivery"
-        },
-      },
-    });
-
-    const initialEventsFirehoseStream = new aws.kinesis.FirehoseDeliveryStream(`InitialEventsFirehoseStream`, {
-      destination: "extended_s3",
-      extendedS3Configuration: {
-        roleArn: firehoseDeliveryRole.arn, bucketArn: eventsBucket.arn,
-        prefix: "managed_iceberg/initial_events/!{partitionKeyFromQuery:site_id}/!{timestamp:yyyy-MM-dd}/",
-        errorOutputPrefix: "firehose-errors/initial_events_managed_iceberg/!{firehose:error-output-type}/",
-        bufferingInterval: 60, bufferingSize: 64,
-        processingConfiguration: { // Keep metadata extraction and delimiter
-          enabled: true,
-          processors: [
-            {
-              type: "MetadataExtraction",
-              parameters: [
-                { parameterName: "JsonParsingEngine", parameterValue: "JQ-1.6" },
-                { parameterName: "MetadataExtractionQuery", parameterValue: "{site_id:.site_id}" },
-              ],
-            },
-            {
-              type: "AppendDelimiterToRecord",
-              parameters: [{ parameterName: "Delimiter", parameterValue: "\\n" }],
-            },
-          ],
-        },
-        dynamicPartitioningConfiguration: { enabled: true }, // Keep dynamic partitioning enabled
-        dataFormatConversionConfiguration: {
-          enabled: true,
-          inputFormatConfiguration: { deserializer: { openXJsonSerDe: {} } },
-          outputFormatConfiguration: { serializer: { parquetSerDe: { compression: "SNAPPY" } } },
-          schemaConfiguration: {
-            databaseName: glueCatalogDatabase.name,
-            tableName: initialEventsIcebergTableName, // Use the defined variable name
-            roleArn: firehoseDeliveryRole.arn,
+            processors: [
+              {
+                type: "MetadataExtraction",
+                parameters: [
+                  { parameterName: "JsonParsingEngine", parameterValue: "JQ-1.6" },
+                  { parameterName: "MetadataExtractionQuery", parameterValue: "{site_id:.site_id}" },
+                ],
+              },
+              {
+                type: "AppendDelimiterToRecord",
+                parameters: [{ parameterName: "Delimiter", parameterValue: "\\n" }],
+              },
+            ],
           },
-        },
-        cloudwatchLoggingOptions: { // Add CloudWatch logging
+          dynamicPartitioningConfiguration: { enabled: true }, // Keep dynamic partitioning enabled
+          dataFormatConversionConfiguration: {
             enabled: true,
-            logGroupName: `/aws/kinesisfirehose/${baseName}-initial-events-stream-managed`,
-            logStreamName: "S3Delivery"
+            inputFormatConfiguration: { deserializer: { openXJsonSerDe: {} } },
+            outputFormatConfiguration: { serializer: { parquetSerDe: { compression: "SNAPPY" } } },
+            schemaConfiguration: {
+              databaseName: glueCatalogDatabase.name,
+              tableName: glueTables[tableName].name, // Use the defined variable name
+              roleArn: firehoseDeliveryRole.arn,
+            },
+          },
+          // I'm not too interested in collecting this. Is it required?
+          // cloudwatchLoggingOptions: { // Add CloudWatch logging
+          //     enabled: true,
+          //     logGroupName: `/aws/kinesisfirehose/${baseName}-events-stream-managed`,
+          //     logStreamName: "S3Delivery"
+          // },
         },
-      },
-    });
+      })
+    ]))
 
     // === Cognito User Pool (Using SST Component) ===
     const userPool = new sst.aws.CognitoUserPool("UserPool", {
@@ -451,16 +381,16 @@ export default $config({
         }
       },
       link: [
-        eventsFirehoseStream,
-        initialEventsFirehoseStream,
+        firehoses.events,
+        firehoses.initial_events,
         sitesTable,
         userPreferencesTable // Link the user preferences table
       ],
       environment: { // Step 7: Add USE_STRIPE
         USE_STRIPE: useStripe.toString(),
         // TODO use Resource.* to get these in ingest.ts
-        EVENTS_FIREHOSE_STREAM_NAME: eventsFirehoseStream.name,
-        INITIAL_EVENTS_FIREHOSE_STREAM_NAME: initialEventsFirehoseStream.name,
+        EVENTS_FIREHOSE_STREAM_NAME: firehoses.events.name,
+        INITIAL_EVENTS_FIREHOSE_STREAM_NAME: firehoses.initial_events.name,
         SITES_TABLE_NAME: sitesTable.name,
         USER_PREFERENCES_TABLE_NAME: userPreferencesTable.name,
       },
@@ -484,15 +414,15 @@ export default $config({
       link: [
         glueCatalogDatabase,
         athenaResultsBucket,
-        eventsBucket,
+        s3TableBucket,
         sitesTable,
         userPreferencesTable,
         // Link the Glue Database and Buckets. Specific table access is granted via IAM below.
         // Linking the tables directly isn't possible as they are created by the init Lambda.
       ],
       environment: {
-        ATHENA_INITIAL_EVENTS_TABLE: initialEventsIcebergTableName, // Use the defined variable name
-        ATHENA_EVENTS_TABLE: eventsIcebergTableName,               // Use the defined variable name
+        ATHENA_INITIAL_EVENTS_TABLE: 'initial_events', // Use the defined variable name
+        ATHENA_EVENTS_TABLE: 'events',               // Use the defined variable name
         USE_STRIPE: useStripe.toString(),
         GLUE_DATABASE_NAME: glueCatalogDatabase.name, // Keep these if needed by handler
         ATHENA_RESULTS_BUCKET: athenaResultsBucket.name, // Keep these if needed by handler
@@ -508,8 +438,8 @@ export default $config({
           actions: ["glue:GetTable", "glue:GetPartitions"], // Corrected typo: Action -> actions
           resources: [ // Corrected typo: Resource -> resources
             glueCatalogDatabase.arn,
-            $interpolate`arn:aws:glue:${region}:${accountId}:table/${glueCatalogDatabase.name}/${initialEventsIcebergTableName}`, // Use SST's $interpolate
-            $interpolate`arn:aws:glue:${region}:${accountId}:table/${glueCatalogDatabase.name}/${eventsIcebergTableName}`, // Use SST's $interpolate
+            $interpolate`arn:aws:glue:${region}:${accountId}:table/${glueCatalogDatabase.name}/events`, // Use SST's $interpolate
+            $interpolate`arn:aws:glue:${region}:${accountId}:table/${glueCatalogDatabase.name}/initial_events`, // Use SST's $interpolate
             $interpolate`arn:aws:glue:${region}:${accountId}:catalog`, // Use SST's $interpolate
           ],
         },
@@ -517,7 +447,7 @@ export default $config({
         {
           effect: "allow", // Correct case for effect
           actions: ["s3:GetObject", "s3:ListBucket"], // Corrected typo: Action -> actions
-          resources: [eventsBucket.arn, $interpolate`${eventsBucket.arn}/*`], // Corrected typo: Resource -> resources
+          resources: [s3TableBucket.arn, $interpolate`${s3TableBucket.arn}/*`], // Corrected typo: Resource -> resources
         },
         // Keep explicit Athena permissions.
         // Keep permissions for sitesTable and userPreferencesTable if needed beyond linking (e.g., specific index queries not covered by default link)
@@ -525,7 +455,7 @@ export default $config({
     });
 
 
-// === Management API Functions ===
+    // === Management API Functions ===
     const sitesFn = new sst.aws.Function("SitesFn", {
       handler: "functions/api/sites.handler",
       timeout: "10 second",
@@ -733,19 +663,18 @@ export default $config({
       publicIngestUrl: $interpolate`${router.url}/api/event`, // Construct ingest URL from router
       ingestFunctionName: ingestFn.name,
       queryFunctionName: queryFn.name,
-      dataBucketName: eventsBucket.name,
+      dataBucketName: s3TableBucket.name,
       queryResultsBucketName: athenaResultsBucket.name,
-      eventsFirehoseStreamName: eventsFirehoseStream.name,
-      initialEventsFirehoseStreamName: initialEventsFirehoseStream.name,
+      eventsFirehoseStreamName: firehoses.events.name,
+      initialEventsFirehoseStreamName: firehoses.initial_events.name,
       glueDatabaseName: glueCatalogDatabase.name,
-      eventsTableName: eventsIcebergTableName, // Use the defined variable name
-      initialEventsTableName: initialEventsIcebergTableName, // Use the defined variable name
+      eventsTableName: 'events', // Use the defined variable name
+      initialEventsTableName: 'initial_events', // Use the defined variable name
       userPoolId: userPool.id,
       userPoolClientId: userPoolClientSst.id,
       sitesTableName: sitesTable.name,
       userPreferencesTableName: userPreferencesTable.name,
       isProd,
-      icebergInitFunctionName: icebergInitFn.name, // Add the init function name to outputs
       routerDistributionId: router.distributionID, // Export router ID
       chargeProcessorFunctionName: chargeProcessorFn?.name, // Conditionally export name
       // Ensure other Stripe-related outputs are handled if needed, though none were explicitly defined before

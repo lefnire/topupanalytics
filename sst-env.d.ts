@@ -13,63 +13,9 @@ declare module "sst" {
       "type": "sst.aws.React"
       "url": string
     }
-    "EventData": {
-      "name": string
-      "type": "sst.aws.Bucket"
-    }
-    "EventsFirehoseStream": {
-      "name": string
-      "type": "aws.kinesis/firehoseDeliveryStream.FirehoseDeliveryStream"
-    }
-    "GlueCatalogDatabase": {
-      "arn": string
-      "name": string
-      "type": "aws.glue/catalogDatabase.CatalogDatabase"
-    }
-    "IcebergInitFn": {
-      "name": string
-      "type": "sst.aws.Function"
-    }
-    "IngestFn": {
-      "name": string
-      "type": "sst.aws.Function"
-      "url": string
-    }
-    "InitialEventsFirehoseStream": {
-      "name": string
-      "type": "aws.kinesis/firehoseDeliveryStream.FirehoseDeliveryStream"
-    }
     "ManagementApi": {
       "type": "sst.aws.ApiGatewayV2"
       "url": string
-    }
-    "PreferencesFn": {
-      "name": string
-      "type": "sst.aws.Function"
-    }
-    "PublicRouter": {
-      "type": "sst.aws.Router"
-      "url": string
-    }
-    "QueryFn": {
-      "name": string
-      "type": "sst.aws.Function"
-    }
-    "S3TableEvents": {
-      "arn": string
-      "databaseName": string
-      "name": string
-      "type": "aws.glue/catalogTable.CatalogTable"
-    }
-    "S3TableInitialEvents": {
-      "arn": string
-      "databaseName": string
-      "name": string
-      "type": "aws.glue/catalogTable.CatalogTable"
-    }
-    "SitesFn": {
-      "name": string
-      "type": "sst.aws.Function"
     }
     "SitesTable": {
       "name": string
@@ -78,11 +24,6 @@ declare module "sst" {
     "UserPool": {
       "id": string
       "type": "sst.aws.CognitoUserPool"
-    }
-    "UserPoolClient": {
-      "id": string
-      "secret": string
-      "type": "sst.aws.CognitoUserPoolClient"
     }
     "UserPreferencesTable": {
       "name": string
