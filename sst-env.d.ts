@@ -5,68 +5,6 @@
 
 declare module "sst" {
   export interface Resource {
-    "AthenaResults": {
-      "name": string
-      "type": "sst.aws.Bucket"
-    }
-    "Dashboard": {
-      "type": "sst.aws.React"
-      "url": string
-    }
-    "GlueCatalogDatabase": {
-      "arn": string
-      "name": string
-      "type": "aws.glue/catalogDatabase.CatalogDatabase"
-    }
-    "GlueCatalogTableevents": {
-      "arn": string
-      "databaseName": string
-      "name": string
-      "type": "aws.glue/catalogTable.CatalogTable"
-    }
-    "GlueCatalogTableinitial_events": {
-      "arn": string
-      "databaseName": string
-      "name": string
-      "type": "aws.glue/catalogTable.CatalogTable"
-    }
-    "ManagementApi": {
-      "type": "sst.aws.ApiGatewayV2"
-      "url": string
-    }
-    "PreferencesFn": {
-      "name": string
-      "type": "sst.aws.Function"
-    }
-    "PublicRouter": {
-      "type": "sst.aws.Router"
-      "url": string
-    }
-    "QueryFn": {
-      "name": string
-      "type": "sst.aws.Function"
-    }
-    "SitesFn": {
-      "name": string
-      "type": "sst.aws.Function"
-    }
-    "SitesTable": {
-      "name": string
-      "type": "sst.aws.Dynamo"
-    }
-    "UserPool": {
-      "id": string
-      "type": "sst.aws.CognitoUserPool"
-    }
-    "UserPoolClient": {
-      "id": string
-      "secret": string
-      "type": "sst.aws.CognitoUserPoolClient"
-    }
-    "UserPreferencesTable": {
-      "name": string
-      "type": "sst.aws.Dynamo"
-    }
   }
 }
 /// <reference path="sst-env.d.ts" />

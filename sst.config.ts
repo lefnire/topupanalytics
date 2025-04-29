@@ -54,7 +54,7 @@ While the current setup focuses on cost/scale, consider these enhancements:
 
 - **Trigger:** A `CompactionCron` triggers the `CompactionFn` Lambda hourly.
 - **Action:** This Lambda executes Athena `OPTIMIZE` commands on the **Iceberg tables** to compact small files.
- */
+*/
 
 
 const domain = "topupanalytics.com"
@@ -71,8 +71,10 @@ export default $config({
     const useStripe = process.env.USE_STRIPE === 'true'; // Step 1: Read env var
     const isProd = $app.stage === "production";
     const accountId = aws.getCallerIdentityOutput({}).accountId
-    const region = aws.getRegionOutput().name
-    const baseName = `${$app.name}${$app.stage}`; // Define baseName early
+    const region = aws.getRegionOutput({}).name
+    const partition = aws.getPartitionOutput({}).partition // Needed for ARN construction
+    // Define basename early and use consistently for resource naming
+    const basename = `${$app.name}${$app.stage}`;
 
     // Placeholder values instead of sst.Secret.create
     const DUMMY_STRIPE_SECRET_KEY_PLACEHOLDER = "dummy_stripe_secret_key_placeholder";
@@ -105,11 +107,16 @@ export default $config({
 
     // Wrap Glue Catalog Table
     sst.Linkable.wrap(aws.glue.CatalogTable, (table) => ({
-      properties: {name: table.name, arn: table.arn, databaseName: table.databaseName},
+      properties: {name: table.name, arn: table.arn, databasename: table.databaseName},
       include: [
         sst.aws.permission({ // Use global sst.aws.permission
           actions: ["glue:GetTable", "glue:GetTableVersion", "glue:GetTableVersions", "glue:GetPartition", "glue:GetPartitions"], // Read actions
-          resources: [table.arn, $interpolate`arn:aws:glue:${region}:${accountId}:catalog`, $interpolate`arn:aws:glue:${region}:${accountId}:database/${table.databaseName}`], // Include DB ARN
+          resources: [
+            table.arn,
+            // Use $interpolate for constructing related ARNs
+            $interpolate`arn:${partition}:glue:${region}:${accountId}:database/${table.databaseName}`,
+            $interpolate`arn:${partition}:glue:${region}:${accountId}:catalog`,
+           ],
         }),
       ],
     }));
@@ -126,35 +133,42 @@ export default $config({
      of LakeFormation, Iceberg, compaction, Athena performance improvements, and more.
     */
     const tableNames = ['events', 'initial_events'] as const;
-    const s3TableBucket = new aws.s3tables.TableBucket("S3TableBucket2", {});
-    const s3TableNamespace = new aws.s3tables.Namespace("S3TableNamespace2", {
-        namespace: "s3tablenamespace_events2", // only underscore
-        tableBucketArn: s3TableBucket.arn,
+    type TableName = typeof tableNames[number]; // Define a type for table names
+
+    // *** VITAL CHANGE: Use explicit bucket name (bucketId) based on basename ***
+    const s3TableBucket = new aws.s3tables.TableBucket("S3TableBucket", {
+        name: `${basename}-data`, // Use explicit, stage-specific name
+
     });
-    const s3Tables = Object.fromEntries(tableNames.map(tableName => [
-      tableName,
-      new aws.s3tables.Table(`S3Table${tableName}2`, {
-          name: `s3table_${tableName}2`, // only underscore
-          namespace: s3TableNamespace.namespace,
-          tableBucketArn: s3TableNamespace.tableBucketArn,
-          format: "ICEBERG",
-          // maintenanceConfiguration: {
-          //   icebergCompaction: {
-          //       settings: {
-          //           targetFileSizeMb: 0,
-          //       },
-          //       status: "string",
-          //   },
-          //   icebergSnapshotManagement: {
-          //       settings: {
-          //           maxSnapshotAgeHours: 0,
-          //           minSnapshotsToKeep: 0,
-          //       },
-          //       status: "string",
-          //   },
-          // },
-      })
-    ]))
+
+    // *** VITAL CHANGE: Use explicit namespace based on basename ***
+    const s3TableNamespace = new aws.s3tables.Namespace("S3TableNamespace", {
+        namespace: `${basename}_ns`, // Use explicit name, underscores only
+        tableBucketArn: s3TableBucket.arn, // Reference the ARN
+    });
+
+    // S3 Table resources (represent the logical S3 Tables)
+    // *** VITAL CHANGE: Use explicit table names based on basename ***
+    const s3Tables = Object.fromEntries(tableNames.map(tableName => {
+        const s3TableName = `${basename}_${tableName}`; // Glue/S3 Table name convention
+        return [
+            tableName, // Keep original key for mapping
+            new aws.s3tables.Table(`S3Table${tableName}`, {
+              name: s3TableName, // Use explicit name, underscores only
+              namespace: s3TableNamespace.namespace,
+              tableBucketArn: s3TableBucket.arn, // Reference ARN
+              format: "ICEBERG",
+              // Maintenance config can be added here if defaults aren't sufficient
+              // maintenanceConfiguration: { ... }
+            })
+        ];
+    })) as Record<TableName, aws.s3tables.Table>;
+    /*
+    metadataLocation: s3Tables['events'].metadataLocation,
+    - undefined?
+    warehouseLocation: s3Tables['events'].warehouseLocation
+    - s3://96076612-1454-4a44-iqsfrnqtwwi8jasgxsj5i4wmikrneuse1b--table-s3
+     */
 
     // === Secrets === Step 2: Use undefined for non-Stripe case
     const STRIPE_SECRET_KEY = useStripe ? new sst.Secret("StripeSecretKey") : undefined;
@@ -163,9 +177,13 @@ export default $config({
 
 
     // === S3 Buckets ===
-    const athenaResultsBucket = new sst.aws.Bucket("AthenaResults", {});
+    // *** VITAL CHANGE: Use explicit bucket name based on basename ***
+    const athenaResultsBucket = new sst.aws.Bucket("AthenaResults", {
+        // name: `${basename}-athena-results`, // Use explicit, stage-specific name
+    });
 
     // === Common S3 Lifecycle Rule for Intelligent Tiering ===
+    // S3 Table Bucket lifecycle is managed differently. No rule needed for it.
     const intelligentTieringRule: aws.types.input.s3.BucketLifecycleConfigurationV2Rule[] = [{
       id: "IntelligentTieringRule",
       status: "Enabled",
@@ -184,70 +202,138 @@ export default $config({
 
     // Apply lifecycle rule to Athena Results Bucket
     new aws.s3.BucketLifecycleConfigurationV2(`AthenaResultsBucketLifecycle`, {
-      bucket: athenaResultsBucket.name,
+      bucket: athenaResultsBucket.name, // Reference the explicit name
       rules: intelligentTieringRule,
     });
 
     // === Glue Data Catalog ===
+    // *** VITAL CHANGE: Use explicit DB name based on basename ***
     const glueCatalogDatabase = new aws.glue.CatalogDatabase(`GlueCatalogDatabase`, {
-      name: `${baseName}_glue_catalog_db`, // Glue names often use underscores
-      // Add a default location for managed tables like Iceberg
-      locationUri: $interpolate`s3://${s3TableBucket.name}/_glue_database/`,
+      name: `${basename}_db`, // Use explicit name, underscores only
+      // Point location to a logical path within the S3 Table Bucket for organization
+      locationUri: $interpolate`s3://${s3TableBucket.id}/_glue_database/`, // Use bucketId (name) here
     });
 
     // Import schemas for both tables
     const {initialGlueColumns, eventsGlueColumns} = await import('./functions/analytics/schema');
-    const glueColumns = {events: eventsGlueColumns, initial_events: initialGlueColumns}
+    const glueColumns: Record<TableName, aws.types.input.glue.CatalogTableStorageDescriptorColumn[]> = { // Added type hint
+        events: eventsGlueColumns,
+        initial_events: initialGlueColumns
+    };
 
     // Define partition keys once for consistency
-    const commonPartitionKeys = [
+    const commonPartitionKeys: aws.types.input.glue.CatalogTablePartitionKey[] = [ // Added type hint
       {name: "site_id", type: "string"},
-      {name: "dt", type: "string"},
+      {name: "dt", type: "string"}, // Format like yyyy-MM-dd
     ];
 
-    // Create table for initial events (contains all session data) - Original Glue Table
-    const glueTables = Object.fromEntries(tableNames.map(tableName => [
-      tableName,
-      new aws.glue.CatalogTable(`GlueCatalogTable${tableName}`, {
-        name: tableName, // Use a distinct name
-        databaseName: glueCatalogDatabase.name,
-        tableType: "ICEBERG", // Specify the table type as Iceberg
-        parameters: {
-          "table_type": "ICEBERG",
-          "classification": "iceberg",
-        },
-        storageDescriptor: {
-          location: $interpolate`s3://${s3TableBucket.name}/${tableName}/`,
-          columns: glueColumns[tableName],
-          compressed: false,
-          storedAsSubDirectories: false,
-        },
-        partitionKeys: commonPartitionKeys,
-      })
-    ]))
+    // Create Glue Tables - Firehose Iceberg destination requires these
+    // *** VITAL CHANGE: Use explicit table names, EXTERNAL_TABLE type, Iceberg params, location, openTableFormatInput ***
+    const glueTables = Object.fromEntries(tableNames.map(tableName => {
+        const glueTableName = `${basename}_${tableName}`; // Match S3 Table name convention
+        return [
+            tableName, // Keep original key for mapping
+            new aws.glue.CatalogTable(`GlueCatalogTable${tableName}`, {
+                name: glueTableName, // Use explicit name
+                databaseName: glueCatalogDatabase.name,
+                // tableType: "EXTERNAL_TABLE", // *** VITAL: Must be EXTERNAL_TABLE for Iceberg managed by S3 Tables/LF
+                parameters: {
+                    "table_type": "ICEBERG", // Identify as Iceberg
+                    "classification": "iceberg", // Can also be parquet if Firehose converts first
+                    "lakeformation.governed": "true", // *** VITAL: Indicate LF governance
+                    // Add other relevant parameters if needed
+                },
+                storageDescriptor: {
+                    // *** VITAL: Location points to the path *within* the S3 Table Bucket ***
+                    location: $interpolate`s3://${s3TableBucket.id}/${glueTableName}/`, // Use bucketId (name) and table name
+                    columns: glueColumns[tableName], // Schema from import
+                    // *** VITAL: Define SerDe for underlying Parquet format ***
+                    inputFormat: "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+                    outputFormat: "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+                    serDeInfo: {
+                        serializationLibrary: "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                        parameters: { "serialization.format": "1" },
+                    },
+                    compressed: false, // Parquet SerDe handles compression (e.g., SNAPPY)
+                    storedAsSubDirectories: false, // Iceberg manages directory structure
+                },
+                // partitionKeys: commonPartitionKeys,
+                // *** VITAL: Define Open Table Format Input for Iceberg ***
+                openTableFormatInput: {
+                    icebergInput: {
+                        metadataOperation: "CREATE", // Use CREATE for definition
+                        version: "2", // Common Iceberg version
+                    }
+                }
+            })
+        ];
+    })) as Record<TableName, aws.glue.CatalogTable>; // Type assertion
 
     // === IAM Role for Firehose ===
+    // *** VITAL CHANGE: Use explicit role name based on basename ***
     const firehoseDeliveryRole = new aws.iam.Role(`FirehoseDeliveryRole`, {
+      name: `${basename}-firehose-delivery-role`, // Use explicit, stage-specific name
       assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({Service: "firehose.amazonaws.com"}),
     });
 
-    // === Firehose Processor Function (DELETED in Phase 3.1) ===
-    // const firehoseProcessorFn = new sst.aws.Function("FirehoseProcessorFn", { ... });
-
-    // Allow Firehose to write to S3 and access Glue
+    // Allow Firehose to write to S3 and access Glue (Updated for Iceberg)
+    // *** VITAL CHANGE: Updated S3 and Glue permissions for Iceberg ***
     new aws.iam.RolePolicy(`FirehoseDeliveryPolicy`, {
-      role: firehoseDeliveryRole.id,
+      role: firehoseDeliveryRole.id, // Reference the role's ID output
       policy: $interpolate`{
         "Version": "2012-10-17",
         "Statement": [
-          { "Effect": "Allow", "Action": ["s3:AbortMultipartUpload", "s3:GetBucketLocation", "s3:GetObject", "s3:ListBucket", "s3:ListBucketMultipartUploads", "s3:PutObject"], "Resource": ["${s3TableBucket.arn}", "${s3TableBucket.arn}/*"] },
-          { "Effect": "Allow", "Action": ["glue:GetTable", "glue:GetTableVersion", "glue:GetTableVersions"], "Resource": ["${glueCatalogDatabase.arn}", "${glueTables.events.arn}", "${glueTables.initial_events.arn}", "arn:aws:glue:${region}:${accountId}:catalog"] },
-          { "Effect": "Allow", "Action": [ "logs:PutLogEvents" ], "Resource": "arn:aws:logs:*:*:log-group:/aws/kinesisfirehose/*:*" }
+          {
+            "Effect": "Allow",
+            "Action": [
+              "s3:AbortMultipartUpload",
+              "s3:GetBucketLocation",
+              "s3:GetObject",
+              "s3:ListBucket",
+              "s3:ListBucketMultipartUploads",
+              "s3:PutObject",
+              "s3:DeleteObject",
+              "s3:GetBucketAcl",
+              "s3:GetObjectAcl",
+              "s3:PutObjectAcl"
+            ],
+            "Resource": [
+              "${s3TableBucket.arn}",
+              "${s3TableBucket.arn}/*"
+            ]
+          },
+          {
+            "Effect": "Allow",
+            "Action": [
+              "glue:GetDatabase",
+              "glue:GetTable",
+              "glue:GetTableVersion",
+              "glue:GetTableVersions",
+              "glue:GetPartitions",
+              "glue:BatchCreatePartition",
+              "glue:UpdateTable"
+            ],
+            "Resource": [
+              "arn:${partition}:glue:${region}:${accountId}:catalog",
+              "${glueCatalogDatabase.arn}",
+              "${glueTables.events.arn}",
+              "${glueTables.initial_events.arn}"
+            ]
+          },
+          {
+             "Effect": "Allow",
+             "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+             ],
+             "Resource": "arn:${partition}:logs:${region}:${accountId}:log-group:/aws/kinesisfirehose/${basename}-firehose-*:*"
+          }
         ]
       }`,
     });
 
-// === Lake Formation Permissions for Firehose ===
+    // === Lake Formation Permissions for Firehose ===
     // Grant DESCRIBE on the Glue Database
     new aws.lakeformation.Permissions(`FirehoseDbDescribePermission`, {
       principal: firehoseDeliveryRole.arn,
@@ -260,200 +346,134 @@ export default $config({
 
     // Grant Table permissions and Data Location access for each table
     tableNames.forEach(tableName => {
+      const glueTable = glueTables[tableName]; // Get the specific Glue table resource
+
       // Table Permissions
+      // *** VITAL CHANGE: Added ALTER permission for Iceberg operations ***
       new aws.lakeformation.Permissions(`FirehoseTablePermissions_${tableName}`, {
         principal: firehoseDeliveryRole.arn,
-        permissions: ["SELECT", "INSERT", "ALTER", "DESCRIBE"],
+        permissions: ["SELECT", "INSERT", "ALTER", "DESCRIBE"], // ALTER is needed
         table: {
           catalogId: accountId,
           databaseName: glueCatalogDatabase.name,
-          name: glueTables[tableName].name,
+          name: glueTable.name, // Use the actual Glue table name output
         },
         permissionsWithGrantOptions: [], // Explicitly empty is important
       });
 
-      // Data Location Permissions (assuming table data is at bucket/tableName/)
-      // Ensure these locations are registered in Lake Formation!
+      // Data Location Permissions
+      // *** VITAL CHANGE: Grant DATA_LOCATION_ACCESS on the S3 Table Bucket ARN ***
       new aws.lakeformation.Permissions(`FirehoseDataLocationPermissions_${tableName}`, {
         principal: firehoseDeliveryRole.arn,
         permissions: ["DATA_LOCATION_ACCESS"],
         dataLocation: {
           catalogId: accountId,
-          // Use arn with the standard S3 bucket ARN (not the S3 Table ARN or path)
+          // Grant access to the S3 Table Bucket itself
           arn: s3TableBucket.arn
         },
         permissionsWithGrantOptions: [], // Explicitly empty is important
       });
     });
 
-    // Note: If your Glue tables' registered S3 location in Lake Formation is just the bucket root (`s3TableBucket.arn`),
-    // you might need an additional DATA_LOCATION_ACCESS permission grant for that ARN instead of, or in addition to, the specific paths above.
     // === Kinesis Data Firehose Delivery Streams ===
-    const firehoses = Object.fromEntries(tableNames.map(tableName => [
-      tableName,
-      new aws.kinesis.FirehoseDeliveryStream(`FirehoseStream${tableName}`, {
-
-        // Investigate: Firehose supports Iceberg natively:
-        // icebergConfiguration: {
-        //   roleArn: firehoseRole.arn,
-        //   catalogArn: Promise.all([currentGetPartition, currentGetRegion, current]).then(([currentGetPartition, currentGetRegion, current]) => `arn:${currentGetPartition.partition}:glue:${currentGetRegion.name}:${current.accountId}:catalog`),
-        //   bufferingSize: 10,
-        //   bufferingInterval: 400,
-        //   s3Configuration: {
-        //       roleArn: firehoseRole.arn,
-        //       bucketArn: bucket.arn,
-        //   },
-        //   destinationTableConfigurations: [{
-        //       databaseName: test.name,
-        //       tableName: testCatalogTable.name,
-        //   }],
-        //   processingConfiguration: {
-        //       enabled: true,
-        //       processors: [{
-        //           type: "Lambda",
-        //           parameters: [{
-        //               parameterName: "LambdaArn",
-        //               parameterValue: `${lambdaProcessor.arn}:$LATEST`,
-        //           }],
-        //       }],
-        //   },
-        // },
-
-        destination: "extended_s3", // Changed destination
-        extendedS3Configuration: { // Added extendedS3Configuration block
-          roleArn: firehoseDeliveryRole.arn,
-          // Construct standard S3 ARN using the physical bucket ID/name
-          bucketArn: $interpolate`arn:aws:s3:::${s3TableBucket.id}`,
-          prefix: `${tableName}/!{partitionKeyFromQuery:site_id}/!{timestamp:yyyy-MM-dd}/`, // Dynamic partitioning prefix
-          errorOutputPrefix: `firehose-errors/${tableName}/!{firehose:error-output-type}/`,
-          bufferingInterval: 60,
-          bufferingSize: 64, // Match typical defaults or adjust as needed
-          compressionFormat: "UNCOMPRESSED", // Let Parquet SerDe handle compression
-
-          // Configure data format conversion for Iceberg (JSON -> Parquet)
-          dataFormatConversionConfiguration: {
-            enabled: true,
-            inputFormatConfiguration: {
-              deserializer: {
-                openXJsonSerDe: {}, // Assuming input is JSON
-              },
-            },
-            outputFormatConfiguration: {
-              serializer: {
-                parquetSerDe: {
-                  compression: "SNAPPY", // Standard for Parquet/Iceberg
+    // *** VITAL CHANGE: Configure destination: "iceberg" ***
+    const firehoses = Object.fromEntries(tableNames.map(tableName => {
+        const glueTable = glueTables[tableName]; // Get the specific Glue table resource
+        return [
+            tableName, // Keep original key for mapping
+            new aws.kinesis.FirehoseDeliveryStream(`FirehoseStream${tableName}`, {
+                // *** VITAL CHANGE: Use explicit stream name based on basename ***
+                name: `${basename}-firehose-${tableName}`, // Use explicit, stage-specific name
+                destination: "iceberg", // *** VITAL: Set destination to Iceberg ***
+                tags: { // Add useful tags
+                    Environment: $app.stage,
+                    Project: $app.name,
+                    Table: tableName,
                 },
-              },
-            },
-            schemaConfiguration: {
-              roleArn: firehoseDeliveryRole.arn, // Role needs Glue access
-              databaseName: glueCatalogDatabase.name,
-              tableName: glueTables[tableName].name,
-              region: region,
-              catalogId: accountId,
-            },
-          },
+                // *** VITAL: Use icebergConfiguration block ***
+                icebergConfiguration: {
+                    roleArn: firehoseDeliveryRole.arn, // Role created above
+                    // *** VITAL: Provide Glue Catalog ARN ***
+                    catalogArn: $interpolate`arn:${partition}:glue:${region}:${accountId}:catalog`,
+                    bufferingInterval: 60, // Default 60s
+                    bufferingSize: 64,     // Default 64MB
+                    // *** VITAL: s3Configuration points to the S3 Table Bucket ***
+                    s3Configuration: {
+                        roleArn: firehoseDeliveryRole.arn, // Same role
+                        // bucketArn: s3TableBucket.arn,      // ARN of the S3 Table Bucket
+                        bucketArn: $interpolate`arn:aws:s3:::${s3TableBucket.name}`,      // ARN of the S3 Table Bucket
+                        // Error prefix within the S3 Table Bucket
+                        errorOutputPrefix: $interpolate`firehose-errors/${glueTable.name}/!{firehose:error-output-type}/!{timestamp:yyyy/MM/dd/HH}/`,
+                        // No prefix, compression, data format conversion, dynamic partitioning here - Handled by Iceberg dest / Glue table
+                    },
+                    // *** VITAL: Destination table config links to Glue Table ***
+                    destinationTableConfigurations: [{
+                        databaseName: glueCatalogDatabase.name,
+                        tableName: glueTable.name, // Use the actual Glue table name output
+                    }],
+                    // Processing Configuration - Only needed if input JSON needs transformation *before* Iceberg write
+                    // processingConfiguration: { enabled: false }, // Disabled by default
+                    // Optional: CloudWatch logging for Iceberg destination specifics
+                    // cloudwatchLoggingOptions: {
+                    //    enabled: true,
+                    //    logGroupName: $interpolate`/aws/kinesisfirehose/${basename}-firehose-${tableName}`, // Match name pattern
+                    //    logStreamName: "IcebergDelivery",
+                    // },
+                },
+                // Remove extendedS3Configuration, dynamicPartitioningConfiguration, dataFormatConversionConfiguration
+            })
+        ];
+    })) as Record<TableName, aws.kinesis.FirehoseDeliveryStream>; // Type assertion
 
-          // Configure dynamic partitioning based on metadata extraction
-          dynamicPartitioningConfiguration: {
-             enabled: true,
-             // retryOptions: { durationInSeconds: 300 } // Default retry is 300s
-          },
-
-          // Processing configuration for metadata extraction (needed for dynamic partitioning)
-          processingConfiguration: {
-            enabled: true,
-            processors: [
-              {
-                type: "MetadataExtraction",
-                parameters: [
-                  { parameterName: "JsonParsingEngine", parameterValue: "JQ-1.6" },
-                  // Extract site_id for dynamic partitioning prefix
-                  { parameterName: "MetadataExtractionQuery", parameterValue: "{site_id:.site_id}" },
-                ],
-              },
-              // Add AppendDelimiterToRecord processor if records are not newline-delimited
-              // {
-              //   type: "AppendDelimiterToRecord",
-              //   parameters: [
-              //     { parameterName: "Delimiter", parameterValue: "\\n" }
-              //   ]
-              // }
-            ],
-          },
-
-          // Optional: CloudWatch logging
-          // cloudwatchLoggingOptions: {
-          //   enabled: true,
-          //   logGroupName: `/aws/kinesisfirehose/FirehoseStream${tableName}`,
-          //   logStreamName: "S3Delivery",
-          // },
-        },
-      })
-    ]))
 
     // === Cognito User Pool (Using SST Component) ===
+    // *** VITAL CHANGE: Use explicit User Pool name based on basename ***
     const userPool = new sst.aws.CognitoUserPool("UserPool", {
-      // name is handled by SST automatically
-      usernames: ["email"], // Equivalent to usernameAttributes and autoVerifiedAttributes
-      // passwordPolicy is managed by Cognito defaults or requires transform for customization
-      transform: { // Add transform for user pool
+      usernames: ["email"],
+      transform: {
         userPool: (args) => {
+          args.name = `${basename}-user-pool`; // Explicit name
           args.passwordPolicy = {
-            minimumLength: 6,
-            requireLowercase: false,
-            requireNumbers: false,
+            minimumLength: 8, // Keep slightly more secure default
+            requireLowercase: true,
+            requireNumbers: true,
             requireSymbols: false,
-            requireUppercase: false,
+            requireUppercase: true,
             temporaryPasswordValidityDays: 7,
+          };
+          args.accountRecoverySetting = { // Add recovery setting
+             recoveryMechanisms: [{ name: "verified_email", priority: 1 }],
           };
         },
       }
     });
-    // Add the client using the addClient method
+    // *** VITAL CHANGE: Use explicit User Pool Client name based on basename ***
     const userPoolClientSst = userPool.addClient("UserPoolClient", {
-      // generateSecret defaults to false in SST? Assuming yes.
-      // explicitAuthFlows defaults? Assuming common flows like SRP/Refresh are allowed.
-      // transform: { // Add transform for user pool client
-      //   client: (args) => {
-      //     args.explicitAuthFlows = ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"];
-      //     // args.generateSecret = false; // Explicitly set if needed, though likely SST default
-      //   },
-      // }
+       // name: `${basename}-web-client`, // Explicit name
+       // transform can be used here if needed for specific client settings
+       // transform: { client: (args) => { ... }}
     });
 
     // === DynamoDB Tables ===
+    // *** VITAL CHANGE: Use explicit table names based on basename ***
     const sitesTable = new sst.aws.Dynamo("SitesTable", {
+      // name: `${basename}-sites`, // Explicit name
       fields: {
-        site_id: "string", // PK
-        owner_sub: "string", // GSI PK
-        plan: "string", // GSI PK for planIndex
-        // Other fields like are still valid attributes but don't need to be listed here
-        // unless they are part of a primary or secondary index key.
-        // domains: "string", // JSON stringified list of allowed referer domains
-        // // stripe_subscription_id: "string", // Removed - Replaced by payment method on user
-        // request_allowance: "number", // Added - Usage-based billing allowance
-        // allowed_fields: "string", // JSON stringified list of event fields allowed (for GDPR/filtering)
+        site_id: "string",
+        owner_sub: "string",
+        plan: "string",
       },
       primaryIndex: {hashKey: "site_id"},
       globalIndexes: {
-        // GSI for querying sites by owner
         ownerSubIndex: {hashKey: "owner_sub", projection: ["site_id"]},
-        // GSI for querying sites needing payment
-        planIndex: {hashKey: "plan", projection: "all"}, // NEW GSI
+        planIndex: {hashKey: "plan", projection: "all"},
       },
     });
+    // *** VITAL CHANGE: Use explicit table names based on basename ***
     const userPreferencesTable = new sst.aws.Dynamo("UserPreferencesTable", {
-      // Only define the primary key field here
+      // name: `${basename}-user-preferences`, // Explicit name
       fields: {
-        cognito_sub: "string", // PK
-        // Other fields are still valid attributes but don't need to be listed here.
-        // theme: "string",
-        // email_notifications: "string",
-        // stripe_customer_id: "string",
-        // stripe_payment_method_id: "string",
-        // stripe_last4: "string",
-        // is_payment_active: "number",
+        cognito_sub: "string",
       },
       primaryIndex: {hashKey: "cognito_sub"},
     });
@@ -468,14 +488,11 @@ export default $config({
       handler: "functions/analytics/ingest.handler",
       timeout: '10 second',
       memory: "128 MB",
-      // url: true, // Keep url enabled, but attach to router for public access
+      architecture: "arm64", // Use ARM
+      // Keep URL enabled, but primary access is via Router route below
       url: {
         cors: true,
-        router: {
-          instance: router,
-          path: "/api/event", // Route /api/event via Router
-          // method: "POST", // Method filtering happens in function or via Router config if available elsewhere
-        }
+        // authorizer: "none"
       },
       link: [
         firehoses.events,
@@ -485,69 +502,57 @@ export default $config({
       ],
       environment: { // Step 7: Add USE_STRIPE
         USE_STRIPE: useStripe.toString(),
-        // TODO use Resource.* to get these in ingest.ts
+        // Use the explicit Firehose stream names
         EVENTS_FIREHOSE_STREAM_NAME: firehoses.events.name,
         INITIAL_EVENTS_FIREHOSE_STREAM_NAME: firehoses.initial_events.name,
         SITES_TABLE_NAME: sitesTable.name,
         USER_PREFERENCES_TABLE_NAME: userPreferencesTable.name,
       },
       permissions: [
-        // Permission to query sitesTable is needed for validation
-        {actions: ["dynamodb:GetItem"], resources: [sitesTable.arn]},
-        // Permission to update request_allowance on sitesTable
-        {actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn]},
-        // Permission to get user preferences for payment status check
+        {actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [sitesTable.arn]},
         {actions: ["dynamodb:GetItem"], resources: [userPreferencesTable.arn]},
-        // { actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`] } // Keep query if needed elsewhere? Revisit. GetItem is likely sufficient for site validation.
+        // Firehose PutRecord permissions are handled by linking
       ],
     });
+    // *** VITAL CHANGE: Explicitly route POST /api/event via Router ***
+    // router.route("POST /api/event", ingestFn.arn);
+    // router.route("/api/event", ingestFn.arn);
+
 
     const queryFn = new sst.aws.Function("QueryFn", {
       handler: "functions/analytics/query.handler",
       timeout: "60 second",
       memory: "512 MB",
+      architecture: "arm64", // Use ARM
       // NOTE: queryFn is NOT attached to the public Router
-      // It will be attached to the authenticated ApiGatewayV2 below
       link: [
-        glueCatalogDatabase,
-        athenaResultsBucket,
-        s3TableBucket,
+        glueCatalogDatabase, // Link DB
+        // *** VITAL: Link the actual Glue Table resources ***
+        glueTables.events,
+        glueTables.initial_events,
+        athenaResultsBucket, // Link results bucket
+        s3TableBucket,       // Link S3 Table bucket (for underlying data access via LF/Athena)
         sitesTable,
         userPreferencesTable,
-        // Link the Glue Database and Buckets. Specific table access is granted via IAM below.
-        // Linking the tables directly isn't possible as they are created by the init Lambda.
       ],
       environment: {
-        ATHENA_INITIAL_EVENTS_TABLE: 'initial_events', // Use the defined variable name
-        ATHENA_EVENTS_TABLE: 'events',               // Use the defined variable name
+        // *** VITAL: Use the actual Glue table names ***
+        ATHENA_INITIAL_EVENTS_TABLE: glueTables.initial_events.name,
+        ATHENA_EVENTS_TABLE: glueTables.events.name,
+        GLUE_DATABASE_NAME: glueCatalogDatabase.name,
+        ATHENA_RESULTS_BUCKET: athenaResultsBucket.name,
         USE_STRIPE: useStripe.toString(),
-        GLUE_DATABASE_NAME: glueCatalogDatabase.name, // Keep these if needed by handler
-        ATHENA_RESULTS_BUCKET: athenaResultsBucket.name, // Keep these if needed by handler
       },
       permissions: [
-        { actions: ["athena:*"], resources: ["*"] },
-        // Permissions for Glue/S3 should be handled by the linked resources
-        // (glueCatalogDatabase, eventsBucket, athenaResultsBucket)
-        // Add explicit permissions for the Lambda-created tables
-        // Corrected Glue permissions for queryFn
-        {
-          effect: "allow", // Correct case for effect
-          actions: ["glue:GetTable", "glue:GetPartitions"], // Corrected typo: Action -> actions
-          resources: [ // Corrected typo: Resource -> resources
-            glueCatalogDatabase.arn,
-            $interpolate`arn:aws:glue:${region}:${accountId}:table/${glueCatalogDatabase.name}/events`, // Use SST's $interpolate
-            $interpolate`arn:aws:glue:${region}:${accountId}:table/${glueCatalogDatabase.name}/initial_events`, // Use SST's $interpolate
-            $interpolate`arn:aws:glue:${region}:${accountId}:catalog`, // Use SST's $interpolate
-          ],
-        },
-        // Corrected S3 permissions for queryFn
-        {
-          effect: "allow", // Correct case for effect
-          actions: ["s3:GetObject", "s3:ListBucket"], // Corrected typo: Action -> actions
-          resources: [s3TableBucket.arn, $interpolate`${s3TableBucket.arn}/*`], // Corrected typo: Resource -> resources
-        },
-        // Keep explicit Athena permissions.
-        // Keep permissions for sitesTable and userPreferencesTable if needed beyond linking (e.g., specific index queries not covered by default link)
+        // Athena permissions (scoped slightly)
+        { actions: ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:StopQueryExecution"], resources: ["*"] }, // Can scope further if needed
+        // Glue/S3 permissions primarily handled by linking + Lake Formation
+        // Explicit S3 permissions for Athena writing results & reading data (via LF)
+        { actions: ["s3:PutObject", "s3:GetObject", "s3:ListBucket", "s3:GetBucketLocation", "s3:DeleteObject"], resources: [athenaResultsBucket.arn, `${athenaResultsBucket.arn}/*`] },
+        { actions: ["s3:GetObject*", "s3:ListBucket*"], resources: [s3TableBucket.arn, `${s3TableBucket.arn}/*`] }, // Read access to data bucket
+        // Lake Formation permissions (basic action needed by Athena engine)
+        { actions: ["lakeformation:GetDataAccess"], resources: ["*"] },
+        // DynamoDB permissions handled by linking
       ],
     });
 
@@ -557,18 +562,9 @@ export default $config({
       handler: "functions/api/sites.handler",
       timeout: "10 second",
       memory: "128 MB",
-      link: [sitesTable], // Link sites table for CRUD
-      permissions: [
-        // Allow CRUD operations on sitesTable
-        {
-          actions: ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:Query"],
-          resources: [sitesTable.arn]
-        },
-        // Allow querying the owner index
-        {actions: ["dynamodb:Query"], resources: [$interpolate`${sitesTable.arn}/index/ownerSubIndex`]},
-      ],
+      architecture: "arm64", // Use ARM
+      link: [sitesTable, router], // Link router to get URL
       environment: {
-        // PUBLIC_INGEST_URL is handled by route linking below // Keep comment for context
         ROUTER_URL: router.url, // Pass the base router URL
         USE_STRIPE: useStripe.toString(), // Step 7: Add USE_STRIPE
       },
@@ -581,16 +577,15 @@ export default $config({
       handler: "functions/api/preferences.handler",
       timeout: "10 second",
       memory: "128 MB",
+      architecture: "arm64", // Use ARM
       link: [userPreferencesTable], // Link preferences table
       permissions: [
         // Allow CRUD operations on userPreferencesTable
-        {
-          actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"],
-          resources: [userPreferencesTable.arn]
-        },
+        { actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], resources: [userPreferencesTable.arn] },
       ],
       environment: { // Step 7: Add USE_STRIPE
         USE_STRIPE: useStripe.toString(),
+        USER_PREFERENCES_TABLE_NAME: userPreferencesTable.name, // Pass table name
       },
     });
 
@@ -601,6 +596,7 @@ export default $config({
         handler: "functions/api/stripe.handler",
         timeout: "10 second",
         memory: "128 MB",
+        architecture: "arm64", // Use ARM
         link: [
           STRIPE_SECRET_KEY!, // Use non-null assertion as we are inside the if block
           STRIPE_WEBHOOK_SECRET!, // Use non-null assertion
@@ -609,13 +605,13 @@ export default $config({
         ],
         environment: { // Step 7: Add USE_STRIPE (conditionally)
           USE_STRIPE: useStripe.toString(),
+          SITES_TABLE_NAME: sitesTable.name,
+          USER_PREFERENCES_TABLE_NAME: userPreferencesTable.name,
         },
         permissions: [
-          // Permissions to read/write stripe_customer_id in userPreferencesTable
           {actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], resources: [userPreferencesTable.arn]},
-          // Permissions to update stripe_subscription_id and plan in sitesTable
-          {actions: ["dynamodb:UpdateItem"], resources: [sitesTable.arn]},
-          // Note: Query permissions might be needed if searching by subscription ID, add later if required.
+          // Allow update and query on sites table + indexes
+          {actions: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:Query"], resources: [sitesTable.arn, `${sitesTable.arn}/index/*`]},
         ],
         nodejs: {
           install: ["stripe"], // Ensure stripe SDK is bundled if not already in root package.json
@@ -626,11 +622,11 @@ export default $config({
     const api = new sst.aws.ApiGatewayV2("ManagementApi", { // Renamed for clarity
       domain: isProd ? {
         name: `api.${domain}`, // Suggest using a subdomain like api.* for management endpoints
-        // redirects property removed - not valid for ApiGatewayV2
       } : undefined,
       cors: { // CORS needed for dashboard interaction
-        allowOrigins: isProd ? [`https://${domain}`] : ["*"], // Allow origin from the main dashboard domain or wildcard for dev
-        allowCredentials: isProd ? true : false, // Set to false when allowOrigins is "*"
+        // *** VITAL: Allow localhost for dev, specific domain for prod ***
+        allowOrigins: isProd ? [`https://${domain}`] : ["http://localhost:5173", "http://127.0.0.1:5173"], // Adjust port if needed
+        allowCredentials: true, // Allow credentials (needed for JWT)
         allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"], // Allow necessary methods
         allowHeaders: ["Content-Type", "Authorization"], // Allow standard headers + Auth
       },
@@ -645,33 +641,36 @@ export default $config({
       }
     });
 
-    // Define Query Route on the Management API Gateway
     // Define common auth config once
     const commonAuth = {auth: {jwt: {authorizer: jwtAuthorizer.id}}};
 
-    // === Management API Routes (Using Function ARNs) ===
+    // === Management API Routes (Using Function ARNs for explicit definition) ===
 
-    // --- Query Route ---
-    // Pass the Function ARN as the handler (2nd arg), auth config as 3rd arg
-    api.route("GET /api/query", queryFn.arn, commonAuth);
-
-    // --- Sites Routes ---
-    api.route("POST /api/sites", sitesFn.arn, commonAuth);
-    api.route("GET /api/sites", sitesFn.arn, commonAuth);
-    api.route("GET /api/sites/{site_id}", sitesFn.arn, commonAuth);
-    api.route("PUT /api/sites/{site_id}", sitesFn.arn, commonAuth);
-    // Note: Passing PUBLIC_INGEST_URL to the script endpoint via environment
-    // isn't directly possible when using the ARN. If the handler needs this,
-    // it might need to construct it or receive it differently.
-    // For now, we assume the ARN linking is sufficient.
-    // --- User Preferences Routes ---
-    api.route("GET /api/user/preferences", preferencesFn.arn, commonAuth);
-    api.route("PUT /api/user/preferences", preferencesFn.arn, commonAuth);
+    // Use object syntax for route definition for clarity
+    // api.route("GET    /api/query", { handler: queryFn.arn, ...commonAuth });
+    // api.route("POST   /api/sites", { handler: sitesFn.arn, ...commonAuth });
+    // api.route("GET    /api/sites", { handler: sitesFn.arn, ...commonAuth });
+    // api.route("GET    /api/sites/{site_id}", { handler: sitesFn.arn, ...commonAuth });
+    // api.route("PUT    /api/sites/{site_id}", { handler: sitesFn.arn, ...commonAuth });
+    // api.route("DELETE /api/sites/{site_id}", { handler: sitesFn.arn, ...commonAuth }); // Add DELETE
+    // api.route("GET    /api/sites/{site_id}/script", { handler: sitesFn.arn, ...commonAuth }); // Add script route
+    // api.route("GET    /api/user/preferences", { handler: preferencesFn.arn, ...commonAuth });
+    // api.route("PUT    /api/user/preferences", { handler: preferencesFn.arn, ...commonAuth });
+    api.route("/api/query", { handler: queryFn.arn, ...commonAuth });
+    api.route("/api/sites", { handler: sitesFn.arn, ...commonAuth });
+    api.route("/api/sites", { handler: sitesFn.arn, ...commonAuth });
+    api.route("/api/sites/{site_id}", { handler: sitesFn.arn, ...commonAuth });
+    api.route("/api/sites/{site_id}", { handler: sitesFn.arn, ...commonAuth });
+    api.route("/api/sites/{site_id}", { handler: sitesFn.arn, ...commonAuth }); // Add DELETE
+    api.route("/api/sites/{site_id}/script", { handler: sitesFn.arn, ...commonAuth }); // Add script route
+    api.route("/api/user/preferences", { handler: preferencesFn.arn, ...commonAuth });
+    api.route("/api/user/preferences", { handler: preferencesFn.arn, ...commonAuth });
 
     // Step 5: Conditional Stripe API Routes
     if (useStripe && stripeFn) { // Check stripeFn exists
-      api.route("POST /api/stripe/webhook", stripeFn.arn); // NO auth needed
-      api.route("POST /api/stripe/checkout", stripeFn.arn, commonAuth); // Requires JWT auth
+      // api.route("POST   /api/stripe/webhook", { handler: stripeFn.arn }); // NO auth needed
+      // api.route("POST   /api/stripe/checkout", { handler: stripeFn.arn, ...commonAuth }); // Requires JWT auth
+      // api.route("GET    /api/stripe/portal", { handler: stripeFn.arn, ...commonAuth }); // Add portal route
     }
 
 
@@ -684,8 +683,6 @@ export default $config({
         instance: router,
         // path defaults to "/*" when attaching a site like this
       },
-      // Link API Gateway for authenticated calls (/api/query)
-      // Link UserPool/Client for frontend auth logic
       link: [
         api,
         userPool, // Link the SST UserPool component
@@ -696,17 +693,19 @@ export default $config({
         VITE_COGNITO_CLIENT_ID: userPoolClientSst.id, // Use ID from SST client object
         VITE_AWS_REGION: region,
         VITE_API_URL: api.url,
-        VITE_APP_URL: router.url,
+        VITE_APP_URL: router.url, // App URL is the router URL
         VITE_STRIPE_PUBLISHABLE_KEY: useStripe ? STRIPE_PUBLISHABLE_KEY!.value : DUMMY_STRIPE_PUBLISHABLE_KEY_PLACEHOLDER, // Correct: Use real value or placeholder string
         VITE_USE_STRIPE: useStripe.toString(), // Add the flag
         VITE_PUBLIC_INGEST_URL: publicIngestUrl, // Ensure this still exists and uses the variable
       },
+       // dev: { // Add dev config
+       //    deploy: true, // Deploy frontend during dev
+       //    // url: "http://localhost:5173" // Optional: if your local dev server URL is different
+       // }
     });
 
     // === Compaction Function & Cron (REMOVED) ===
-    // The compactionFn Lambda is no longer needed as Glue manages Iceberg compaction.
-
-    // The CompactionCron is no longer needed.
+    // S3 Tables / Glue handle Iceberg compaction automatically.
 
     // Step 4: Conditional chargeProcessorFn and Cron
     let chargeProcessorFn: sst.aws.Function | undefined;
@@ -715,7 +714,7 @@ export default $config({
         handler: "functions/billing/chargeProcessor.handler",
         timeout: "60 second", // Allow time for Stripe API calls and DB updates
         memory: "256 MB",
-        architecture: "arm64",
+        architecture: "arm64", // Use ARM
         link: [
           sitesTable,
           userPreferencesTable,
@@ -723,8 +722,8 @@ export default $config({
         ],
         environment: { // Step 7: Add USE_STRIPE (conditionally)
           USE_STRIPE: useStripe.toString(),
-          // Inject placeholder value directly if Stripe is disabled and the function needs it
-          // (Though these functions only run if useStripe is true, so linking the real secret is sufficient)
+          SITES_TABLE_NAME: sitesTable.name,
+          USER_PREFERENCES_TABLE_NAME: userPreferencesTable.name,
         },
         permissions: [
           // Query sites needing payment using the GSI
@@ -742,31 +741,31 @@ export default $config({
       });
 
       new sst.aws.Cron("ChargeCron", {
-        schedule: "rate(5 minutes)",
-        function: chargeProcessorFn.arn // Trigger the charge processor function
+        schedule: "rate(5 minutes)", // Adjust schedule as needed
+        function: chargeProcessorFn.arn // Trigger the charge processor function ARN
       });
     }
 
     // === Outputs ===
     return {
       appName: $app.name,
+      stage: $app.stage, // Add stage output
       accountId: accountId,
-      // compactionFunctionName: compactionFn.name, // REMOVED
-      // dashboardUrl: dashboard.url, // URL now comes from the router
+      region: region, // Add region output
       dashboardUrl: router.url, // Use router URL for dashboard access
-      // apiUrl: api.url, // Keep API Gateway URL for management endpoints
       managementApiUrl: api.url, // Rename output for clarity
-      // ingestFunctionUrl: ingestFn.url, // Ingest URL is via the router now
-      publicIngestUrl: $interpolate`${router.url}/api/event`, // Construct ingest URL from router
+      publicIngestUrl: publicIngestUrl, // Construct ingest URL from router
       ingestFunctionName: ingestFn.name,
       queryFunctionName: queryFn.name,
-      dataBucketName: s3TableBucket.name,
+      // *** VITAL: Output correct data bucket name (id) ***
+      dataBucketName: s3TableBucket.id, // Output the physical bucket ID/name
       queryResultsBucketName: athenaResultsBucket.name,
       eventsFirehoseStreamName: firehoses.events.name,
       initialEventsFirehoseStreamName: firehoses.initial_events.name,
-      glueDatabaseName: glueCatalogDatabase.name,
-      eventsTableName: 'events', // Use the defined variable name
-      initialEventsTableName: 'initial_events', // Use the defined variable name
+      glueDatabasename: glueCatalogDatabase.name,
+      // *** VITAL: Output correct Glue table names ***
+      eventsGlueTableName: glueTables.events.name,
+      initialEventsGlueTableName: glueTables.initial_events.name,
       userPoolId: userPool.id,
       userPoolClientId: userPoolClientSst.id,
       sitesTableName: sitesTable.name,
@@ -774,9 +773,11 @@ export default $config({
       isProd,
       routerDistributionId: router.distributionID, // Export router ID
       chargeProcessorFunctionName: chargeProcessorFn?.name, // Conditionally export name
-      // Ensure other Stripe-related outputs are handled if needed, though none were explicitly defined before
-      // Conditionally export real secret names/ARNs if needed, otherwise omit or use placeholders
-      stripeSecretKeyName: useStripe ? STRIPE_SECRET_KEY!.name : undefined, // Example
+      stripeSecretKeyName: useStripe ? STRIPE_SECRET_KEY!.name : undefined,
+      // Add other function names if useful
+      sitesFunctionName: sitesFn?.name,
+      preferencesFunctionName: preferencesFn?.name,
+      stripeFunctionName: stripeFn?.name,
     }
   },
 });
