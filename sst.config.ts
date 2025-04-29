@@ -126,17 +126,15 @@ export default $config({
      of LakeFormation, Iceberg, compaction, Athena performance improvements, and more.
     */
     const tableNames = ['events', 'initial_events'] as const;
-    const s3TableBucket = new aws.s3tables.TableBucket("S3TableBucket", {
-      name: "s3tablebucket-events" // only hyphens
-    });
-    const s3TableNamespace = new aws.s3tables.Namespace("S3TableNamespace", {
-        namespace: "s3tablenamespace_events", // only underscore
+    const s3TableBucket = new aws.s3tables.TableBucket("S3TableBucket2", {});
+    const s3TableNamespace = new aws.s3tables.Namespace("S3TableNamespace2", {
+        namespace: "s3tablenamespace_events2", // only underscore
         tableBucketArn: s3TableBucket.arn,
     });
     const s3Tables = Object.fromEntries(tableNames.map(tableName => [
       tableName,
-      new aws.s3tables.Table(`S3Table${tableName}`, {
-          name: `s3table_${tableName}`, // only underscore
+      new aws.s3tables.Table(`S3Table${tableName}2`, {
+          name: `s3table_${tableName}2`, // only underscore
           namespace: s3TableNamespace.namespace,
           tableBucketArn: s3TableNamespace.tableBucketArn,
           format: "ICEBERG",
@@ -199,6 +197,7 @@ export default $config({
 
     // Import schemas for both tables
     const {initialGlueColumns, eventsGlueColumns} = await import('./functions/analytics/schema');
+    const glueColumns = {events: eventsGlueColumns, initial_events: initialGlueColumns}
 
     // Define partition keys once for consistency
     const commonPartitionKeys = [
@@ -219,7 +218,7 @@ export default $config({
         },
         storageDescriptor: {
           location: $interpolate`s3://${s3TableBucket.name}/${tableName}/`,
-          columns: eventsGlueColumns,
+          columns: glueColumns[tableName],
           compressed: false,
           storedAsSubDirectories: false,
         },
@@ -248,48 +247,146 @@ export default $config({
       }`,
     });
 
+// === Lake Formation Permissions for Firehose ===
+    // Grant DESCRIBE on the Glue Database
+    new aws.lakeformation.Permissions(`FirehoseDbDescribePermission`, {
+      principal: firehoseDeliveryRole.arn,
+      permissions: ["DESCRIBE"],
+      database: {
+        catalogId: accountId,
+        name: glueCatalogDatabase.name,
+      },
+    });
+
+    // Grant Table permissions and Data Location access for each table
+    tableNames.forEach(tableName => {
+      // Table Permissions
+      new aws.lakeformation.Permissions(`FirehoseTablePermissions_${tableName}`, {
+        principal: firehoseDeliveryRole.arn,
+        permissions: ["SELECT", "INSERT", "ALTER", "DESCRIBE"],
+        table: {
+          catalogId: accountId,
+          databaseName: glueCatalogDatabase.name,
+          name: glueTables[tableName].name,
+        },
+        permissionsWithGrantOptions: [], // Explicitly empty is important
+      });
+
+      // Data Location Permissions (assuming table data is at bucket/tableName/)
+      // Ensure these locations are registered in Lake Formation!
+      new aws.lakeformation.Permissions(`FirehoseDataLocationPermissions_${tableName}`, {
+        principal: firehoseDeliveryRole.arn,
+        permissions: ["DATA_LOCATION_ACCESS"],
+        dataLocation: {
+          catalogId: accountId,
+          // Use arn with the standard S3 bucket ARN (not the S3 Table ARN or path)
+          arn: s3TableBucket.arn
+        },
+        permissionsWithGrantOptions: [], // Explicitly empty is important
+      });
+    });
+
+    // Note: If your Glue tables' registered S3 location in Lake Formation is just the bucket root (`s3TableBucket.arn`),
+    // you might need an additional DATA_LOCATION_ACCESS permission grant for that ARN instead of, or in addition to, the specific paths above.
     // === Kinesis Data Firehose Delivery Streams ===
     const firehoses = Object.fromEntries(tableNames.map(tableName => [
       tableName,
       new aws.kinesis.FirehoseDeliveryStream(`FirehoseStream${tableName}`, {
-        destination: "extended_s3",
-        extendedS3Configuration: {
-          roleArn: firehoseDeliveryRole.arn, bucketArn: s3TableBucket.arn,
-          prefix: `${tableName}/!{partitionKeyFromQuery:site_id}/!{timestamp:yyyy-MM-dd}/`,
+
+        // Investigate: Firehose supports Iceberg natively:
+        // icebergConfiguration: {
+        //   roleArn: firehoseRole.arn,
+        //   catalogArn: Promise.all([currentGetPartition, currentGetRegion, current]).then(([currentGetPartition, currentGetRegion, current]) => `arn:${currentGetPartition.partition}:glue:${currentGetRegion.name}:${current.accountId}:catalog`),
+        //   bufferingSize: 10,
+        //   bufferingInterval: 400,
+        //   s3Configuration: {
+        //       roleArn: firehoseRole.arn,
+        //       bucketArn: bucket.arn,
+        //   },
+        //   destinationTableConfigurations: [{
+        //       databaseName: test.name,
+        //       tableName: testCatalogTable.name,
+        //   }],
+        //   processingConfiguration: {
+        //       enabled: true,
+        //       processors: [{
+        //           type: "Lambda",
+        //           parameters: [{
+        //               parameterName: "LambdaArn",
+        //               parameterValue: `${lambdaProcessor.arn}:$LATEST`,
+        //           }],
+        //       }],
+        //   },
+        // },
+
+        destination: "extended_s3", // Changed destination
+        extendedS3Configuration: { // Added extendedS3Configuration block
+          roleArn: firehoseDeliveryRole.arn,
+          // Construct standard S3 ARN using the physical bucket ID/name
+          bucketArn: $interpolate`arn:aws:s3:::${s3TableBucket.id}`,
+          prefix: `${tableName}/!{partitionKeyFromQuery:site_id}/!{timestamp:yyyy-MM-dd}/`, // Dynamic partitioning prefix
           errorOutputPrefix: `firehose-errors/${tableName}/!{firehose:error-output-type}/`,
-          bufferingInterval: 60, bufferingSize: 64,
-          processingConfiguration: { // Keep metadata extraction and delimiter
+          bufferingInterval: 60,
+          bufferingSize: 64, // Match typical defaults or adjust as needed
+          compressionFormat: "UNCOMPRESSED", // Let Parquet SerDe handle compression
+
+          // Configure data format conversion for Iceberg (JSON -> Parquet)
+          dataFormatConversionConfiguration: {
+            enabled: true,
+            inputFormatConfiguration: {
+              deserializer: {
+                openXJsonSerDe: {}, // Assuming input is JSON
+              },
+            },
+            outputFormatConfiguration: {
+              serializer: {
+                parquetSerDe: {
+                  compression: "SNAPPY", // Standard for Parquet/Iceberg
+                },
+              },
+            },
+            schemaConfiguration: {
+              roleArn: firehoseDeliveryRole.arn, // Role needs Glue access
+              databaseName: glueCatalogDatabase.name,
+              tableName: glueTables[tableName].name,
+              region: region,
+              catalogId: accountId,
+            },
+          },
+
+          // Configure dynamic partitioning based on metadata extraction
+          dynamicPartitioningConfiguration: {
+             enabled: true,
+             // retryOptions: { durationInSeconds: 300 } // Default retry is 300s
+          },
+
+          // Processing configuration for metadata extraction (needed for dynamic partitioning)
+          processingConfiguration: {
             enabled: true,
             processors: [
               {
                 type: "MetadataExtraction",
                 parameters: [
                   { parameterName: "JsonParsingEngine", parameterValue: "JQ-1.6" },
+                  // Extract site_id for dynamic partitioning prefix
                   { parameterName: "MetadataExtractionQuery", parameterValue: "{site_id:.site_id}" },
                 ],
               },
-              {
-                type: "AppendDelimiterToRecord",
-                parameters: [{ parameterName: "Delimiter", parameterValue: "\\n" }],
-              },
+              // Add AppendDelimiterToRecord processor if records are not newline-delimited
+              // {
+              //   type: "AppendDelimiterToRecord",
+              //   parameters: [
+              //     { parameterName: "Delimiter", parameterValue: "\\n" }
+              //   ]
+              // }
             ],
           },
-          dynamicPartitioningConfiguration: { enabled: true }, // Keep dynamic partitioning enabled
-          dataFormatConversionConfiguration: {
-            enabled: true,
-            inputFormatConfiguration: { deserializer: { openXJsonSerDe: {} } },
-            outputFormatConfiguration: { serializer: { parquetSerDe: { compression: "SNAPPY" } } },
-            schemaConfiguration: {
-              databaseName: glueCatalogDatabase.name,
-              tableName: glueTables[tableName].name, // Use the defined variable name
-              roleArn: firehoseDeliveryRole.arn,
-            },
-          },
-          // I'm not too interested in collecting this. Is it required?
-          // cloudwatchLoggingOptions: { // Add CloudWatch logging
-          //     enabled: true,
-          //     logGroupName: `/aws/kinesisfirehose/${baseName}-events-stream-managed`,
-          //     logStreamName: "S3Delivery"
+
+          // Optional: CloudWatch logging
+          // cloudwatchLoggingOptions: {
+          //   enabled: true,
+          //   logGroupName: `/aws/kinesisfirehose/FirehoseStream${tableName}`,
+          //   logStreamName: "S3Delivery",
           // },
         },
       })
