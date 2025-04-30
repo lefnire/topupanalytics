@@ -96,6 +96,7 @@ function getAllowedFieldsSet(complianceLevel: 'yes' | 'maybe' | 'no', isInitialE
   // Ensure essential fields are always included, although schema should cover them
   allowedFields.add('site_id');
   allowedFields.add('timestamp');
+  allowedFields.add('dt');
 
   return allowedFields;
 }

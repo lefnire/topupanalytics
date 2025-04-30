@@ -1,5 +1,7 @@
 import React, {useState, useCallback, useEffect} from 'react';
 
+const siteId = "01JT215WZ7B6DH1QA1HCB3KD9T"
+
 // Assuming window.topup is globally available and configured
 declare global {
   interface Window {
@@ -29,7 +31,7 @@ const TestIngestRoute: React.FC = () => {
       script.id = scriptId; // Add an ID for easy removal
       script.src = '/topup-enhanced.min.js'; // Load the dynamically generated script
       script.defer = true;
-      script.setAttribute('data-site', '01JSY8P3BX0YMPVZPWM867WECY'); // Site ID from old injectScript
+      script.setAttribute('data-site', siteId); // Site ID from old injectScript
       script.setAttribute('data-level', 'enhanced'); // Specify the level
 
       // Add onload and onerror handlers BEFORE appending
@@ -92,7 +94,7 @@ const TestIngestRoute: React.FC = () => {
       <h1>Analytics Test Page</h1>
       <p>
         This page sends a test event (<code>test_dogfood_event</code>) associated with the site ID{' '}
-        <code>01JSY8P3BX0YMPVZPWM867WECY</code> using the global <code>window.topup.event</code> function.
+        <code>{siteId}</code> using the global <code>window.topup.event</code> function.
       </p>
       <button
         onClick={handleSendEvent}

@@ -7,7 +7,8 @@ import { Calendar as CalendarIcon, User, LogOut, PlusCircle } from 'lucide-react
 import { cn } from '../../lib/utils';
 import { format } from 'date-fns';
 import { useStore, type AnalyticsState } from '../../stores/analyticsStore';
-import type { Segment } from '../../stores/analyticsTypes';
+import type { Segment, Site } from '../../stores/analyticsTypes'; // Added Site import
+// Removed the old import line, it was combined into the line above
 import { useShallow } from 'zustand/shallow';
 import { type DateRange } from 'react-day-picker';
 import { useAuth } from '../../contexts/AuthContext';
@@ -78,15 +79,23 @@ export const DashboardHeader = () => {
   }, [sites, selectedSiteId, setSelectedSiteId]);
 
   // Derive selectedSite for display purposes
-  const selectedSite = useMemo(() => sites.find(site => site.site_id === selectedSiteId), [sites, selectedSiteId]);
+  const selectedSite = useMemo(() => sites.find((site: Site) => site.site_id === selectedSiteId), [sites, selectedSiteId]); // Added Site type
 
-  // Determine the text for the dropdown trigger
+  // Determine the text for the dropdown trigger (Simplified Logic)
   const dropdownTriggerText = useMemo(() => {
-    if (isLoading) return "Admin"; // Show loading state
+    // If sites are loaded and we have a selected one, show its name
     if (selectedSite) return selectedSite.name;
-    if (sites.length > 0 && !selectedSiteId) return sites[0].name; // Fallback to first site name if selection is pending
-    return "Admin"; // Default if no sites or still initializing without sites
-  }, [selectedSite, sites, selectedSiteId, isLoading]);
+    // If sites are loaded, but none is selected yet (e.g., initial load), show the first site's name
+    if (sites.length > 0 && !selectedSiteId) return sites[0].name;
+    // If sites are loaded but the array is empty
+    if (sites.length === 0 && status !== 'initializing' && status !== 'loading_data') return "No Sites Found";
+    // If still loading sites (or analytics, as status is shared)
+    if (isLoading) return "Loading..."; // Generic loading
+    // If there was an error (could be site fetch or analytics fetch)
+    if (status === 'error') return "Error"; // Generic error
+    // Default fallback
+    return "Admin";
+  }, [selectedSite, sites, selectedSiteId, isLoading, status]);
 
 
   const handleOpenSiteSettings = (siteId: string) => {
@@ -141,7 +150,7 @@ export const DashboardHeader = () => {
              {/* Segment Display Area */}
              {segments.length > 0 && (
                  <div className="flex flex-wrap items-center gap-2">
-                     {segments.map((segment, index) => (
+                     {segments.map((segment: Segment, index: number) => ( // Added Segment and number types
                          <span key={index} className="flex items-center gap-1 bg-blue-100 text-blue-800 text-xs font-medium px-2 py-0.5 rounded-full">
                              {segment.label}
                              <button
