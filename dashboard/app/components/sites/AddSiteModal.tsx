@@ -19,7 +19,7 @@ export function AddSiteModal({ onClose, onSiteCreated }: AddSiteModalProps) {
   const handleSuccess = (newSite: Site) => {
     onSiteCreated?.(newSite);
     // Optionally close the modal on success
-    // onClose?.();
+    onClose?.();
   };
 
   return (

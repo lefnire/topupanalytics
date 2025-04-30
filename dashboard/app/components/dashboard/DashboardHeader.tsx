@@ -45,6 +45,7 @@ export const DashboardHeader = () => {
     setSelectedRange,
     isAddSiteModalOpen, // Added from store
     setAddSiteModalOpen, // Added from store
+    fetchSites, // Added fetchSites
   } = useStore(useShallow((state: AnalyticsState) => ({
     selectedSiteId: state.selectedSiteId,
     sites: state.sites,
@@ -58,9 +59,15 @@ export const DashboardHeader = () => {
     setSelectedRange: state.setSelectedRange,
     isAddSiteModalOpen: state.isAddSiteModalOpen, // Added selector
     setAddSiteModalOpen: state.setAddSiteModalOpen, // Added selector
+    fetchSites: state.fetchSites, // Added selector
   })));
 
   const { user, logout } = useAuth();
+
+  // Handler for when a site is successfully created
+  const handleSiteCreated = () => {
+    fetchSites(); // Refresh the site list
+  };
 
   // State for modals (Removed AddSiteModal state)
   const [isSiteSettingsModalOpen, setIsSiteSettingsModalOpen] = useState(false);
@@ -243,7 +250,7 @@ export const DashboardHeader = () => {
            {isAddSiteModalOpen && ( // Use store state
              <AddSiteModal
                onClose={() => setAddSiteModalOpen(false)} // Use store action
-               // onSiteCreated={handleSiteCreated} // Optional: Handle creation
+               onSiteCreated={handleSiteCreated} // Handle creation
              />
            )}
         </DialogContent>

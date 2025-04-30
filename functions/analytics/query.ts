@@ -305,7 +305,8 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     }
 
     const startDateFormat = format(startDate, 'yyyy-MM-dd');
-    const endDateFormat = format(endDate, 'yyyy-MM-dd');
+    // const endDateFormat = format(endDate, 'yyyy-MM-dd');
+    const endDateFormat = format(new Date, 'yyyy-MM-dd');
     log(`Querying data from ${startDateFormat} to ${endDateFormat} for sites: ${finalSiteIds.join(', ')}`);
 
     // --- Parse Limit ---
