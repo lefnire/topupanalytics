@@ -145,7 +145,7 @@ const DashboardContent = () => {
   // --- JSX Rendering ---
   // Uses locally defined state/variables now
   return (
-    <>
+    <div>
       {/* Loading State */}
       {isLoading && (
         <div className="text-center py-10 text-gray-500">Loading analytics data ({status})...</div>
@@ -275,7 +275,7 @@ const DashboardContent = () => {
           </section>
         </>
       )}
-    </>
+    </div>
   );
 };
 

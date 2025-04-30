@@ -52,10 +52,6 @@ export default function App() {
     <AuthProvider> {/* Wrap the app content with AuthProvider */}
       {/* Basic layout container - replace/enhance with shadcn later */}
       <div className="min-h-screen flex flex-col">
-        {/* Header placeholder */}
-        <header className="bg-gray-100 dark:bg-gray-800 p-4 shadow">
-        <h1 className="text-xl font-semibold">Dashboard</h1>
-      </header>
       {/* Main content area */}
       <main className="flex-grow p-4">
         <Outlet /> {/* Render the matched route's component */}

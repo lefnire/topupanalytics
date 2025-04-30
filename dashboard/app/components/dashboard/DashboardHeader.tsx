@@ -1,11 +1,8 @@
 import React, { useState, useMemo, useEffect } from 'react'; // Added useEffect
 import { Avatar, AvatarImage, AvatarFallback } from '~/components/ui/avatar'; // Use path alias
-import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
-import { Calendar } from '../ui/calendar';
-import { Button } from '../ui/button';
-import { Calendar as CalendarIcon, User, LogOut, PlusCircle } from 'lucide-react'; // Added icons
-import { cn } from '../../lib/utils';
-import { format } from 'date-fns';
+// Removed Popover, Calendar, Button, CalendarIcon, cn, format imports as they are replaced by Select
+import { Button } from '../ui/button'; // Keep Button for DropdownMenuTrigger
+import { User, LogOut, PlusCircle } from 'lucide-react'; // Keep icons
 import { useStore, type AnalyticsState } from '../../stores/analyticsStore';
 import type { Segment, Site } from '../../stores/analyticsTypes'; // Added Site import
 // Removed the old import line, it was combined into the line above
@@ -19,7 +16,14 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from '../ui/dropdown-menu'; // Use relative path
+} from '../ui/dropdown-menu';
+import { // Import Select components
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
 import {
   Dialog,
   DialogContent,
@@ -31,7 +35,39 @@ import { SiteSettingsModal } from '../sites/SiteSettingsModal'; // Added SiteSet
 import { AddSiteModal } from '../sites/AddSiteModal'; // Added AddSiteModal
 import { AccountModal } from '../account/AccountModal'; // Added AccountModal
 
+// Helper function to calculate DateRange
+const calculateDateRange = (period: string): DateRange => {
+  const now = new Date();
+  let fromDate = new Date();
+
+  switch (period) {
+    case '24 hours':
+      fromDate.setDate(now.getDate() - 1);
+      break;
+    case '7 days':
+      fromDate.setDate(now.getDate() - 7);
+      break;
+    case '30 days':
+      fromDate.setDate(now.getDate() - 30);
+      break;
+    case '90 days':
+      fromDate.setDate(now.getDate() - 90);
+      break;
+    default: // Default to 24 hours
+      fromDate.setDate(now.getDate() - 1);
+  }
+  // Ensure 'from' is not after 'to' (can happen with clock changes near midnight)
+  if (fromDate > now) {
+    fromDate = new Date(now.getTime() - 24 * 60 * 60 * 1000); // Set to exactly 24h ago if needed
+  }
+  return { from: fromDate, to: now };
+};
+
+
 export const DashboardHeader = () => {
+  const timePeriods = ["24 hours", "7 days", "30 days", "90 days"];
+  const [selectedPeriod, setSelectedPeriod] = useState<string>(timePeriods[0]); // Default to "24 hours"
+
   const {
     selectedSiteId,
     sites,
@@ -78,12 +114,16 @@ export const DashboardHeader = () => {
   // Derive isLoading state locally based on status
   const isLoading = status === 'initializing' || status === 'loading_data' || status === 'aggregating';
 
-  // Select the first site if none is selected and sites exist
+  // Effect to select first site AND set initial date range
   useEffect(() => {
+    // Select first site if none selected
     if (!selectedSiteId && sites.length > 0) {
       setSelectedSiteId(sites[0].site_id);
     }
-  }, [sites, selectedSiteId, setSelectedSiteId]);
+    // Set initial date range on mount
+    setSelectedRange(calculateDateRange(selectedPeriod));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sites, selectedSiteId, setSelectedSiteId]); // Keep original dependencies for site selection logic
 
   // Derive selectedSite for display purposes
   const selectedSite = useMemo(() => sites.find((site: Site) => site.site_id === selectedSiteId), [sites, selectedSiteId]); // Added Site type
@@ -110,6 +150,13 @@ export const DashboardHeader = () => {
     setIsSiteSettingsModalOpen(true);
   };
 
+  const handleTimePeriodChange = (value: string) => {
+    if (timePeriods.includes(value)) { // Ensure value is one of the allowed periods
+      setSelectedPeriod(value);
+      setSelectedRange(calculateDateRange(value));
+    }
+  };
+
   return (
     <>
       <header className="mb-6 flex items-center justify-between gap-4">
@@ -119,12 +166,11 @@ export const DashboardHeader = () => {
              <DropdownMenu>
                <DropdownMenuTrigger asChild>
                  {/* Use Avatar and dynamic text */}
-                 <Button variant="ghost" className="flex items-center gap-2 px-2 py-1 h-auto rounded-md">
+                 <Button variant="ghost" className="flex items-center gap-2 px-2 py-1 h-auto rounded-md"> {/* Removed text span from button */}
                    <Avatar className="h-6 w-6">
                      {/* <AvatarImage src={user?.avatarUrl} alt={user?.name} /> */}
                      <AvatarFallback className="text-xs">A</AvatarFallback> {/* Static "A" for now */}
                    </Avatar>
-                   <span className="text-sm font-medium">{dropdownTriggerText}</span>
                  </Button>
                </DropdownMenuTrigger>
                <DropdownMenuContent align="start" className="w-56"> {/* Align start for left positioning */}
@@ -150,6 +196,8 @@ export const DashboardHeader = () => {
                  </DropdownMenuItem>
                </DropdownMenuContent>
              </DropdownMenu>
+             {/* Display Site Name next to Avatar Dropdown */}
+             <span className="text-sm font-medium">{dropdownTriggerText}</span>
         </div>
 
         {/* Right Side: Segments, Date Range Picker & Refresh */}
@@ -182,45 +230,19 @@ export const DashboardHeader = () => {
                  </div>
              )}
 
-             {/* Date Range Picker */}
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button
-                  id="date"
-                  variant={"outline"}
-                  className={cn(
-                    "w-[260px] justify-start text-left font-normal",
-                    !selectedRange && "text-muted-foreground"
-                  )}
-                  disabled={isLoading || !selectedSiteId} // Disable if loading or no site selected
-                >
-                  <CalendarIcon className="mr-2 h-4 w-4" />
-                  {selectedRange?.from ? (
-                    selectedRange.to ? (
-                      <>
-                        {format(selectedRange.from, "LLL dd, y")} -{" "}
-                        {format(selectedRange.to, "LLL dd, y")}
-                      </>
-                    ) : (
-                      format(selectedRange.from, "LLL dd, y")
-                    )
-                  ) : (
-                    <span>Pick a date</span>
-                  )}
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-auto p-0" align="end">
-                <Calendar
-                  initialFocus
-                  mode="range"
-                  defaultMonth={selectedRange?.from}
-                  selected={selectedRange}
-                  onSelect={setSelectedRange} // Use store action directly
-                  numberOfMonths={2}
-                  disabled={(date) => date > new Date() || date < new Date("2000-01-01")} // Example disabled dates
-                />
-              </PopoverContent>
-            </Popover>
+             {/* Time Period Select Dropdown */}
+             <Select value={selectedPeriod} onValueChange={handleTimePeriodChange} disabled={isLoading || !selectedSiteId}>
+               <SelectTrigger className="w-[180px]">
+                 <SelectValue placeholder="Select time period" />
+               </SelectTrigger>
+               <SelectContent>
+                 {timePeriods.map((period) => (
+                   <SelectItem key={period} value={period}>
+                     {period}
+                   </SelectItem>
+                 ))}
+               </SelectContent>
+             </Select>
 
              {/* Refresh Indicator */}
              {isRefreshing && <span className="text-xs text-gray-400 animate-pulse">(syncing...)</span>}

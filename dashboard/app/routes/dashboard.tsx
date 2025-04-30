@@ -62,11 +62,11 @@ export default function AnalyticsDashboard() {
 
   // --- Stripe Integration Callbacks --- (Moved to DashboardContent)
 
-  return <>
+  return <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
     {/* Use the new DashboardHeader component */}
     <DashboardHeader /> {/* Props are now fetched internally */}
 
     {/* Render the new DashboardContent component with no props */}
     <DashboardContent />
-  </>;
+  </div>;
 };
