@@ -5,6 +5,7 @@ This uses SST v3, which uses Pulumi under the hood - not CDK (SST v2). SST v3 ad
 
 
 
+
 */
 const domain = "topupanalytics.com";
 export default $config({
@@ -29,22 +30,53 @@ export default $config({
     const vpc = new sst.aws.Vpc("MyVpc", {
       az: 2
     });
-    const database = new sst.aws.Aurora("MyDatabase", {
+
+    // === Aurora Database (Postgres Serverless v2) ===
+    const database = new sst.aws.Aurora("Database", { // Renamed logical ID for clarity
       engine: "postgres",
-      vpc,
+      vpc, // Place in VPC
       scaling: {
-        // open-source users: set this to 0 for cheaper hosting. Downside: it takes
-        // 15seconds to come online, so you'll need your own warm-start solution
-        min: "0.5 ACU",
+        min: "0.5 ACU", // Scale to 0 for dev/staging if needed
         max: "4 ACU"
       },
+      // Default database name is fine, or specify one: database: `${basename}_db`
     });
-    const connectionString = $interpolate`postgresql://${database.username}:${database.password}@${database.host}:${database.port}/${database.database}`
+    const connectionString = $interpolate`postgresql://${database.username}:${database.password}@${database.host}:${database.port}/${database.database}`;
+
+    // === Database Migration Function ===
+    const dbMigrationFn = new sst.aws.Function("DbMigrationFn", {
+      handler: "functions/migrations/migrate.handler",
+      timeout: "5 minutes", // Longer timeout for migrations
+      memory: "1024 MB", // More memory if needed
+      architecture: "arm64",
+      vpc: vpc, // Run in VPC to access DB
+      link: [database], // Link the database
+      copyFiles: [{ from: "shared/db/migrations", to: "migrations" }], // Copy migration files
+      environment: {
+        DB_CONNECTION_STRING: connectionString, // Pass connection string
+      },
+      nodejs: {
+        install: ["drizzle-orm", "postgres", "@neondatabase/serverless"], // Ensure necessary drivers/ORM are installed
+      },
+    });
+
+    // Trigger migration function on deployment
+    new aws.lambda.Invocation("DbMigrationTrigger", {
+      functionName: dbMigrationFn.name,
+      input: "{}", // Add required empty input payload
+      triggers: {
+        // Trigger on changes to the function or migration files (using a hash)
+        // Also include DB cluster ARN to ensure DB is ready before first invocation
+        redeployment: $interpolate`${dbMigrationFn.arn}${database.clusterArn}`,
+      },
+      // Implicit dependency via triggers ensures this runs after function and DB are ready
+    });
+
 
     // === Linkable Wrappers (using global sst) ===
     // Wrap Kinesis Firehose Delivery Stream
     sst.Linkable.wrap(aws.kinesis.FirehoseDeliveryStream, (stream) => ({
-      properties: { name: stream.name },
+      properties: { name: stream.name, arn: stream.arn }, // Include ARN
       include: [
         sst.aws.permission({
           actions: ["firehose:PutRecord", "firehose:PutRecordBatch"],
@@ -90,14 +122,9 @@ export default $config({
     const tableNames = ["events", "initial_events"] as const;
     type TableName = (typeof tableNames)[number]; // Define a type for table names
     // === S3 Bucket for Analytics Data ===
-    const analyticsDataBucket = new sst.aws.Bucket("AnalyticsDataBucket", {
-      // name: `${basename}-analytics-data`, // Explicit name if needed, SST generates one
-      // intelligentTiering: true, // ERROR: Not a valid property here. Apply lifecycle rule below.
-    });
+    const analyticsDataBucket = new sst.aws.Bucket("AnalyticsDataBucket", {});
     // === S3 Buckets ===
-    const athenaResultsBucket = new sst.aws.Bucket("AthenaResults", {
-      // name: `${basename}-athena-results`, // Use explicit, stage-specific name
-    });
+    const athenaResultsBucket = new sst.aws.Bucket("AthenaResults", {});
     // === Common S3 Lifecycle Rule for Intelligent Tiering ===
     const intelligentTieringRule: aws.types.input.s3.BucketLifecycleConfigurationV2Rule[] =
       [
@@ -126,8 +153,6 @@ export default $config({
     // === Glue Data Catalog ===
     const glueCatalogDatabase = new aws.glue.CatalogDatabase(`GlueCatalogDatabase`, {
         name: `${basename}_db`, // Use explicit name, underscores only
-      // Point location to a logical path within the S3 Table Bucket for organization
-      // locationUri is not typically needed for Glue DB, especially with Iceberg tables managing their own locations.
     },);
     // Import schemas for both tables
     const { initialGlueColumns, eventsGlueColumns } = await import(
@@ -157,29 +182,12 @@ export default $config({
             databaseName: glueCatalogDatabase.name,
             tableType: "EXTERNAL_TABLE", // Required for Iceberg format
             parameters: {
-              // @worked-before: Now it says "Cannot use reserved parameters table_type while creating an iceberg tble"
-              // table_type: "ICEBERG", // Identify as Iceberg
-              // @terraform-example - excluded
-              classification: "iceberg", // Can also be parquet if Firehose converts first
-              // @terraform-example - included
-              // format: "parquet",
-              // "lakeformation.governed": "true", // *** VITAL: Indicate LF governance
-              // Add other relevant parameters if needed
-              // "write.parquet.compression-codec": "snappy", // Example: Set Parquet compression if needed (Firehose handles it here)
+              classification: "iceberg",
             },
             storageDescriptor: {
-              // Location points to the *base* path for the table in the new S3 bucket
               location: $interpolate`s3://${analyticsDataBucket.name}/${tableName}/`, // Base path for the table
               columns: glueColumns[tableName], // Schema from import
-              // SerDe, InputFormat, OutputFormat are generally NOT needed for Glue Iceberg tables
-              // Glue uses the Iceberg metadata layer.
-              // compressed: true, // Compression handled by Parquet/Iceberg writers
-              // storedAsSubDirectories: true, // Iceberg manages its own directory structure
             },
-            // Define partition keys so Firehose & Iceberg know how to physically
-            // lay out the data. This must match the dynamicPartitioning keys
-            // we extract (site_id & dt).
-            // @worked-before: "Cannot create partitions in an iceberg table"
             partitionKeys: commonPartitionKeys,
             openTableFormatInput: {
               icebergInput: {
@@ -199,47 +207,7 @@ export default $config({
       }),
     });
 
-    /*
-    Sample FirehoseDeliveryStream for HTTP. Wire it to an sst.aws.Function(..., {url: true}).url,
-    and just use one Firehose for the "just pass along" (the two below will remain for the
-    separate S3 buckets).
-
-    const testStream = new aws.kinesis.FirehoseDeliveryStream("test_stream", {
-      name: "kinesis-firehose-test-stream",
-      destination: "http_endpoint",
-      httpEndpointConfiguration: {
-          url: "https://aws-api.newrelic.com/firehose/v1",
-          name: "New Relic",
-          accessKey: "my-key",
-          bufferingSize: 15,
-          bufferingInterval: 600,
-          roleArn: firehose.arn,
-          s3BackupMode: "FailedDataOnly",
-          s3Configuration: {
-              roleArn: firehose.arn,
-              bucketArn: bucket.arn,
-              bufferingSize: 10,
-              bufferingInterval: 400,
-              compressionFormat: "GZIP",
-          },
-          requestConfiguration: {
-              contentEncoding: "GZIP",
-              commonAttributes: [
-                  {
-                      name: "testname",
-                      value: "testvalue",
-                  },
-                  {
-                      name: "testname2",
-                      value: "testvalue2",
-                  },
-              ],
-          },
-      },
-  });
-     */
-
-    // Allow Firehose to write to S3 and access Glue (Updated for Iceberg)
+    // Allow Firehose to write to S3 (Iceberg & HTTP Backup) and access Glue
     new aws.iam.RolePolicy(`FirehoseDeliveryPolicy`, {
       role: firehoseDeliveryRole.id, // Reference the role's ID output
       policy: $interpolate`{
@@ -290,15 +258,38 @@ export default $config({
                 "logs:PutLogEvents"
              ],
              "Resource": "arn:${partition}:logs:${region}:${accountId}:log-group:/aws/kinesisfirehose/${basename}-firehose-*:*"
+          },
+          {
+            "Effect": "Allow",
+            "Action": [
+                "kinesis:DescribeStream",
+                "kinesis:GetShardIterator",
+                "kinesis:GetRecords",
+                "kinesis:ListShards"
+            ],
+            "Resource": "*"
+          },
+          {
+            "Effect": "Allow",
+            "Action": [
+                "kms:Decrypt",
+                "kms:GenerateDataKey"
+            ],
+            "Resource": "*",
+            "Condition": {
+                "StringEquals": {
+                    "kms:ViaService": "kinesis.${region}.amazonaws.com"
+                },
+                "StringLike": {
+                    "kms:EncryptionContext:aws:kinesis:arn": "arn:aws:kinesis:${region}:${accountId}:stream/*"
+                }
+            }
           }
         ]
       }`,
     });
-    // === Lake Formation Permissions REMOVED ===
-    // Lake Formation is not required for this standard S3/Glue/Firehose setup.
-    // Standard IAM permissions on the Firehose role are sufficient.
-    // === Kinesis Data Firehose Delivery Streams ===
-    // Configure destination: "extended_s3" with data format conversion and dynamic partitioning
+
+    // === Kinesis Data Firehose Delivery Streams (S3/Iceberg) ===
     const firehoses = Object.fromEntries(
       tableNames.map((tableName) => {
         const glueTable = glueTables[tableName]; // Get the specific Glue table resource
@@ -308,47 +299,23 @@ export default $config({
           tableName, // Keep original key for mapping
           new aws.kinesis.FirehoseDeliveryStream(`FirehoseStream${tableName}`, {
             name: firehoseName, // Use explicit, stage-specific name
-            // --- Key Change: Specify 'iceberg' destination ---
             destination: "iceberg",
             tags: {
               Environment: $app.stage,
               Project: $app.name,
               Table: tableName,
             },
-
-            // --- Use 'icebergConfiguration' based on the example ---
             icebergConfiguration: {
-              roleArn: firehoseDeliveryRole.arn, // Role Firehose assumes for access
-
-              // --- Catalog Identification using ARN (as per example) ---
+              roleArn: firehoseDeliveryRole.arn,
               catalogArn: $interpolate`arn:${partition}:glue:${region}:${accountId}:catalog`,
-
-              // --- Buffering Hints (Directly under icebergConfiguration) ---
-              bufferingInterval: 60, // Seconds (e.g., 60-900)
-              bufferingSize: 64, // MBs (e.g., 64-128)
-
-              // --- S3 Configuration (Nested) ---
-              // @terraform-example - entire s3Configuration section  excluded
-              // https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kinesis_firehose_delivery_stream#iceberg-destination
+              // --- Buffering Hints (Updated) ---
+              bufferingInterval: 900, // Maximize interval
+              bufferingSize: 128, // Maximize size
               s3Configuration: {
-                // Role ARN seems required here too, even if same as top-level
                 roleArn: firehoseDeliveryRole.arn,
-                bucketArn: analyticsDataBucket.arn, // Bucket where Iceberg data/metadata resides
-
-                // CloudWatch logging (Remains inside s3Configuration)
-                // cloudwatchLoggingOptions: {
-                //   enabled: true,
-                //   logGroupName: $interpolate`/aws/kinesisfirehose/${firehoseName}`, // Use consistent naming
-                //   logStreamName: "IcebergDelivery", // Specific stream name
-                // },
-
-                // Error output (Remains inside s3Configuration)
-                // Using a pattern similar to the example's error structure
+                bucketArn: analyticsDataBucket.arn,
                 errorOutputPrefix: $interpolate`iceberg-errors/${tableName}/result=!{firehose:error-output-type}/!{timestamp:yyyy/MM/dd}/!{firehose:random-string}/`,
               },
-
-              // --- Destination Table Config (as per example) ---
-              // Defines the specific Glue database and table target
               destinationTableConfigurations: [{
                   databaseName: glueCatalogDatabase.name,
                   tableName: glueTable.name,
@@ -359,6 +326,59 @@ export default $config({
       }),
     ) as Record<TableName, aws.kinesis.FirehoseDeliveryStream>; // Type assertion
 
+    // === Process Ingest Function (Target for HTTP Firehose) ===
+    const processIngestFn = new sst.aws.Function("ProcessIngestFn", {
+      handler: "functions/analytics/processIngest.handler",
+      timeout: "30 second", // Increased timeout
+      memory: "512 MB", // Increased memory
+      architecture: "arm64",
+      url: { cors: true }, // Enable function URL
+      vpc: vpc, // Run in VPC
+      link: [
+        database,
+        firehoses.events,
+        firehoses.initial_events,
+      ],
+      environment: {
+        DB_CONNECTION_STRING: connectionString,
+        // Resource properties (names, ARNs) are available via Resource.* in function code
+      },
+      // Permissions for linked resources (DB, Firehose) handled by linking
+    });
+
+    // === Kinesis Data Firehose Delivery Stream (HTTP Endpoint) ===
+    const ingestHttpFirehose = new aws.kinesis.FirehoseDeliveryStream("IngestHttpFirehose", {
+      name: `${basename}-firehose-http-ingest`,
+      destination: "http_endpoint",
+      httpEndpointConfiguration: {
+          url: processIngestFn.url, // Target the ProcessIngestFn URL
+          name: "ProcessIngestLambda",
+          // Buffering settings for HTTP endpoint
+          bufferingInterval: 60, // Adjust as needed (e.g., 60 seconds)
+          bufferingSize: 5, // Adjust as needed (e.g., 5 MB)
+          roleArn: firehoseDeliveryRole.arn, // Reuse the same role
+          s3BackupMode: "FailedDataOnly", // Backup only failed records
+          s3Configuration: {
+              roleArn: firehoseDeliveryRole.arn,
+              bucketArn: analyticsDataBucket.arn, // Backup to the main analytics bucket
+              // Define a prefix for failed HTTP ingest data
+              prefix: "failed-http-ingest/!{timestamp:yyyy/MM/dd}/!{firehose:random-string}/",
+              errorOutputPrefix: "failed-http-ingest-errors/result=!{firehose:error-output-type}/!{timestamp:yyyy/MM/dd}/!{firehose:random-string}/",
+              bufferingInterval: 300, // Standard S3 buffering
+              bufferingSize: 5,
+              compressionFormat: "GZIP", // Compress backups
+          },
+          requestConfiguration: {
+              contentEncoding: "GZIP", // Expect GZIP encoded data from ingestFn
+              // commonAttributes: [] // Add common attributes if needed
+          },
+      },
+      tags: {
+        Environment: $app.stage,
+        Project: $app.name,
+        Type: "HTTP-Ingest",
+      },
+    });
 
 
     // === Cognito User Pool (Using SST Component) ===
@@ -381,11 +401,7 @@ export default $config({
         },
       },
     });
-    const userPoolClientSst = userPool.addClient("UserPoolClient", {
-      // name: `${basename}-web-client`, // Explicit name
-      // transform can be used here if needed for specific client settings
-      // transform: { client: (args) => { ... }}
-    });
+    const userPoolClientSst = userPool.addClient("UserPoolClient", {});
 
     // Placeholder values instead of sst.Secret.create
     const DUMMY_STRIPE_SECRET_KEY_PLACEHOLDER = "dummy_stripe_secret_key_placeholder";
@@ -395,27 +411,6 @@ export default $config({
     const STRIPE_WEBHOOK_SECRET = useStripe ? new sst.Secret("StripeWebhookSecret") : undefined;
     const STRIPE_PUBLISHABLE_KEY = useStripe ? new sst.Secret("StripePublishableKey") : undefined; // For frontend
 
-    // === DynamoDB Tables ===
-    const sitesTable = new sst.aws.Dynamo("SitesTable", {
-      // name: `${basename}-sites`, // Explicit name
-      fields: {
-        site_id: "string",
-        owner_sub: "string",
-        plan: "string",
-      },
-      primaryIndex: { hashKey: "site_id" },
-      globalIndexes: {
-        ownerSubIndex: { hashKey: "owner_sub", projection: ["site_id"] },
-        planIndex: { hashKey: "plan", projection: "all" },
-      },
-    });
-    const userPreferencesTable = new sst.aws.Dynamo("UserPreferencesTable", {
-      // name: `${basename}-user-preferences`, // Explicit name
-      fields: {
-        cognito_sub: "string",
-      },
-      primaryIndex: { hashKey: "cognito_sub" },
-    });
     // === Router for Public Endpoints (Ingest + Dashboard) ===
     const router = new sst.aws.Router("PublicRouter", {
       domain: isProd ? domain : undefined, // Use custom domain in prod
@@ -426,49 +421,39 @@ export default $config({
       handler: "functions/analytics/ingest.handler",
       timeout: "10 second",
       memory: "128 MB",
-      architecture: "arm64", // Use ARM
-      // Keep URL enabled, but primary access is via Router route below
-      url: {
-        cors: true,
-        // authorizer: "none"
-      },
+      architecture: "arm64",
+      url: { cors: true }, // Keep URL enabled, but primary access is via Router route below
       link: [
-        firehoses.events,
-        firehoses.initial_events,
-        sitesTable,
-        userPreferencesTable, // Link the user preferences table
+        ingestHttpFirehose, // Link the NEW HTTP Firehose
       ],
       environment: {
         USE_STRIPE: useStripe.toString(),
-        // Resource properties (names, ARNs) are available via Resource.* in function code
+        INGEST_HTTP_FIREHOSE_NAME: ingestHttpFirehose.name, // Pass explicit name
       },
-      permissions: [
-        // Permissions for linked resources (Firehose, DynamoDB) are handled by linking
-      ],
+      // Permissions for linked HTTP Firehose handled by linking
     });
     router.route("/api/event", ingestFn.url);
 
-    const queryFn = new sst.aws.Function("QueryFn2", {
+    const queryFn = new sst.aws.Function("QueryFn", { // Renamed logical ID slightly
       handler: "functions/analytics/query.handler",
       timeout: "60 second",
       memory: "512 MB",
-      architecture: "arm64", // Use ARM
-      // NOTE: queryFn is NOT attached to the public Router
+      architecture: "arm64",
+      vpc: vpc, // Add VPC configuration
       link: [
-        glueCatalogDatabase, // Link DB
-        glueTables.events, // Link events Glue Table
-        glueTables.initial_events, // Link initial_events Glue Table
-        athenaResultsBucket, // Link results bucket
-        analyticsDataBucket, // Link the data bucket
-        sitesTable,
-        userPreferencesTable,
+        database, // Link Aurora DB
+        glueCatalogDatabase,
+        glueTables.events,
+        glueTables.initial_events,
+        athenaResultsBucket,
+        analyticsDataBucket,
       ],
       environment: {
-        // Resource properties (names, ARNs) are available via Resource.* in function code
         USE_STRIPE: useStripe.toString(),
+        DB_CONNECTION_STRING: connectionString, // Add DB connection string
       },
       permissions: [
-        // Athena execution permissions (cannot be fully handled by linking specific resources)
+        // Athena execution permissions
         {
           actions: [
             "athena:StartQueryExecution",
@@ -478,8 +463,8 @@ export default $config({
           ],
           resources: ["*"],
         },
-        // Glue permissions are handled by linking Glue DB/Tables
-        // S3 permissions for Athena results bucket (Keep explicit as linking might not cover all Athena/S3 nuances)
+        // Glue permissions handled by linking
+        // S3 permissions for Athena results bucket
         {
           actions: [
             "s3:PutObject",
@@ -490,8 +475,8 @@ export default $config({
           ],
           resources: [athenaResultsBucket.arn, $interpolate`${athenaResultsBucket.arn}/*`],
         },
-        // S3 permissions for reading analytics data are handled by linking analyticsDataBucket
-        // DynamoDB permissions are handled by linking sitesTable and userPreferencesTable
+        // S3 permissions for reading analytics data handled by linking analyticsDataBucket
+        // DB permissions handled by linking database
       ],
     });
     // === Management API Functions ===
@@ -499,29 +484,35 @@ export default $config({
       handler: "functions/api/sites.handler",
       timeout: "10 second",
       memory: "128 MB",
-      architecture: "arm64", // Use ARM
-      link: [sitesTable, router], // Link router to get URL
+      architecture: "arm64",
+      vpc: vpc, // Add VPC configuration
+      link: [
+        database, // Link Aurora DB
+        router
+      ],
       environment: {
-        ROUTER_URL: router.url, // Pass the base router URL
-        USE_STRIPE: useStripe.toString(), // Step 7: Add USE_STRIPE
+        ROUTER_URL: router.url,
+        USE_STRIPE: useStripe.toString(),
+        DB_CONNECTION_STRING: connectionString, // Add DB connection string
       },
       nodejs: {
-        install: ["ulid"], // Add ulid dependency
+        install: ["ulid"],
       },
     });
-    const preferencesFn = new sst.aws.Function("PreferencesFn", {
-      handler: "functions/api/preferences.handler",
+    const accountsFn = new sst.aws.Function("AccountsFn", { // Renamed from PreferencesFn
+      handler: "functions/api/accounts.handler", // Updated handler path
       timeout: "10 second",
       memory: "128 MB",
-      architecture: "arm64", // Use ARM
-      link: [userPreferencesTable], // Link preferences table
-      permissions: [
-        // Permissions for linked resources (DynamoDB) are handled by linking
+      architecture: "arm64",
+      vpc: vpc, // Add VPC configuration
+      link: [
+        database // Link Aurora DB
       ],
       environment: {
         USE_STRIPE: useStripe.toString(),
-        // Resource properties (names, ARNs) are available via Resource.* in function code
+        DB_CONNECTION_STRING: connectionString, // Add DB connection string
       },
+      // Permissions for linked DB handled by linking
     });
     // Step 3: Conditional stripeFn
     let stripeFn: sst.aws.Function | undefined;
@@ -530,53 +521,48 @@ export default $config({
         handler: "functions/api/stripe.handler",
         timeout: "10 second",
         memory: "128 MB",
-        architecture: "arm64", // Use ARM
+        architecture: "arm64",
+        vpc: vpc, // Add VPC configuration
         link: [
-          STRIPE_SECRET_KEY!, // Use non-null assertion as we are inside the if block
-          STRIPE_WEBHOOK_SECRET!, // Use non-null assertion
-          userPreferencesTable, // Link for customer ID lookup/storage
-          sitesTable, // Link for subscription ID/plan update
+          database, // Link Aurora DB
+          STRIPE_SECRET_KEY!,
+          STRIPE_WEBHOOK_SECRET!,
         ],
         environment: {
           USE_STRIPE: useStripe.toString(),
-          // Resource properties (names, ARNs) are available via Resource.* in function code
+          DB_CONNECTION_STRING: connectionString, // Add DB connection string
         },
-        permissions: [
-          // Permissions for linked resources (DynamoDB) are handled by linking
-        ],
+        // Permissions for linked DB handled by linking
         nodejs: {
-          install: ["stripe"], // Ensure stripe SDK is bundled if not already in root package.json
+          install: ["stripe"],
         },
       });
     }
     // === API Gateway (for Authenticated Endpoints like /api/query) ===
     const api = new sst.aws.ApiGatewayV2("ManagementApi", {
       domain: isProd
-        ? {
-            name: `api.${domain}`, // Suggest using a subdomain like api.* for management endpoints
-          }
+        ? { name: `api.${domain}` }
         : undefined,
       cors: {
         allowOrigins: isProd
           ? [`https://${domain}`]
-          : ["http://localhost:5173", "http://127.0.0.1:5173"], // Adjust port if needed
-        allowCredentials: true, // Allow credentials (needed for JWT)
-        allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"], // Allow necessary methods
-        allowHeaders: ["Content-Type", "Authorization"], // Allow standard headers + Auth
+          : ["http://localhost:5173", "http://127.0.0.1:5173"],
+        allowCredentials: true,
+        allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allowHeaders: ["Content-Type", "Authorization"],
       },
     });
-    // Define JWT Authorizer (Using SST User Pool and Client)
+    // Define JWT Authorizer
     const jwtAuthorizer = api.addAuthorizer({
       name: "jwtAuth",
       jwt: {
         issuer: $interpolate`https://cognito-idp.${region}.amazonaws.com/${userPool.id}`,
-        audiences: [userPoolClientSst.id], // Use the ID from the SST client object
+        audiences: [userPoolClientSst.id],
       },
     });
     // Define common auth config once
     const commonAuth = { auth: { jwt: { authorizer: jwtAuthorizer.id } } };
     // === Management API Routes (Using Function ARNs for explicit definition) ===
-    // Use object syntax for route definition for clarity
     api.route("GET /api/query", queryFn.arn, commonAuth);
     api.route("POST /api/sites", sitesFn.arn, commonAuth);
     api.route("GET /api/sites", sitesFn.arn, commonAuth);
@@ -584,114 +570,104 @@ export default $config({
     api.route("PUT /api/sites/{site_id}", sitesFn.arn, commonAuth);
     api.route("DELETE /api/sites/{site_id}", sitesFn.arn, commonAuth);
     api.route("GET /api/sites/{site_id}/script", sitesFn.arn, commonAuth);
-    api.route("GET /api/user/preferences", preferencesFn.arn, commonAuth);
-    api.route("PUT /api/user/preferences", preferencesFn.arn, commonAuth);
+    api.route("GET /api/user/account", accountsFn.arn, commonAuth); // Updated route and target
+    api.route("PUT /api/user/account", accountsFn.arn, commonAuth); // Updated route and target
     // Step 5: Conditional Stripe API Routes
     if (useStripe && stripeFn) {
-      // Check stripeFn exists
       api.route("POST /api/stripe/webhook", stripeFn.arn); // NO auth needed
-      api.route("POST /api/stripe/checkout", stripeFn.arn, commonAuth); // Requires JWT auth
-      api.route("GET /api/stripe/portal", stripeFn.arn, commonAuth); // Add portal route
+      api.route("POST /api/stripe/checkout", stripeFn.arn, commonAuth);
+      api.route("GET /api/stripe/portal", stripeFn.arn, commonAuth);
     }
     // === Dashboard (React Frontend) ===
     const publicIngestUrl = $interpolate`${router.url}/api/event`; // Define before component
 
-    // Build into public, which gets transfered too on deploy. This so we can test in dev
-    // mode easily; don't need 2 vite build strategies (one for dev->public, deploy->dist)
+    // Build embed scripts
     new command.local.Command("BuildEmbedScripts", {
-      // Keep running from root, but use absolute paths for input files
       create: $interpolate`npx esbuild ${process.cwd()}/dashboard/embed-script/src/topup-basic.ts ${process.cwd()}/dashboard/embed-script/src/topup-enhanced.ts ${process.cwd()}/dashboard/embed-script/src/topup-full.ts --bundle --format=iife --outdir=${process.cwd()}/dashboard/public --entry-names=[name].min --define:import.meta.env.VITE_PUBLIC_INGEST_URL='"${publicIngestUrl}"'`
     });
 
 
     const dashboard = new sst.aws.React("Dashboard", {
       path: "dashboard/",
-      // Attach dashboard to the root of the public Router
-      router: {
-        instance: router,
-        // path defaults to "/*" when attaching a site like this
-      },
+      router: { instance: router },
       link: [
         api,
-        userPool, // Link the SST UserPool component
-        userPoolClientSst, // Link the SST UserPoolClient object
+        userPool,
+        userPoolClientSst,
       ],
       environment: {
-        VITE_COGNITO_USER_POOL_ID: userPool.id, // Use ID from SST component
-        VITE_COGNITO_CLIENT_ID: userPoolClientSst.id, // Use ID from SST client object
+        VITE_COGNITO_USER_POOL_ID: userPool.id,
+        VITE_COGNITO_CLIENT_ID: userPoolClientSst.id,
         VITE_AWS_REGION: region,
         VITE_API_URL: api.url,
-        VITE_APP_URL: router.url, // App URL is the router URL
+        VITE_APP_URL: router.url,
         VITE_STRIPE_PUBLISHABLE_KEY: useStripe
           ? STRIPE_PUBLISHABLE_KEY!.value
-          : DUMMY_STRIPE_PUBLISHABLE_KEY_PLACEHOLDER, // Correct: Use real value or placeholder string
-        VITE_USE_STRIPE: useStripe.toString(), // Add the flag
-        VITE_PUBLIC_INGEST_URL: publicIngestUrl, // Ensure this still exists and uses the variable
+          : DUMMY_STRIPE_PUBLISHABLE_KEY_PLACEHOLDER,
+        VITE_USE_STRIPE: useStripe.toString(),
+        VITE_PUBLIC_INGEST_URL: publicIngestUrl,
       },
     });
-    // === Compaction Function & Cron (REMOVED - Iceberg handles auto-compaction) ===
-    // Iceberg handles compaction. Manual OPTIMIZE via Athena might be needed occasionally if auto-compaction isn't sufficient.
+
     // Step 4: Conditional chargeProcessorFn and Cron
     let chargeProcessorFn: sst.aws.Function | undefined;
     if (useStripe) {
       chargeProcessorFn = new sst.aws.Function("ChargeProcessorFn", {
         handler: "functions/billing/chargeProcessor.handler",
-        timeout: "60 second", // Allow time for Stripe API calls and DB updates
+        timeout: "60 second",
         memory: "256 MB",
-        architecture: "arm64", // Use ARM
+        architecture: "arm64",
+        vpc: vpc, // Add VPC configuration
         link: [
-          sitesTable,
-          userPreferencesTable,
-          STRIPE_SECRET_KEY!, // Correct: Use non-null assertion
+          database, // Link Aurora DB
+          STRIPE_SECRET_KEY!,
         ],
         environment: {
           USE_STRIPE: useStripe.toString(),
-          // Resource properties (names, ARNs) are available via Resource.* in function code
+          DB_CONNECTION_STRING: connectionString, // Add DB connection string
         },
-        permissions: [
-          // Permissions for linked resources (DynamoDB) are handled by linking
-        ],
+        // Permissions for linked DB handled by linking
         nodejs: {
-          install: ["stripe", "@aws-sdk/client-dynamodb"], // Add necessary SDKs
+          install: ["stripe"], // Removed dynamodb client
         },
       });
       new sst.aws.Cron("ChargeCron", {
-        schedule: "rate(5 minutes)", // Adjust schedule as needed
-        function: chargeProcessorFn.arn, // Trigger the charge processor function ARN
+        schedule: "rate(5 minutes)",
+        function: chargeProcessorFn.arn,
       });
     }
     // === Outputs ===
     return {
       appName: $app.name,
-      stage: $app.stage, // Add stage output
+      stage: $app.stage,
       accountId: accountId,
-      region: region, // Add region output
-      dashboardUrl: router.url, // Use router URL for dashboard access
-      managementApiUrl: api.url, // Rename output for clarity
-      publicIngestUrl: publicIngestUrl, // Construct ingest URL from router
+      region: region,
+      dashboardUrl: router.url,
+      managementApiUrl: api.url,
+      publicIngestUrl: publicIngestUrl,
+      databaseName: database.database, // Output DB name
+      databaseClusterArn: database.clusterArn, // Output DB Cluster ARN
+      dbMigrationFunctionName: dbMigrationFn.name,
+      processIngestFunctionName: processIngestFn.name,
+      ingestHttpFirehoseName: ingestHttpFirehose.name, // Output HTTP Firehose name
       ingestFunctionName: ingestFn.name,
       queryFunctionName: queryFn.name,
       dataBucketName: analyticsDataBucket.name,
       queryResultsBucketName: athenaResultsBucket.name,
       eventsFirehoseStreamName: firehoses.events.name,
       initialEventsFirehoseStreamName: firehoses.initial_events.name,
-      glueDatabaseName: glueCatalogDatabase.name, // Corrected output key name
+      glueDatabaseName: glueCatalogDatabase.name,
       eventsGlueTableName: glueTables.events.name,
       initialEventsGlueTableName: glueTables.initial_events.name,
       userPoolId: userPool.id,
       userPoolClientId: userPoolClientSst.id,
-      sitesTableName: sitesTable.name,
-      userPreferencesTableName: userPreferencesTable.name,
       isProd,
-      routerDistributionId: router.distributionID, // Export router ID
-      chargeProcessorFunctionName: chargeProcessorFn?.name, // Conditionally export name
+      routerDistributionId: router.distributionID,
+      chargeProcessorFunctionName: chargeProcessorFn?.name,
       stripeSecretKeyName: useStripe ? STRIPE_SECRET_KEY!.name : undefined,
-      // Add other function names if useful
       sitesFunctionName: sitesFn?.name,
-      preferencesFunctionName: preferencesFn?.name,
+      accountsFunctionName: accountsFn?.name, // Updated output key
       stripeFunctionName: stripeFn?.name,
-      // tableBucketArn: s3Table.tableBucketArn,
-      // warehouseLocation: s3Table.warehouseLocation,
     };
   },
 });

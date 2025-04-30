@@ -19,15 +19,19 @@
     "@aws-sdk/client-glue": "^3.798.0",
     "@aws-sdk/client-s3": "^3.798.0",
     "@aws-sdk/lib-dynamodb": "^3.798.0",
+    "@types/pg": "^8.11.14",
     "date-fns": "^4.1.0",
+    "pg": "^8.15.6",
     "sst": "3.13.19",
     "stripe": "^18.0.0",
     "ua-parser-js": "^2.0.3",
-    "ulid": "^3.0.0"
+    "ulid": "^3.0.0",
+    "drizzle-orm": "^0.32.1"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.149",
     "esbuild": "^0.20.2",
-    "vite-plugin-sitemap": "^0.7.1"
+    "vite-plugin-sitemap": "^0.7.1",
+    "drizzle-kit": "^0.23.0"
   }
 }

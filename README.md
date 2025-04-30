@@ -21,40 +21,52 @@ Cost is the core value prop of this tool. Plausible had me at $40/m, for traffic
 
 I'm committed to keeping the price $10 per million events. I'm confident I can keep my costs just below that, and I'm not interested in massive markup. I'm building this for me, and I want to share it with others. If I'm wrong on the $10 max, I'll stay true to the cost by (a) applying more aggressive architecture; and/or (b) evolving what counts as an "event". Eg currently it's "something you send to the server" (page_view, button_click, etc). But if - as I optimize performance and scale - I fail the $10 max, I'll count events more like credits towards more expensive operations. Eg 1 event per database write; 1 event per operation in a dashboard report.
 
-Current estimated per-million events cost to me, all steps considered: `$1.74` (keep this updated)
+Current estimated per-million events cost to me, all steps considered: `$1.74` (needs re-evaluation after migration)
 
 ---
 
-## Data Pipeline: Cost-Optimized & Scalable Analytics (S3/Glue/Firehose/Iceberg)
+## Data Pipeline: Aurora/Drizzle & Hybrid Query Architecture
 
-The primary goal of this data pipeline is extreme cost-effectiveness and scalability, aiming to support a high volume of events and queries affordably. It uses a standard AWS serverless data lake architecture.
+This pipeline is designed for cost-effectiveness, scalability, and near real-time data availability, leveraging Aurora Serverless v2 (Postgres) with Drizzle ORM, an HTTP Firehose for ingestion, and a hybrid query approach.
 
 ## Architecture Overview
 
-1.  **Ingest:** Client -> Router (CloudFront) -> Lambda (`ingestFn`) -> Firehose (JSON)
-    *   Events hit the public Router endpoint (`/api/event`).
-    *   Router forwards to `ingestFn` Lambda.
-    *   `ingestFn` validates, adds server timestamp (`dt` as 'yyyy-MM-dd'), and sends the raw JSON payload to the appropriate Firehose stream (`eventsStream` or `initialEventsStream`).
+1.  **Ingest:** Client -> Router (CloudFront) -> `ingestFn` (Lambda) -> `IngestHttpFirehose` (HTTP Destination) -> `processIngestFn` (Lambda in VPC)
+    *   Client sends events to the Router (`/api/event`).
+    *   Router forwards to the lightweight `ingestFn`.
+    *   `ingestFn` performs minimal validation and forwards the payload to the `IngestHttpFirehose`.
+    *   The Firehose buffers events and sends batches via its HTTP Destination to the `processIngestFn`.
 
-2.  **Delivery & Transformation:** Firehose (JSON -> Parquet) -> S3 (Partitioned Parquet)
-    *   Firehose uses **Data Format Conversion** to transform the incoming JSON into Apache Parquet format based on the target Glue table schema.
-    *   Firehose uses **Dynamic Partitioning** based on `site_id` and `dt` extracted from the JSON payload (via `processingConfiguration` with JQ).
-    *   Parquet files are written to the `analyticsDataBucket` in Hive-style partitions (e.g., `s3://<bucket>/events/site_id=abc/dt=2024-01-01/`).
-    *   S3 bucket uses Intelligent Tiering for cost optimization.
+2.  **Processing (`processIngestFn`):**
+    *   Receives batches from the HTTP Firehose.
+    *   Decodes and decompresses event data.
+    *   Fetches and caches site configuration (e.g., allowance, settings) from Aurora using Drizzle ORM.
+    *   Validates events against site settings, filters out invalid/blocked events, and enriches data.
+    *   Performs bulk inserts of valid events into Aurora `events` and `initial_events` tables using Drizzle.
+    *   Forwards valid, processed events to the *original* S3/Iceberg Firehoses (`eventsStream`, `initialEventsStream`) for long-term storage.
+    *   Updates the site's event allowance usage in the Aurora `sites` table.
 
-3.  **Catalog:** S3 (Parquet) -> Glue Data Catalog (Iceberg Tables)
-    *   A Glue Database (`analyticsDatabase`) catalogs the tables.
-    *   Two Glue Tables (`eventsTable`, `initialEventsTable`) are defined with `tableType: ICEBERG`.
-    *   These tables point to the S3 base locations (`s3://<bucket>/events/`, `s3://<bucket>/initial_events/`) and define the schema and partitioning (`site_id`, `dt`).
-    *   The Glue Iceberg tables manage the metadata layer over the underlying Parquet files stored in S3 by Firehose.
+3.  **Long-Term Storage & Archival:** `eventsStream`/`initialEventsStream` (Firehose) -> S3 (Parquet) -> Glue Catalog (Iceberg Tables)
+    *   The original Firehose streams (`eventsStream`, `initialEventsStream`) receive processed events from `processIngestFn`.
+    *   Buffering settings for these streams are increased to optimize S3 writes and reduce costs.
+    *   Firehose converts data to Parquet and writes to S3, partitioned by `site_id` and `dt`.
+    *   Glue Data Catalog with Iceberg tables (`eventsTable`, `initialEventsTable`) provides the schema and metadata for querying archived data via Athena.
 
-4.  **Query:** Dashboard -> API Gateway (`ManagementApi`) -> Lambda (`queryFn`) -> Athena
-    *   Dashboard calls authenticated `/api/query` endpoint.
-    *   `queryFn` Lambda constructs and runs Athena SQL queries against the Glue Iceberg tables.
-    *   Athena uses the Glue Catalog and Iceberg metadata to efficiently query the Parquet data in S3. Results are stored in `athenaResultsBucket`.
+4.  **Query (`queryFn`):** Dashboard -> API Gateway (`ManagementApi`) -> `queryFn` (Lambda in VPC) -> Aurora (Drizzle) / Athena
+    *   Dashboard calls the authenticated `/api/query` endpoint.
+    *   `queryFn` (running in the VPC) performs an ownership check against the `sites` table in Aurora (via Drizzle).
+    *   Based on the query's time range:
+        *   **Recent Data (e.g., <= 30 days):** Queries the `events` / `initial_events` tables directly in Aurora using Drizzle for fast results.
+        *   **Older Data (> 30 days):** Queries the historical data in the S3 data lake via Athena using the Glue Iceberg tables.
 
-5.  **Maintenance:** (Handled by Iceberg)
-    *   Iceberg manages small file compaction automatically. Manual `OPTIMIZE TABLE` via Athena might be run periodically if needed, but the automated compaction function (`CompactionFn`/`CompactionCron`) has been removed.
+5.  **Database Schema & Migrations:**
+    *   Transactional data (e.g., `accounts`, `sites`, `preferences`) and recent analytics data (`events`, `initial_events`) are stored in Aurora Postgres.
+    *   The database schema is managed using Drizzle ORM (`shared/db/schema.ts`).
+    *   Schema migrations are handled by Drizzle Kit and applied via the `DbMigrationFn` Lambda function.
+
+6.  **Maintenance:**
+    *   Aurora Serverless v2 handles scaling automatically.
+    *   Iceberg's automatic compaction handles S3 data optimization for the archived data. Periodic manual `OPTIMIZE` via Athena is generally not required.
 
 ---
 

@@ -1,4 +1,4 @@
-import { APIGatewayProxyHandlerV2WithJWTAuthorizer, APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from "aws-lambda"; // Added specific event/result types
+import { APIGatewayProxyHandlerV2WithJWTAuthorizer, APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from "aws-lambda";
 import {
   AthenaClient,
   StartQueryExecutionCommand,
@@ -12,20 +12,21 @@ import {
   GetQueryResultsCommandInput,
   GetQueryResultsCommandOutput,
 } from "@aws-sdk/client-athena";
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, QueryCommand } from "@aws-sdk/lib-dynamodb";
-import { subDays, format, parseISO, isValid } from 'date-fns';
+// Removed DynamoDB imports
+import { subDays, format, parseISO, isValid, isBefore } from 'date-fns'; // Added isBefore
 import {
   initialOnlySchema,
   commonSchema
 } from './schema';
 import { log } from './utils';
-import { Resource } from 'sst'
+import { Resource } from 'sst';
+import { db } from '../../shared/db/client'; // Added Drizzle client import
+import { sites, events, initialEvents } from '../../shared/db/schema'; // Added Drizzle schema imports
+import { eq, and, gte, lte, inArray, sql } from 'drizzle-orm'; // Added Drizzle function imports
 
 // Initialize AWS Clients
 const athenaClient = new AthenaClient({});
-const ddbClient = new DynamoDBClient({});
-const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
+// Removed DynamoDB client initializations
 
 
 // Helper function for sleep
@@ -83,12 +84,12 @@ async function executeAthenaQuery(
 
     const finalQuery = queryString.replace(/\\s*--.*$/gm, '').trim().replace(/;$/, '');
 
-    const s3OutputLocation = `s3://${Resource.AthenaResults.name}/`; // Construct the full path using the bucket name
+    const s3OutputLocation = `s3://${Resource.AthenaResults.name}/`; // Revert to Logical ID
     console.log(`Using Athena Output Location: ${s3OutputLocation}`);
 
     const startQueryCmd = new StartQueryExecutionCommand({
         QueryString: finalQuery,
-        QueryExecutionContext: { Database: Resource.GlueCatalogDatabase.name },
+        QueryExecutionContext: { Database: Resource.GlueCatalogDatabase.name }, // Revert to Logical ID
         ResultConfiguration: { OutputLocation: s3OutputLocation }, // Use the constructed path
     });
 
@@ -210,21 +211,18 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     }
     log(`Authenticated user sub: ${userSub}`);
 
-    // --- Get User's Owned Sites from DynamoDB ---
+    // --- Get User's Owned Sites from Drizzle ---
     let ownedSiteIds: string[] = [];
     try {
-        const queryCommand = new QueryCommand({
-            TableName: Resource.SitesTable.name,
-            IndexName: "ownerSubIndex",
-            KeyConditionExpression: "owner_sub = :sub",
-            ExpressionAttributeValues: { ":sub": userSub },
-            ProjectionExpression: "site_id",
-        });
-        const queryResult = await ddbDocClient.send(queryCommand);
-        ownedSiteIds = queryResult.Items?.map(item => item.site_id) ?? [];
+        const userSites = await db.select({ siteId: sites.siteId })
+                                  .from(sites)
+                                  .where(eq(sites.ownerSub, userSub as string)); // Cast userSub to string
+
+        ownedSiteIds = userSites.map(site => site.siteId);
 
         if (ownedSiteIds.length === 0) {
             log(`No sites found for user sub: ${userSub}`);
+            // Return empty results if user owns no sites at all
             return {
                 statusCode: 200,
                 headers: { "Content-Type": "application/json" },
@@ -234,7 +232,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
         log(`User ${userSub} owns sites: ${ownedSiteIds.join(', ')}`);
 
     } catch (error: any) {
-        console.error(`Error querying SitesTable for user ${userSub}:`, error);
+        console.error(`Error querying sites table for user ${userSub}:`, error);
         return { statusCode: 500, body: JSON.stringify({ message: "Error fetching user sites.", details: error.message }) };
     }
 
@@ -299,7 +297,8 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     }
     if (rawEndDate) {
         const parsed = parseISO(rawEndDate);
-        if (isValid(parsed)) endDate = parsed; // Consider setting time to end of day if needed
+        // Set end date to the end of the day for inclusive range
+        if (isValid(parsed)) endDate = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 23, 59, 59, 999);
         else log(`Invalid endDate format: ${rawEndDate}. Using default.`);
     }
 
@@ -310,83 +309,115 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     }
 
     const startDateFormat = format(startDate, 'yyyy-MM-dd');
-    const endDateFormat = format(new Date, 'yyyy-MM-dd');
+    const endDateFormat = format(endDate, 'yyyy-MM-dd'); // Use actual end date for logging
     log(`Querying data from ${startDateFormat} to ${endDateFormat} for sites: ${finalSiteIds.join(', ')}`);
 
-    // --- Construct Filters ---
-    const dateFilterSql = `dt BETWEEN '${startDateFormat}' AND '${endDateFormat}'`; // Compare partition key as string
-    // Use the final filtered list of site IDs
-    const siteIdFilterSql = `site_id IN (${finalSiteIds.map(id => `'${id.replace(/'/g, "''")}'`).join(', ')})`; // Basic SQL injection prevention for IDs
+    // --- Hybrid Query Logic ---
+    const thirtyDaysAgo = subDays(new Date(), 30);
+    const queryRecentData = !isBefore(startDate, thirtyDaysAgo); // Query Aurora if start date is within last 30 days
+
+    log(`Querying ${queryRecentData ? 'Aurora (recent)' : 'Athena (older)'} data based on start date ${startDateFormat}`);
+
+    let queryInitialEvents: Record<string, any>[] = [];
+    let queryEvents: Record<string, any>[] = [];
 
     try {
-        // --- Determine Schemas based on Safety Level ---
+        // --- Determine Schemas (used for response structure) ---
         const commonSchemaFields = commonSchema.filter(s => s.safe === 'yes' || s.safe === 'maybe');
         const initialOnlySchemaFields = initialOnlySchema.filter(s => s.safe === 'yes' || s.safe === 'maybe');
 
-        const commonSelectColNames = commonSchemaFields.map(s => s.name);
-        const initialOnlySelectColNames = initialOnlySchemaFields.map(s => s.name);
+        if (queryRecentData) {
+            // --- Query Aurora using Drizzle ---
+            log('Executing Aurora queries...');
+            const [auroraInitialEventsResult, auroraEventsResult] = await Promise.all([
+                db.select()
+                  .from(initialEvents)
+                  .where(and(
+                      inArray(initialEvents.siteId, finalSiteIds),
+                      gte(initialEvents.timestamp, startDate),
+                      lte(initialEvents.timestamp, endDate)
+                  ))
+                  .orderBy(sql`${initialEvents.timestamp} DESC`), // Use sql`` for DESC
+                db.select()
+                  .from(events)
+                  .where(and(
+                      inArray(events.siteId, finalSiteIds),
+                      gte(events.timestamp, startDate),
+                      lte(events.timestamp, endDate)
+                  ))
+                  .orderBy(sql`${events.timestamp} DESC`) // Use sql`` for DESC
+            ]);
+            queryInitialEvents = auroraInitialEventsResult;
+            queryEvents = auroraEventsResult;
+            log(`Finished executing Aurora queries. Initial: ${queryInitialEvents.length}, Events: ${queryEvents.length}`);
 
-        // --- Construct SELECT Strings for Athena ---
-        const mapColumnToSelect = (colName: string): string => {
-            // Quote column names to handle reserved keywords or special characters
-            const quotedName = `"${colName.replace(/"/g, '""')}"`; // Prevent basic SQL injection in column names
-            // Cast JSON columns explicitly
-            if (['properties', 'user_properties', 'group_properties'].includes(colName)) {
-                 return `TRY_CAST(${quotedName} AS JSON) AS ${quotedName}`; // Use TRY_CAST for resilience
-            }
-            // Cast known numeric types if necessary for consistent output, otherwise just select
-             if (['value', 'session_duration'].includes(colName)) {
-                 return `TRY_CAST(${quotedName} AS DOUBLE) AS ${quotedName}`;
-             }
-            return quotedName;
-        };
+        } else {
+            // --- Query Athena using existing logic ---
+            log('Executing Athena queries...');
+            // Construct Filters for Athena
+            const dateFilterSql = `dt BETWEEN '${startDateFormat}' AND '${endDateFormat}'`; // Compare partition key as string
+            const siteIdFilterSql = `site_id IN (${finalSiteIds.map(id => `'${id.replace(/'/g, "''")}'`).join(', ')})`; // Basic SQL injection prevention for IDs
 
+            const commonSelectColNames = commonSchemaFields.map(s => s.name);
+            const initialOnlySelectColNames = initialOnlySchemaFields.map(s => s.name);
 
-        const eventsSelectCols = commonSelectColNames.map(mapColumnToSelect).join(', ');
-        const initialSelectCols = [...commonSelectColNames, ...initialOnlySelectColNames].map(mapColumnToSelect).join(', ');
+            // Construct SELECT Strings for Athena
+            const mapColumnToSelect = (colName: string): string => {
+                const quotedName = `"${colName.replace(/"/g, '""')}"`;
+                if (['properties', 'user_properties', 'group_properties'].includes(colName)) {
+                     return `TRY_CAST(${quotedName} AS JSON) AS ${quotedName}`;
+                }
+                 if (['value', 'session_duration'].includes(colName)) {
+                     return `TRY_CAST(${quotedName} AS DOUBLE) AS ${quotedName}`;
+                 }
+                return quotedName;
+            };
 
-        // --- Construct Queries for Iceberg Tables ---
-        // Limit is applied via GetQueryResults MaxResults, not in the SQL itself for better pagination handling by Athena SDK
-        const initialEventsQuery = `
+            const eventsSelectCols = commonSelectColNames.map(mapColumnToSelect).join(', ');
+            const initialSelectCols = [...commonSelectColNames, ...initialOnlySelectColNames].map(mapColumnToSelect).join(', ');
+
+            // Construct Queries for Iceberg Tables
+            const initialEventsQuery = `
 SELECT
     ${initialSelectCols}
 FROM "${Resource.GlueCatalogDatabase.name}"."${Resource.GlueCatalogTableinitial_events.name}"
 WHERE ${dateFilterSql} AND ${siteIdFilterSql}
 ORDER BY "timestamp" DESC
-        `;
+            `;
 
-        const eventsQuery = `
+            const eventsQuery = `
 SELECT
     ${eventsSelectCols}
 FROM "${Resource.GlueCatalogDatabase.name}"."${Resource.GlueCatalogTableevents.name}"
 WHERE ${dateFilterSql} AND ${siteIdFilterSql}
 ORDER BY "timestamp" DESC
-        `;
+            `;
 
-        // --- Execute Queries in Parallel ---
-        log('Executing queries in parallel...');
-        const [initialEventsResult, eventsResult] = await Promise.all([
-            executeAthenaQuery(initialEventsQuery, "Initial Events (Iceberg)"),
-            executeAthenaQuery(eventsQuery, "Events (Iceberg)")
-        ]);
+            // Execute Queries in Parallel
+            const [initialEventsResult, eventsResult] = await Promise.all([
+                executeAthenaQuery(initialEventsQuery, "Initial Events (Iceberg)"),
+                executeAthenaQuery(eventsQuery, "Events (Iceberg)")
+            ]);
+            queryInitialEvents = initialEventsResult.results;
+            queryEvents = eventsResult.results;
+            log(`Finished executing Athena queries. Initial: ${queryInitialEvents.length}, Events: ${queryEvents.length}`);
+        }
 
-        log(`Finished executing queries. Initial: ${initialEventsResult.results.length}, Events: ${eventsResult.results.length}`);
-
-        // Return results separately along with the schemas and nextToken
+        // Return results along with the schemas
         return {
             statusCode: 200,
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                initialEvents: initialEventsResult.results,
-                events: eventsResult.results,
+                initialEvents: queryInitialEvents,
+                events: queryEvents,
                 commonSchema: commonSchemaFields.map(({ name, type }) => ({ name, type })),
                 initialOnlySchema: initialOnlySchemaFields.map(({ name, type }) => ({ name, type })),
-                nextToken: null // Always null as we return all results
+                nextToken: null // Pagination not implemented in this version for simplicity across sources
             }),
         };
 
     } catch (error: any) {
-        console.error('Error in analytics query handler:', error);
+        console.error(`Error in analytics query handler (querying ${queryRecentData ? 'Aurora' : 'Athena'}):`, error);
         return {
             statusCode: 500,
             headers: { "Content-Type": "application/json" },
