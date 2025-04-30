@@ -13,9 +13,17 @@ declare module "sst" {
       "name": string
       "type": "sst.aws.Bucket"
     }
+    "CompactionFn": {
+      "name": string
+      "type": "sst.aws.Function"
+    }
     "Dashboard": {
       "type": "sst.aws.React"
       "url": string
+    }
+    "EventData": {
+      "name": string
+      "type": "sst.aws.Bucket"
     }
     "FirehoseStreamevents": {
       "name": string
@@ -51,12 +59,21 @@ declare module "sst" {
       "type": "sst.aws.ApiGatewayV2"
       "url": string
     }
+    "MyRouter": {
+      "type": "sst.aws.Router"
+      "url": string
+    }
     "PreferencesFn": {
       "name": string
       "type": "sst.aws.Function"
     }
     "PublicRouter": {
       "type": "sst.aws.Router"
+      "url": string
+    }
+    "QueryFn": {
+      "name": string
+      "type": "sst.aws.Function"
       "url": string
     }
     "QueryFn2": {

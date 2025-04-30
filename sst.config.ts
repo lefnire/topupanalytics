@@ -404,7 +404,11 @@ export default $config({
     });
     // === Router for Public Endpoints (Ingest + Dashboard) ===
     const router = new sst.aws.Router("PublicRouter", {
-      domain: isProd ? domain : undefined, // Use custom domain in prod
+      domain: isProd ? {
+        name: domain,
+        redirects: [`www.${domain}`],
+        // Add DNS config if needed: dns: sst.aws.dns({ zone: "YOUR_ZONE_ID" })
+      } : undefined,
     });
 
     // === API Functions (Defined before Router/API Gateway attachments) ===
@@ -415,8 +419,11 @@ export default $config({
       architecture: "arm64", // Use ARM
       // Keep URL enabled, but primary access is via Router route below
       url: {
-        cors: true,
-        // authorizer: "none"
+        cors: true, // Keep direct Function URL enabled with CORS if needed
+        router: { // Integrate with the router
+          instance: router,
+          path: "/api/events" // Expose this function at /api/events via the router
+        }
       },
       link: [
         firehoses.events,
@@ -537,11 +544,6 @@ export default $config({
     }
     // === API Gateway (for Authenticated Endpoints like /api/query) ===
     const api = new sst.aws.ApiGatewayV2("ManagementApi", {
-      domain: isProd
-        ? {
-            name: `api.${domain}`, // Suggest using a subdomain like api.* for management endpoints
-          }
-        : undefined,
       cors: {
         allowOrigins: isProd
           ? [`https://${domain}`]
@@ -579,12 +581,13 @@ export default $config({
       api.route("POST /api/stripe/checkout", stripeFn.arn, commonAuth); // Requires JWT auth
       api.route("GET /api/stripe/portal", stripeFn.arn, commonAuth); // Add portal route
     }
+    router.route("/api/*", api.url)
     // === Dashboard (React Frontend) ===
     const publicIngestUrl = $interpolate`${router.url}/api/event`; // Define before component
 
     // Build into public, which gets transfered too on deploy. This so we can test in dev
     // mode easily; don't need 2 vite build strategies (one for dev->public, deploy->dist)
-    new command.local.Command("BuildEmbedScripts", {
+    const buildEmbedScripts = new command.local.Command("BuildEmbedScripts", {
       // Keep running from root, but use absolute paths for input files
       create: $interpolate`npx esbuild ${process.cwd()}/dashboard/embed-script/src/topup-basic.ts ${process.cwd()}/dashboard/embed-script/src/topup-enhanced.ts ${process.cwd()}/dashboard/embed-script/src/topup-full.ts --bundle --format=iife --outdir=${process.cwd()}/dashboard/public --entry-names=[name].min --define:import.meta.env.VITE_PUBLIC_INGEST_URL='"${publicIngestUrl}"'`
     });
@@ -614,7 +617,7 @@ export default $config({
         VITE_USE_STRIPE: useStripe.toString(), // Add the flag
         VITE_PUBLIC_INGEST_URL: publicIngestUrl, // Ensure this still exists and uses the variable
       },
-    });
+    }, {dependsOn: [buildEmbedScripts]});
     // === Compaction Function & Cron (REMOVED - Iceberg handles auto-compaction) ===
     // Iceberg handles compaction. Manual OPTIMIZE via Athena might be needed occasionally if auto-compaction isn't sufficient.
     // Step 4: Conditional chargeProcessorFn and Cron
