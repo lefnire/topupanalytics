@@ -3,36 +3,7 @@
 ## Instructions
 This uses SST v3, which uses Pulumi under the hood - not CDK (SST v2). SST v3 adds a global variable `aws`, which is an augmented version of the `aws` you'd import from Pulumi. Never try to add imports to this file, always use the global `aws`, and assume it has what you'd need from Pulumi. If you need `aws-native` or other providers, assume those are global variables too and add a note to me to add that provider. SST also adds global `$` functions for Pulumi helpers, like `$interpolate`. Use those instead of Pulumi helpers.
 
-## Data Pipeline: Cost-Optimized & Scalable Analytics (S3/Glue/Firehose/Iceberg)
 
-The primary goal of this data pipeline is extreme cost-effectiveness and scalability, aiming to support a high volume of events and queries affordably. It uses a standard AWS serverless data lake architecture.
-
-## Architecture Overview
-
-1.  **Ingest:** Client -> Router (CloudFront) -> Lambda (`ingestFn`) -> Firehose (JSON)
-    *   Events hit the public Router endpoint (`/api/event`).
-    *   Router forwards to `ingestFn` Lambda.
-    *   `ingestFn` validates, adds server timestamp (`dt` as 'yyyy-MM-dd'), and sends the raw JSON payload to the appropriate Firehose stream (`eventsStream` or `initialEventsStream`).
-
-2.  **Delivery & Transformation:** Firehose (JSON -> Parquet) -> S3 (Partitioned Parquet)
-    *   Firehose uses **Data Format Conversion** to transform the incoming JSON into Apache Parquet format based on the target Glue table schema.
-    *   Firehose uses **Dynamic Partitioning** based on `site_id` and `dt` extracted from the JSON payload (via `processingConfiguration` with JQ).
-    *   Parquet files are written to the `analyticsDataBucket` in Hive-style partitions (e.g., `s3://<bucket>/events/site_id=abc/dt=2024-01-01/`).
-    *   S3 bucket uses Intelligent Tiering for cost optimization.
-
-3.  **Catalog:** S3 (Parquet) -> Glue Data Catalog (Iceberg Tables)
-    *   A Glue Database (`analyticsDatabase`) catalogs the tables.
-    *   Two Glue Tables (`eventsTable`, `initialEventsTable`) are defined with `tableType: ICEBERG`.
-    *   These tables point to the S3 base locations (`s3://<bucket>/events/`, `s3://<bucket>/initial_events/`) and define the schema and partitioning (`site_id`, `dt`).
-    *   The Glue Iceberg tables manage the metadata layer over the underlying Parquet files stored in S3 by Firehose.
-
-4.  **Query:** Dashboard -> API Gateway (`ManagementApi`) -> Lambda (`queryFn`) -> Athena
-    *   Dashboard calls authenticated `/api/query` endpoint.
-    *   `queryFn` Lambda constructs and runs Athena SQL queries against the Glue Iceberg tables.
-    *   Athena uses the Glue Catalog and Iceberg metadata to efficiently query the Parquet data in S3. Results are stored in `athenaResultsBucket`.
-
-5.  **Maintenance:** (Handled by Iceberg)
-    *   Iceberg manages small file compaction automatically. Manual `OPTIMIZE TABLE` via Athena might be run periodically if needed, but the automated compaction function (`CompactionFn`/`CompactionCron`) has been removed.
 
 */
 const domain = "topupanalytics.com";
@@ -54,6 +25,21 @@ export default $config({
     const partition = aws.getPartitionOutput({}).partition; // Needed for ARN construction
     // Define basename early and use consistently for resource naming
     const basename = `${$app.name}${$app.stage}`;
+
+    const vpc = new sst.aws.Vpc("MyVpc", {
+      az: 2
+    });
+    const database = new sst.aws.Aurora("MyDatabase", {
+      engine: "postgres",
+      vpc,
+      scaling: {
+        // open-source users: set this to 0 for cheaper hosting. Downside: it takes
+        // 15seconds to come online, so you'll need your own warm-start solution
+        min: "0.5 ACU",
+        max: "4 ACU"
+      },
+    });
+    const connectionString = $interpolate`postgresql://${database.username}:${database.password}@${database.host}:${database.port}/${database.database}`
 
     // === Linkable Wrappers (using global sst) ===
     // Wrap Kinesis Firehose Delivery Stream
@@ -212,6 +198,46 @@ export default $config({
         Service: "firehose.amazonaws.com",
       }),
     });
+
+    /*
+    Sample FirehoseDeliveryStream for HTTP. Wire it to an sst.aws.Function(..., {url: true}).url,
+    and just use one Firehose for the "just pass along" (the two below will remain for the
+    separate S3 buckets).
+
+    const testStream = new aws.kinesis.FirehoseDeliveryStream("test_stream", {
+      name: "kinesis-firehose-test-stream",
+      destination: "http_endpoint",
+      httpEndpointConfiguration: {
+          url: "https://aws-api.newrelic.com/firehose/v1",
+          name: "New Relic",
+          accessKey: "my-key",
+          bufferingSize: 15,
+          bufferingInterval: 600,
+          roleArn: firehose.arn,
+          s3BackupMode: "FailedDataOnly",
+          s3Configuration: {
+              roleArn: firehose.arn,
+              bucketArn: bucket.arn,
+              bufferingSize: 10,
+              bufferingInterval: 400,
+              compressionFormat: "GZIP",
+          },
+          requestConfiguration: {
+              contentEncoding: "GZIP",
+              commonAttributes: [
+                  {
+                      name: "testname",
+                      value: "testvalue",
+                  },
+                  {
+                      name: "testname2",
+                      value: "testvalue2",
+                  },
+              ],
+          },
+      },
+  });
+     */
 
     // Allow Firehose to write to S3 and access Glue (Updated for Iceberg)
     new aws.iam.RolePolicy(`FirehoseDeliveryPolicy`, {

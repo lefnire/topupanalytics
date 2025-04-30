@@ -1,5 +1,5 @@
 import { useContext, useCallback } from 'react';
-import { AuthContext } from '../contexts/AuthContext';
+import { AuthContext } from '~/contexts/AuthContext';
 import { fetchAuthSession } from 'aws-amplify/auth'; // Import fetchAuthSession
 
 const API_BASE_URL = import.meta.env.VITE_API_URL;
