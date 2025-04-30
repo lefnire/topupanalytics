@@ -73,17 +73,13 @@ const parseResults = (rows: Row[] | undefined): Record<string, any>[] => {
  */
 interface AthenaQueryResult {
     results: Record<string, any>[];
-    nextToken?: string;
 }
 
 async function executeAthenaQuery(
     queryString: string,
     queryName: string,
-    limit?: number,
-    nextToken?: string
 ): Promise<AthenaQueryResult> { // Updated return type
     log(`Executing ${queryName} Query:`, queryString);
-    log(`Pagination - Limit: ${limit}, NextToken: ${nextToken}`);
 
     const finalQuery = queryString.replace(/\\s*--.*$/gm, '').trim().replace(/;$/, '');
 
@@ -157,21 +153,32 @@ async function executeAthenaQuery(
             throw new Error(`${queryName} query did not succeed after ${attempts} attempts. Final state: ${queryState}`);
         }
 
-        // Fetch Results with Pagination
-        log(`${queryName} query succeeded. Fetching results...`);
-        const resultsInput: GetQueryResultsCommandInput = {
-            QueryExecutionId: queryExecutionId,
-            MaxResults: limit,
-            NextToken: nextToken
-        };
-        const resultsResponse: GetQueryResultsCommandOutput = await athenaClient.send(
-            new GetQueryResultsCommand(resultsInput)
-        );
-        const results = parseResults(resultsResponse.ResultSet?.Rows);
-        const responseNextToken = resultsResponse.NextToken;
+        // Fetch Results with Pagination Loop
+        log(`${queryName} query succeeded. Fetching all results...`);
+        const allResults: Record<string, any>[] = [];
+        let currentNextToken: string | undefined = undefined;
+        const maxResultsPerFetch = 1000; // Athena's max
 
-        log(`Fetched ${results.length} ${queryName} results. NextToken: ${responseNextToken}`);
-        return { results, nextToken: responseNextToken };
+        do {
+            const resultsInput: GetQueryResultsCommandInput = {
+                QueryExecutionId: queryExecutionId,
+                MaxResults: maxResultsPerFetch, // Use max allowed
+                NextToken: currentNextToken // Use token from previous fetch
+            };
+            log(`Fetching results page... NextToken: ${currentNextToken ?? 'start'}`);
+            const resultsResponse: GetQueryResultsCommandOutput = await athenaClient.send(
+                new GetQueryResultsCommand(resultsInput)
+            );
+            const pageResults = parseResults(resultsResponse.ResultSet?.Rows);
+            allResults.push(...pageResults);
+            currentNextToken = resultsResponse.NextToken;
+            log(`Fetched ${pageResults.length} results this page. Total: ${allResults.length}. More pages: ${!!currentNextToken}`);
+
+        } while (currentNextToken); // Continue while there's a next token
+
+
+        log(`Fetched a total of ${allResults.length} ${queryName} results.`);
+        return { results: allResults }; // Return all accumulated results
 
     } catch (error: any) {
         console.error(`Error executing ${queryName} Athena query (ID: ${queryExecutionId}):`, error);
@@ -236,8 +243,6 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     const rawStartDate = queryParams.startDate;
     const rawEndDate = queryParams.endDate;
     const rawSiteIds = queryParams.siteIds; // Comma-separated list
-    const rawLimit = queryParams.limit;
-    const nextToken = queryParams.nextToken; // Token for pagination
 
     // --- Parse and Validate Site IDs ---
     let requestedSiteIds: string[] | undefined;
@@ -305,26 +310,8 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     }
 
     const startDateFormat = format(startDate, 'yyyy-MM-dd');
-    // const endDateFormat = format(endDate, 'yyyy-MM-dd');
     const endDateFormat = format(new Date, 'yyyy-MM-dd');
     log(`Querying data from ${startDateFormat} to ${endDateFormat} for sites: ${finalSiteIds.join(', ')}`);
-
-    // --- Parse Limit ---
-    let limit: number | undefined = undefined;
-    const defaultLimit = 50; // Default page size
-    if (rawLimit) {
-        const parsedLimit = parseInt(rawLimit, 10);
-        if (!isNaN(parsedLimit) && parsedLimit > 0) {
-            limit = Math.min(parsedLimit, 1000); // Add a max limit safeguard
-        } else {
-            log(`Invalid limit value: ${rawLimit}. Using default ${defaultLimit}.`);
-            limit = defaultLimit;
-        }
-    } else {
-        limit = defaultLimit; // Use default if not provided
-    }
-    log(`Using limit: ${limit}`);
-
 
     // --- Construct Filters ---
     const dateFilterSql = `dt BETWEEN '${startDateFormat}' AND '${endDateFormat}'`; // Compare partition key as string
@@ -377,22 +364,13 @@ ORDER BY "timestamp" DESC
         `;
 
         // --- Execute Queries in Parallel ---
-        // Pass limit and nextToken to executeAthenaQuery
-        // Apply pagination to both queries. The overall nextToken will be determined later.
         log('Executing queries in parallel...');
         const [initialEventsResult, eventsResult] = await Promise.all([
-            executeAthenaQuery(initialEventsQuery, "Initial Events (Iceberg)", limit, nextToken),
-            executeAthenaQuery(eventsQuery, "Events (Iceberg)", limit, nextToken)
+            executeAthenaQuery(initialEventsQuery, "Initial Events (Iceberg)"),
+            executeAthenaQuery(eventsQuery, "Events (Iceberg)")
         ]);
 
         log(`Finished executing queries. Initial: ${initialEventsResult.results.length}, Events: ${eventsResult.results.length}`);
-        log(`NextTokens - Initial: ${initialEventsResult.nextToken}, Events: ${eventsResult.nextToken}`);
-
-        // Determine the overall nextToken. If either query returned one, use it.
-        // Prioritize the 'events' token if both exist, as it's the primary paginated source.
-        // This is a simplification; true combined pagination might require more complex logic
-        // (e.g., fetching from one, then the other if limit not met, managing separate tokens).
-        const responseNextToken = eventsResult.nextToken ?? initialEventsResult.nextToken;
 
         // Return results separately along with the schemas and nextToken
         return {
@@ -403,7 +381,7 @@ ORDER BY "timestamp" DESC
                 events: eventsResult.results,
                 commonSchema: commonSchemaFields.map(({ name, type }) => ({ name, type })),
                 initialOnlySchema: initialOnlySchemaFields.map(({ name, type }) => ({ name, type })),
-                nextToken: responseNextToken ?? null // Return null if no token
+                nextToken: null // Always null as we return all results
             }),
         };
 
