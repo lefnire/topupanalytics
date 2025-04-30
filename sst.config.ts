@@ -26,20 +26,6 @@ export default $config({
     // Define basename early and use consistently for resource naming
     const basename = `${$app.name}${$app.stage}`;
 
-    const vpc = new sst.aws.Vpc("MyVpc", {
-      az: 2
-    });
-    const database = new sst.aws.Aurora("MyDatabase", {
-      engine: "postgres",
-      vpc,
-      scaling: {
-        // open-source users: set this to 0 for cheaper hosting. Downside: it takes
-        // 15seconds to come online, so you'll need your own warm-start solution
-        min: "0.5 ACU",
-        max: "4 ACU"
-      },
-    });
-    const connectionString = $interpolate`postgresql://${database.username}:${database.password}@${database.host}:${database.port}/${database.database}`
 
     // === Linkable Wrappers (using global sst) ===
     // Wrap Kinesis Firehose Delivery Stream
@@ -180,7 +166,7 @@ export default $config({
             // lay out the data. This must match the dynamicPartitioning keys
             // we extract (site_id & dt).
             // @worked-before: "Cannot create partitions in an iceberg table"
-            partitionKeys: commonPartitionKeys,
+            // partitionKeys: commonPartitionKeys,
             openTableFormatInput: {
               icebergInput: {
                 metadataOperation: "CREATE", // Create the table metadata
