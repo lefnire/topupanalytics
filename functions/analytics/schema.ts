@@ -50,6 +50,8 @@ export interface SchemaField {
 
 /* ────────────────── ALWAYS-SAFE CORE (no banner, no policy) ────────────────── */
 export const commonSchema: SchemaField[] = [
+  { name: "site_id", type: "string", description: "Partition key: ID of the website", safe: "yes"},
+  { name: "dt",            type: "string",             description: "Partition key: Date of event ingest (YYYY-MM-DD).", safe: "yes" },
   { name: "event",           type: "string",             description: "Event key (e.g. 'page_view').",                         safe: "yes" },
   { name: "pathname",        type: "string",             description: "location.pathname.",                                   safe: "yes" },
   { name: "session_id",      type: "string",             description: "Ephemeral ID stored in sessionStorage or memory only.",safe: "yes" },

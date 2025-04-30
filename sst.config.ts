@@ -54,13 +54,7 @@ export default $config({
     const partition = aws.getPartitionOutput({}).partition; // Needed for ARN construction
     // Define basename early and use consistently for resource naming
     const basename = `${$app.name}${$app.stage}`;
-    // Placeholder values instead of sst.Secret.create
-    const DUMMY_STRIPE_SECRET_KEY_PLACEHOLDER =
-      "dummy_stripe_secret_key_placeholder";
-    const DUMMY_STRIPE_WEBHOOK_SECRET_PLACEHOLDER =
-      "dummy_stripe_webhook_secret_placeholder";
-    const DUMMY_STRIPE_PUBLISHABLE_KEY_PLACEHOLDER =
-      "dummy_stripe_publishable_key_placeholder";
+
     // === Linkable Wrappers (using global sst) ===
     // Wrap Kinesis Firehose Delivery Stream
     sst.Linkable.wrap(aws.kinesis.FirehoseDeliveryStream, (stream) => ({
@@ -114,16 +108,6 @@ export default $config({
       // name: `${basename}-analytics-data`, // Explicit name if needed, SST generates one
       // intelligentTiering: true, // ERROR: Not a valid property here. Apply lifecycle rule below.
     });
-    // === Secrets === Step 2: Use undefined for non-Stripe case
-    const STRIPE_SECRET_KEY = useStripe
-      ? new sst.Secret("StripeSecretKey")
-      : undefined;
-    const STRIPE_WEBHOOK_SECRET = useStripe
-      ? new sst.Secret("StripeWebhookSecret")
-      : undefined;
-    const STRIPE_PUBLISHABLE_KEY = useStripe
-      ? new sst.Secret("StripePublishableKey")
-      : undefined; // For frontend
     // === S3 Buckets ===
     const athenaResultsBucket = new sst.aws.Bucket("AthenaResults", {
       // name: `${basename}-athena-results`, // Use explicit, stage-specific name
@@ -154,14 +138,11 @@ export default $config({
       rules: intelligentTieringRule,
     });
     // === Glue Data Catalog ===
-    const glueCatalogDatabase = new aws.glue.CatalogDatabase(
-      `GlueCatalogDatabase`,
-      {
+    const glueCatalogDatabase = new aws.glue.CatalogDatabase(`GlueCatalogDatabase`, {
         name: `${basename}_db`, // Use explicit name, underscores only
-        // Point location to a logical path within the S3 Table Bucket for organization
-        // locationUri is not typically needed for Glue DB, especially with Iceberg tables managing their own locations.
-      },
-    );
+      // Point location to a logical path within the S3 Table Bucket for organization
+      // locationUri is not typically needed for Glue DB, especially with Iceberg tables managing their own locations.
+    },);
     // Import schemas for both tables
     const { initialGlueColumns, eventsGlueColumns } = await import(
       "./functions/analytics/schema"
@@ -190,8 +171,12 @@ export default $config({
             databaseName: glueCatalogDatabase.name,
             tableType: "EXTERNAL_TABLE", // Required for Iceberg format
             parameters: {
-              table_type: "ICEBERG", // Identify as Iceberg
+              // @worked-before: Now it says "Cannot use reserved parameters table_type while creating an iceberg tble"
+              // table_type: "ICEBERG", // Identify as Iceberg
+              // @terraform-example - excluded
               classification: "iceberg", // Can also be parquet if Firehose converts first
+              // @terraform-example - included
+              // format: "parquet",
               // "lakeformation.governed": "true", // *** VITAL: Indicate LF governance
               // Add other relevant parameters if needed
               // "write.parquet.compression-codec": "snappy", // Example: Set Parquet compression if needed (Firehose handles it here)
@@ -202,10 +187,14 @@ export default $config({
               columns: glueColumns[tableName], // Schema from import
               // SerDe, InputFormat, OutputFormat are generally NOT needed for Glue Iceberg tables
               // Glue uses the Iceberg metadata layer.
-              compressed: false, // Compression handled by Parquet/Iceberg writers
-              storedAsSubDirectories: false, // Iceberg manages its own directory structure
+              // compressed: false, // Compression handled by Parquet/Iceberg writers
+              // storedAsSubDirectories: false, // Iceberg manages its own directory structure
             },
-            partitionKeys: commonPartitionKeys, // Define partition keys directly on the table
+            // Define partition keys so Firehose & Iceberg know how to physically
+            // lay out the data. This must match the dynamicPartitioning keys
+            // we extract (site_id & dt).
+            // @worked-before: "Cannot create partitions in an iceberg table"
+            // partitionKeys: commonPartitionKeys,
             openTableFormatInput: {
               icebergInput: {
                 metadataOperation: "CREATE", // Create the table metadata
@@ -286,84 +275,64 @@ export default $config({
     const firehoses = Object.fromEntries(
       tableNames.map((tableName) => {
         const glueTable = glueTables[tableName]; // Get the specific Glue table resource
+        const firehoseName = `${basename}-firehose-${tableName}`; // Define name once
+
         return [
           tableName, // Keep original key for mapping
           new aws.kinesis.FirehoseDeliveryStream(`FirehoseStream${tableName}`, {
-            name: `${basename}-firehose-${tableName}`, // Use explicit, stage-specific name
-            destination: "extended_s3", // Use extended_s3 destination
+            name: firehoseName, // Use explicit, stage-specific name
+            // --- Key Change: Specify 'iceberg' destination ---
+            destination: "iceberg",
             tags: {
               Environment: $app.stage,
               Project: $app.name,
               Table: tableName,
             },
-            // Buffering hints removed due to persistent TS errors
-            extendedS3Configuration: {
-              roleArn: firehoseDeliveryRole.arn,
-              bucketArn: analyticsDataBucket.arn, // Use the new bucket ARN
-              bufferingInterval: 60,
-              bufferingSize: 64,
-              // Buffering hints removed from here
-              // Data Format Conversion: JSON -> Parquet using Glue schema
-              dataFormatConversionConfiguration: {
-                enabled: true,
-                inputFormatConfiguration: {
-                  deserializer: { openXJsonSerDe: {} }, // Input is JSON
-                },
-                outputFormatConfiguration: {
-                  serializer: { parquetSerDe: {} }, // Output is Parquet
-                },
-                schemaConfiguration: {
+
+            // --- Use 'icebergConfiguration' based on the example ---
+            icebergConfiguration: {
+              roleArn: firehoseDeliveryRole.arn, // Role Firehose assumes for access
+
+              // --- Catalog Identification using ARN (as per example) ---
+              catalogArn: $interpolate`arn:${partition}:glue:${region}:${accountId}:catalog`,
+
+              // --- Buffering Hints (Directly under icebergConfiguration) ---
+              bufferingInterval: 60, // Seconds (e.g., 60-900)
+              bufferingSize: 64, // MBs (e.g., 64-128)
+
+              // --- S3 Configuration (Nested) ---
+              // @terraform-example - entire s3Configuration section  excluded
+              // https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kinesis_firehose_delivery_stream#iceberg-destination
+              s3Configuration: {
+                // Role ARN seems required here too, even if same as top-level
+                roleArn: firehoseDeliveryRole.arn,
+                bucketArn: analyticsDataBucket.arn, // Bucket where Iceberg data/metadata resides
+
+                // CloudWatch logging (Remains inside s3Configuration)
+                // cloudwatchLoggingOptions: {
+                //   enabled: true,
+                //   logGroupName: $interpolate`/aws/kinesisfirehose/${firehoseName}`, // Use consistent naming
+                //   logStreamName: "IcebergDelivery", // Specific stream name
+                // },
+
+                // Error output (Remains inside s3Configuration)
+                // Using a pattern similar to the example's error structure
+                errorOutputPrefix: $interpolate`iceberg-errors/${tableName}/result=!{firehose:error-output-type}/!{timestamp:yyyy/MM/dd}/!{firehose:random-string}/`,
+              },
+
+              // --- Destination Table Config (as per example) ---
+              // Defines the specific Glue database and table target
+              destinationTableConfigurations: [{
                   databaseName: glueCatalogDatabase.name,
                   tableName: glueTable.name,
-                  roleArn: firehoseDeliveryRole.arn, // Role needs access to Glue schema
-                },
-              },
-              // Dynamic Partitioning based on site_id and dt from JSON payload
-              dynamicPartitioningConfiguration: {
-                enabled: true,
-                // retryOptions removed due to persistent TS errors
-              },
-              // Retry options removed from here
-              // S3 Prefix using dynamic partitioning keys (Hive-style)
-              prefix: $interpolate`${tableName}/site_id=!{partitionKeyFromQuery:site_id}/dt=!{partitionKeyFromQuery:dt}/`,
-              // Error output prefix
-              errorOutputPrefix: $interpolate`firehose-errors/${tableName}/!{firehose:error-output-type}/!{timestamp:yyyy/MM/dd/HH}/`,
-              // CloudWatch logging (optional but recommended)
-              cloudwatchLoggingOptions: {
-                enabled: true,
-                logGroupName: $interpolate`/aws/kinesisfirehose/${basename}-firehose-${tableName}`, // Match name pattern
-                logStreamName: "S3Delivery",
-              },
-              // JQ Processing for extracting partition keys
-              // This configuration enables Firehose to extract 'site_id' and 'dt'
-              // from the incoming JSON records using JQ, making them available
-              // for dynamic partitioning via !{partitionKeyFromQuery:...} in the prefix.
-              processingConfiguration: {
-                enabled: true,
-                processors: [
-                  {
-                    type: "MetadataExtraction",
-                    parameters: [
-                      // JQ query to extract the required fields for partitioning
-                      {
-                        parameterName: "MetadataExtractionQuery",
-                        parameterValue: "{site_id:.site_id, dt:.dt}",
-                      },
-                      // Specify the JSON parsing engine
-                      {
-                        parameterName: "JsonParsingEngine",
-                        parameterValue: "JQ-1.6",
-                      },
-                    ],
-                  },
-                ],
-              },
+              }],
             },
-            // Retry options removed from top level
           }),
         ];
       }),
     ) as Record<TableName, aws.kinesis.FirehoseDeliveryStream>; // Type assertion
+
+
     // === Cognito User Pool (Using SST Component) ===
     const userPool = new sst.aws.CognitoUserPool("UserPool", {
       usernames: ["email"],
@@ -389,6 +358,15 @@ export default $config({
       // transform can be used here if needed for specific client settings
       // transform: { client: (args) => { ... }}
     });
+
+    // Placeholder values instead of sst.Secret.create
+    const DUMMY_STRIPE_SECRET_KEY_PLACEHOLDER = "dummy_stripe_secret_key_placeholder";
+    const DUMMY_STRIPE_WEBHOOK_SECRET_PLACEHOLDER = "dummy_stripe_webhook_secret_placeholder";
+    const DUMMY_STRIPE_PUBLISHABLE_KEY_PLACEHOLDER = "dummy_stripe_publishable_key_placeholder";
+    const STRIPE_SECRET_KEY = useStripe ? new sst.Secret("StripeSecretKey") : undefined;
+    const STRIPE_WEBHOOK_SECRET = useStripe ? new sst.Secret("StripeWebhookSecret") : undefined;
+    const STRIPE_PUBLISHABLE_KEY = useStripe ? new sst.Secret("StripePublishableKey") : undefined; // For frontend
+
     // === DynamoDB Tables ===
     const sitesTable = new sst.aws.Dynamo("SitesTable", {
       // name: `${basename}-sites`, // Explicit name
@@ -414,6 +392,7 @@ export default $config({
     const router = new sst.aws.Router("PublicRouter", {
       domain: isProd ? domain : undefined, // Use custom domain in prod
     });
+
     // === API Functions (Defined before Router/API Gateway attachments) ===
     const ingestFn = new sst.aws.Function("IngestFn", {
       handler: "functions/analytics/ingest.handler",
@@ -440,7 +419,8 @@ export default $config({
       ],
     });
     router.route("/api/event", ingestFn.url);
-    const queryFn = new sst.aws.Function("QueryFn", {
+
+    const queryFn = new sst.aws.Function("QueryFn2", {
       handler: "functions/analytics/query.handler",
       timeout: "60 second",
       memory: "512 MB",
@@ -480,7 +460,7 @@ export default $config({
             "s3:GetBucketLocation",
             "s3:DeleteObject",
           ],
-          resources: [athenaResultsBucket.arn, `${athenaResultsBucket.arn}/*`],
+          resources: [athenaResultsBucket.arn, $interpolate`${athenaResultsBucket.arn}/*`],
         },
         // S3 permissions for reading analytics data are handled by linking analyticsDataBucket
         // DynamoDB permissions are handled by linking sitesTable and userPreferencesTable
@@ -620,10 +600,6 @@ export default $config({
         VITE_USE_STRIPE: useStripe.toString(), // Add the flag
         VITE_PUBLIC_INGEST_URL: publicIngestUrl, // Ensure this still exists and uses the variable
       },
-      // dev: { // Add dev config
-      //    deploy: true, // Deploy frontend during dev
-      //    // url: "http://localhost:5173" // Optional: if your local dev server URL is different
-      // }
     });
     // === Compaction Function & Cron (REMOVED - Iceberg handles auto-compaction) ===
     // Iceberg handles compaction. Manual OPTIMIZE via Athena might be needed occasionally if auto-compaction isn't sufficient.

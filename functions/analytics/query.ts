@@ -326,7 +326,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
 
 
     // --- Construct Filters ---
-    const dateFilterSql = `CAST(dt AS DATE) BETWEEN DATE '${startDateFormat}' AND DATE '${endDateFormat}'`;
+    const dateFilterSql = `dt BETWEEN '${startDateFormat}' AND '${endDateFormat}'`; // Compare partition key as string
     // Use the final filtered list of site IDs
     const siteIdFilterSql = `site_id IN (${finalSiteIds.map(id => `'${id.replace(/'/g, "''")}'`).join(', ')})`; // Basic SQL injection prevention for IDs
 

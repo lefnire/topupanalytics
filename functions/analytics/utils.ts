@@ -1,7 +1,7 @@
 import {createHash} from 'crypto';
 
 // don't log in production
-const LOG = process.env.SST_STAGE === 'lefnire'
+const LOG = true; process.env.SST_STAGE === 'lefnire'
 export function log (...args) {
   if (!LOG) {return;}
   console.log(...args)
