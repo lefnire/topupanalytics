@@ -411,36 +411,6 @@ export default $config({
       } : undefined,
     });
 
-    // === API Functions (Defined before Router/API Gateway attachments) ===
-    const ingestFn = new sst.aws.Function("IngestFn", {
-      handler: "functions/analytics/ingest.handler",
-      timeout: "10 second",
-      memory: "128 MB",
-      architecture: "arm64", // Use ARM
-      // Keep URL enabled, but primary access is via Router route below
-      url: {
-        cors: true, // Keep direct Function URL enabled with CORS if needed
-        router: { // Integrate with the router
-          instance: router,
-          path: "/event" // Expose this function at /api/events via the router
-        }
-      },
-      link: [
-        firehoses.events,
-        firehoses.initial_events,
-        sitesTable,
-        userPreferencesTable, // Link the user preferences table
-      ],
-      environment: {
-        USE_STRIPE: useStripe.toString(),
-        // Resource properties (names, ARNs) are available via Resource.* in function code
-      },
-      permissions: [
-        // Permissions for linked resources (Firehose, DynamoDB) are handled by linking
-      ],
-    });
-    // router.route("/api/event", ingestFn.url);
-
     const queryFn = new sst.aws.Function("QueryFn2", {
       handler: "functions/analytics/query.handler",
       timeout: "60 second",
@@ -598,6 +568,7 @@ export default $config({
       // Attach dashboard to the root of the public Router
       router: {
         instance: router,
+        path: "/"
         // path defaults to "/*" when attaching a site like this
       },
       link: [
@@ -649,6 +620,38 @@ export default $config({
         function: chargeProcessorFn.arn, // Trigger the charge processor function ARN
       });
     }
+
+    // === API Functions (Defined before Router/API Gateway attachments) ===
+    // Comes last for the /api/event override
+    const ingestFn = new sst.aws.Function("IngestFn", {
+      handler: "functions/analytics/ingest.handler",
+      timeout: "10 second",
+      memory: "128 MB",
+      architecture: "arm64", // Use ARM
+      // Keep URL enabled, but primary access is via Router route below
+      url: {
+        cors: true, // Keep direct Function URL enabled with CORS if needed
+        router: { // Integrate with the router
+          instance: router,
+          path: "/api/event" // Expose this function at /api/events via the router
+        }
+      },
+      link: [
+        firehoses.events,
+        firehoses.initial_events,
+        sitesTable,
+        userPreferencesTable, // Link the user preferences table
+      ],
+      environment: {
+        USE_STRIPE: useStripe.toString(),
+        // Resource properties (names, ARNs) are available via Resource.* in function code
+      },
+      permissions: [
+        // Permissions for linked resources (Firehose, DynamoDB) are handled by linking
+      ],
+    });
+    // router.route("/api/event", ingestFn.url);
+
     // === Outputs ===
     return {
       appName: $app.name,
