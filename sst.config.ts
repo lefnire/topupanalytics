@@ -422,7 +422,7 @@ export default $config({
         cors: true, // Keep direct Function URL enabled with CORS if needed
         router: { // Integrate with the router
           instance: router,
-          path: "/api/events" // Expose this function at /api/events via the router
+          path: "/event" // Expose this function at /api/events via the router
         }
       },
       link: [
@@ -439,7 +439,7 @@ export default $config({
         // Permissions for linked resources (Firehose, DynamoDB) are handled by linking
       ],
     });
-    router.route("/api/event", ingestFn.url);
+    // router.route("/api/event", ingestFn.url);
 
     const queryFn = new sst.aws.Function("QueryFn2", {
       handler: "functions/analytics/query.handler",
