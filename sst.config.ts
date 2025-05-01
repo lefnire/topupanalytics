@@ -5,6 +5,7 @@ This uses SST v3, which uses Pulumi under the hood - not CDK (SST v2). SST v3 ad
 
 
 
+
 */
 const domain = "topupanalytics.com";
 export default $config({
@@ -281,10 +282,7 @@ export default $config({
       }`,
     });
     // === Lake Formation Permissions REMOVED ===
-    // Lake Formation is not required for this standard S3/Glue/Firehose setup.
-    // Standard IAM permissions on the Firehose role are sufficient.
     // === Kinesis Data Firehose Delivery Streams ===
-    // Configure destination: "extended_s3" with data format conversion and dynamic partitioning
     const firehoses = Object.fromEntries(
       tableNames.map((tableName) => {
         const glueTable = glueTables[tableName]; // Get the specific Glue table resource
@@ -345,8 +343,6 @@ export default $config({
       }),
     ) as Record<TableName, aws.kinesis.FirehoseDeliveryStream>; // Type assertion
 
-
-
     // === Cognito User Pool (Using SST Component) ===
     const userPool = new sst.aws.CognitoUserPool("UserPool", {
       usernames: ["email"],
@@ -369,8 +365,6 @@ export default $config({
     });
     const userPoolClientSst = userPool.addClient("UserPoolClient", {
       // name: `${basename}-web-client`, // Explicit name
-      // transform can be used here if needed for specific client settings
-      // transform: { client: (args) => { ... }}
     });
 
     // Placeholder values instead of sst.Secret.create
@@ -383,7 +377,6 @@ export default $config({
 
     // === DynamoDB Tables ===
     const sitesTable = new sst.aws.Dynamo("SitesTable", {
-      // name: `${basename}-sites`, // Explicit name
       fields: {
         site_id: "string",
         owner_sub: "string",
@@ -396,7 +389,6 @@ export default $config({
       },
     });
     const userPreferencesTable = new sst.aws.Dynamo("UserPreferencesTable", {
-      // name: `${basename}-user-preferences`, // Explicit name
       fields: {
         cognito_sub: "string",
       },
@@ -407,31 +399,35 @@ export default $config({
       domain: isProd ? {
         name: domain,
         redirects: [`www.${domain}`],
-        // Add DNS config if needed: dns: sst.aws.dns({ zone: "YOUR_ZONE_ID" })
       } : undefined,
     });
 
-    const queryFn = new sst.aws.Function("QueryFn2", {
-      handler: "functions/analytics/query.handler",
-      timeout: "60 second",
-      memory: "512 MB",
-      architecture: "arm64", // Use ARM
-      // NOTE: queryFn is NOT attached to the public Router
+    // === Consolidated Management API Function ===
+    const mainApiFn = new sst.aws.Function("mainApiFn", {
+      handler: "functions/api/main.handler", // New handler location
+      timeout: "60 second", // Max timeout from merged functions
+      memory: "512 MB", // Max memory from merged functions
+      architecture: "arm64", // Consistent architecture
       link: [
-        glueCatalogDatabase, // Link DB
-        glueTables.events, // Link events Glue Table
-        glueTables.initial_events, // Link initial_events Glue Table
-        athenaResultsBucket, // Link results bucket
-        analyticsDataBucket, // Link the data bucket
+        // Merged links
+        glueCatalogDatabase,
+        glueTables.events,
+        glueTables.initial_events,
+        athenaResultsBucket,
+        analyticsDataBucket,
         sitesTable,
         userPreferencesTable,
+        router, // For ROUTER_URL env var
+        // Conditional Stripe links
+        ...(useStripe ? [STRIPE_SECRET_KEY!, STRIPE_WEBHOOK_SECRET!] : []),
       ],
       environment: {
-        // Resource properties (names, ARNs) are available via Resource.* in function code
+        // Merged environment variables
         USE_STRIPE: useStripe.toString(),
+        ROUTER_URL: router.url,
       },
       permissions: [
-        // Athena execution permissions (cannot be fully handled by linking specific resources)
+        // Primarily Athena permissions from original queryFn
         {
           actions: [
             "athena:StartQueryExecution",
@@ -441,8 +437,7 @@ export default $config({
           ],
           resources: ["*"],
         },
-        // Glue permissions are handled by linking Glue DB/Tables
-        // S3 permissions for Athena results bucket (Keep explicit as linking might not cover all Athena/S3 nuances)
+        // S3 permissions for Athena results bucket (kept for clarity)
         {
           actions: [
             "s3:PutObject",
@@ -453,221 +448,179 @@ export default $config({
           ],
           resources: [athenaResultsBucket.arn, $interpolate`${athenaResultsBucket.arn}/*`],
         },
-        // S3 permissions for reading analytics data are handled by linking analyticsDataBucket
-        // DynamoDB permissions are handled by linking sitesTable and userPreferencesTable
-      ],
+        // Other permissions (Glue, DynamoDB, S3 analytics) are handled by linking
+      ]
     });
-    // === Management API Functions ===
-    const sitesFn = new sst.aws.Function("SitesFn", {
-      handler: "functions/api/sites.handler",
-      timeout: "10 second",
-      memory: "128 MB",
-      architecture: "arm64", // Use ARM
-      link: [sitesTable, router], // Link router to get URL
-      environment: {
-        ROUTER_URL: router.url, // Pass the base router URL
-        USE_STRIPE: useStripe.toString(), // Step 7: Add USE_STRIPE
-      },
-      nodejs: {
-        install: ["ulid"], // Add ulid dependency
-      },
-    });
-    const preferencesFn = new sst.aws.Function("PreferencesFn", {
-      handler: "functions/api/preferences.handler",
-      timeout: "10 second",
-      memory: "128 MB",
-      architecture: "arm64", // Use ARM
-      link: [userPreferencesTable], // Link preferences table
-      permissions: [
-        // Permissions for linked resources (DynamoDB) are handled by linking
-      ],
-      environment: {
-        USE_STRIPE: useStripe.toString(),
-        // Resource properties (names, ARNs) are available via Resource.* in function code
-      },
-    });
-    // Step 3: Conditional stripeFn
+
+    // === Stripe Webhook Function (Conditional) ===
     let stripeFn: sst.aws.Function | undefined;
     if (useStripe) {
+      // Keep stripeFn definition ONLY for the webhook if useStripe is true
       stripeFn = new sst.aws.Function("StripeFn", {
-        handler: "functions/api/stripe.handler",
-        timeout: "10 second",
-        memory: "128 MB",
-        architecture: "arm64", // Use ARM
+        handler: "functions/api/stripe.handler", // Handler remains the same, but will only receive webhook events
+        timeout: "10 second", // Original timeout
+        memory: "128 MB", // Original memory
+        architecture: "arm64", // Original architecture
         link: [
-          STRIPE_SECRET_KEY!, // Use non-null assertion as we are inside the if block
-          STRIPE_WEBHOOK_SECRET!, // Use non-null assertion
-          userPreferencesTable, // Link for customer ID lookup/storage
-          sitesTable, // Link for subscription ID/plan update
+          // ONLY link the webhook secret, as this function now *only* handles the webhook
+          STRIPE_WEBHOOK_SECRET!,
         ],
         environment: {
+          // Only need the USE_STRIPE flag if the handler logic depends on it
           USE_STRIPE: useStripe.toString(),
-          // Resource properties (names, ARNs) are available via Resource.* in function code
         },
-        permissions: [
-          // Permissions for linked resources (DynamoDB) are handled by linking
-        ],
         nodejs: {
-          install: ["stripe"], // Ensure stripe SDK is bundled if not already in root package.json
+          // Still need the stripe SDK for webhook verification/handling
+          install: ["stripe"],
         },
+        // No explicit permissions needed beyond what linking provides for the secret
       });
     }
-    // === API Gateway (for Authenticated Endpoints like /api/query) ===
+
+    // === API Gateway (for Authenticated Endpoints) ===
     const api = new sst.aws.ApiGatewayV2("ManagementApi", {
+      // cors: true
       cors: {
         allowOrigins: isProd
           ? [`https://${domain}`]
-          : ["http://localhost:5173", "http://127.0.0.1:5173"], // Adjust port if needed
-        allowCredentials: true, // Allow credentials (needed for JWT)
+          : ["http://localhost:5173"],
+        allowCredentials: true,
         allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"], // Allow necessary methods
-        allowHeaders: ["Content-Type", "Authorization"], // Allow standard headers + Auth
+        allowHeaders: ["*"], // Allow standard headers + Auth
       },
     });
-    // Define JWT Authorizer (Using SST User Pool and Client)
+    // Define JWT Authorizer
     const jwtAuthorizer = api.addAuthorizer({
       name: "jwtAuth",
       jwt: {
         issuer: $interpolate`https://cognito-idp.${region}.amazonaws.com/${userPool.id}`,
-        audiences: [userPoolClientSst.id], // Use the ID from the SST client object
+        audiences: [userPoolClientSst.id],
       },
     });
-    // Define common auth config once
+    // Define common auth config
     const commonAuth = { auth: { jwt: { authorizer: jwtAuthorizer.id } } };
-    // === Management API Routes (Using Function ARNs for explicit definition) ===
-    // Use object syntax for route definition for clarity
-    api.route("GET /api/query", queryFn.arn, commonAuth);
-    api.route("POST /api/sites", sitesFn.arn, commonAuth);
-    api.route("GET /api/sites", sitesFn.arn, commonAuth);
-    api.route("GET /api/sites/{site_id}", sitesFn.arn, commonAuth);
-    api.route("PUT /api/sites/{site_id}", sitesFn.arn, commonAuth);
-    api.route("DELETE /api/sites/{site_id}", sitesFn.arn, commonAuth);
-    api.route("GET /api/sites/{site_id}/script", sitesFn.arn, commonAuth);
-    api.route("GET /api/user/preferences", preferencesFn.arn, commonAuth);
-    api.route("PUT /api/user/preferences", preferencesFn.arn, commonAuth);
+
+    // === Management API Routes (Consolidated) ===
+    api.route("GET /api/query", mainApiFn.arn, commonAuth);
+    api.route("POST /api/sites", mainApiFn.arn, commonAuth);
+    api.route("GET /api/sites", mainApiFn.arn, commonAuth);
+    api.route("GET /api/sites/{site_id}", mainApiFn.arn, commonAuth);
+    api.route("PUT /api/sites/{site_id}", mainApiFn.arn, commonAuth);
+    api.route("DELETE /api/sites/{site_id}", mainApiFn.arn, commonAuth);
+    api.route("GET /api/sites/{site_id}/script", mainApiFn.arn, commonAuth);
+    api.route("GET /api/user/preferences", mainApiFn.arn, commonAuth);
+    api.route("PUT /api/user/preferences", mainApiFn.arn, commonAuth);
     // Step 5: Conditional Stripe API Routes
     if (useStripe && stripeFn) {
       // Check stripeFn exists
       api.route("POST /api/stripe/webhook", stripeFn.arn); // NO auth needed
-      api.route("POST /api/stripe/checkout", stripeFn.arn, commonAuth); // Requires JWT auth
-      api.route("GET /api/stripe/portal", stripeFn.arn, commonAuth); // Add portal route
+      api.route("POST /api/stripe/checkout", mainApiFn.arn, commonAuth); // Requires JWT auth
+      api.route("GET /api/stripe/portal", mainApiFn.arn, commonAuth); // Add portal route
     }
     router.route("/api/*", api.url)
+
     // === Dashboard (React Frontend) ===
-    const publicIngestUrl = $interpolate`${router.url}/api/event`; // Define before component
+    const publicIngestUrl = $interpolate`${router.url}/api/event`;
 
     // Build into public, which gets transfered too on deploy. This so we can test in dev
     // mode easily; don't need 2 vite build strategies (one for dev->public, deploy->dist)
     const buildEmbedScripts = new command.local.Command("BuildEmbedScripts", {
-      // Keep running from root, but use absolute paths for input files
       create: $interpolate`npx esbuild ${process.cwd()}/dashboard/embed-script/src/topup-basic.ts ${process.cwd()}/dashboard/embed-script/src/topup-enhanced.ts ${process.cwd()}/dashboard/embed-script/src/topup-full.ts --bundle --format=iife --outdir=${process.cwd()}/dashboard/public --entry-names=[name].min --define:import.meta.env.VITE_PUBLIC_INGEST_URL='"${publicIngestUrl}"'`
     });
 
-
     const dashboard = new sst.aws.React("Dashboard", {
       path: "dashboard/",
-      // Attach dashboard to the root of the public Router
       router: {
         instance: router,
         path: "/"
-        // path defaults to "/*" when attaching a site like this
       },
       link: [
         api,
-        userPool, // Link the SST UserPool component
-        userPoolClientSst, // Link the SST UserPoolClient object
+        userPool,
+        userPoolClientSst,
       ],
       environment: {
-        VITE_COGNITO_USER_POOL_ID: userPool.id, // Use ID from SST component
-        VITE_COGNITO_CLIENT_ID: userPoolClientSst.id, // Use ID from SST client object
+        VITE_COGNITO_USER_POOL_ID: userPool.id,
+        VITE_COGNITO_CLIENT_ID: userPoolClientSst.id,
         VITE_AWS_REGION: region,
         VITE_API_URL: api.url,
-        VITE_APP_URL: router.url, // App URL is the router URL
+        VITE_APP_URL: router.url,
         VITE_STRIPE_PUBLISHABLE_KEY: useStripe
           ? STRIPE_PUBLISHABLE_KEY!.value
-          : DUMMY_STRIPE_PUBLISHABLE_KEY_PLACEHOLDER, // Correct: Use real value or placeholder string
-        VITE_USE_STRIPE: useStripe.toString(), // Add the flag
-        VITE_PUBLIC_INGEST_URL: publicIngestUrl, // Ensure this still exists and uses the variable
+          : DUMMY_STRIPE_PUBLISHABLE_KEY_PLACEHOLDER,
+        VITE_USE_STRIPE: useStripe.toString(),
+        VITE_PUBLIC_INGEST_URL: publicIngestUrl,
       },
     }, {dependsOn: [buildEmbedScripts]});
-    // === Compaction Function & Cron (REMOVED - Iceberg handles auto-compaction) ===
-    // Iceberg handles compaction. Manual OPTIMIZE via Athena might be needed occasionally if auto-compaction isn't sufficient.
-    // Step 4: Conditional chargeProcessorFn and Cron
+
+    // === Billing Charge Processor (Conditional) ===
     let chargeProcessorFn: sst.aws.Function | undefined;
     if (useStripe) {
       chargeProcessorFn = new sst.aws.Function("ChargeProcessorFn", {
         handler: "functions/billing/chargeProcessor.handler",
-        timeout: "60 second", // Allow time for Stripe API calls and DB updates
+        timeout: "60 second",
         memory: "256 MB",
-        architecture: "arm64", // Use ARM
+        architecture: "arm64",
         link: [
           sitesTable,
           userPreferencesTable,
-          STRIPE_SECRET_KEY!, // Correct: Use non-null assertion
+          STRIPE_SECRET_KEY!,
         ],
         environment: {
           USE_STRIPE: useStripe.toString(),
-          // Resource properties (names, ARNs) are available via Resource.* in function code
         },
-        permissions: [
-          // Permissions for linked resources (DynamoDB) are handled by linking
-        ],
         nodejs: {
-          install: ["stripe", "@aws-sdk/client-dynamodb"], // Add necessary SDKs
+          install: ["stripe", "@aws-sdk/client-dynamodb"],
         },
       });
       new sst.aws.Cron("ChargeCron", {
-        schedule: "rate(5 minutes)", // Adjust schedule as needed
-        function: chargeProcessorFn.arn, // Trigger the charge processor function ARN
+        schedule: "rate(5 minutes)",
+        function: chargeProcessorFn.arn,
       });
     }
 
-    // === API Functions (Defined before Router/API Gateway attachments) ===
-    // Comes last for the /api/event override
+    // === Ingest Function (Remains Separate) ===
     const ingestFn = new sst.aws.Function("IngestFn", {
       handler: "functions/analytics/ingest.handler",
       timeout: "10 second",
       memory: "128 MB",
-      architecture: "arm64", // Use ARM
-      // Keep URL enabled, but primary access is via Router route below
+      architecture: "arm64",
       url: {
-        cors: true, // Keep direct Function URL enabled with CORS if needed
-        router: { // Integrate with the router
+        cors: true,
+        router: {
           instance: router,
-          path: "/api/event" // Expose this function at /api/events via the router
+          path: "/api/event" // Expose via router at /api/event
         }
       },
       link: [
         firehoses.events,
         firehoses.initial_events,
         sitesTable,
-        userPreferencesTable, // Link the user preferences table
+        userPreferencesTable,
       ],
       environment: {
         USE_STRIPE: useStripe.toString(),
-        // Resource properties (names, ARNs) are available via Resource.* in function code
       },
-      permissions: [
-        // Permissions for linked resources (Firehose, DynamoDB) are handled by linking
-      ],
     });
-    // router.route("/api/event", ingestFn.url);
 
-    // === Outputs ===
+    // === Outputs (Updated) ===
     return {
       appName: $app.name,
-      stage: $app.stage, // Add stage output
+      stage: $app.stage,
       accountId: accountId,
-      region: region, // Add region output
-      dashboardUrl: router.url, // Use router URL for dashboard access
-      managementApiUrl: api.url, // Rename output for clarity
-      publicIngestUrl: publicIngestUrl, // Construct ingest URL from router
+      region: region,
+      dashboardUrl: router.url,
+      managementApiUrl: api.url,
+      publicIngestUrl: publicIngestUrl,
       ingestFunctionName: ingestFn.name,
-      queryFunctionName: queryFn.name,
+      // Removed: queryFunctionName, sitesFunctionName, preferencesFunctionName
+      mainApiFunctionName: mainApiFn.name, // Added
+      stripeFunctionName: stripeFn?.name, // Kept (might be undefined)
       dataBucketName: analyticsDataBucket.name,
       queryResultsBucketName: athenaResultsBucket.name,
       eventsFirehoseStreamName: firehoses.events.name,
       initialEventsFirehoseStreamName: firehoses.initial_events.name,
-      glueDatabaseName: glueCatalogDatabase.name, // Corrected output key name
+      glueDatabaseName: glueCatalogDatabase.name,
       eventsGlueTableName: glueTables.events.name,
       initialEventsGlueTableName: glueTables.initial_events.name,
       userPoolId: userPool.id,
@@ -675,15 +628,9 @@ export default $config({
       sitesTableName: sitesTable.name,
       userPreferencesTableName: userPreferencesTable.name,
       isProd,
-      routerDistributionId: router.distributionID, // Export router ID
-      chargeProcessorFunctionName: chargeProcessorFn?.name, // Conditionally export name
+      routerDistributionId: router.distributionID,
+      chargeProcessorFunctionName: chargeProcessorFn?.name,
       stripeSecretKeyName: useStripe ? STRIPE_SECRET_KEY!.name : undefined,
-      // Add other function names if useful
-      sitesFunctionName: sitesFn?.name,
-      preferencesFunctionName: preferencesFn?.name,
-      stripeFunctionName: stripeFn?.name,
-      // tableBucketArn: s3Table.tableBucketArn,
-      // warehouseLocation: s3Table.warehouseLocation,
     };
   },
 });

@@ -51,21 +51,9 @@ declare module "sst" {
       "type": "sst.aws.ApiGatewayV2"
       "url": string
     }
-    "PreferencesFn": {
-      "name": string
-      "type": "sst.aws.Function"
-    }
     "PublicRouter": {
       "type": "sst.aws.Router"
       "url": string
-    }
-    "QueryFn2": {
-      "name": string
-      "type": "sst.aws.Function"
-    }
-    "SitesFn": {
-      "name": string
-      "type": "sst.aws.Function"
     }
     "SitesTable": {
       "name": string
@@ -83,6 +71,10 @@ declare module "sst" {
     "UserPreferencesTable": {
       "name": string
       "type": "sst.aws.Dynamo"
+    }
+    "mainApiFn": {
+      "name": string
+      "type": "sst.aws.Function"
     }
   }
 }

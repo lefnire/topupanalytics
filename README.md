@@ -48,9 +48,12 @@ The primary goal of this data pipeline is extreme cost-effectiveness and scalabi
     *   These tables point to the S3 base locations (`s3://<bucket>/events/`, `s3://<bucket>/initial_events/`) and define the schema and partitioning (`site_id`, `dt`).
     *   The Glue Iceberg tables manage the metadata layer over the underlying Parquet files stored in S3 by Firehose.
 
-4.  **Query:** Dashboard -> API Gateway (`ManagementApi`) -> Lambda (`queryFn`) -> Athena
-    *   Dashboard calls authenticated `/api/query` endpoint.
-    *   `queryFn` Lambda constructs and runs Athena SQL queries against the Glue Iceberg tables.
+4.  **Query/API:** Dashboard -> API Gateway (`ManagementApi` `$default` route) -> Lambda (`masterApiFn`) -> Backend Service (Query/Sites/etc.) -> Athena (for queries)
+    *   Dashboard calls authenticated endpoints under `/api/*` (e.g., `/api/query`, `/api/sites`).
+    *   These requests hit the single `$default` route in the `ManagementApi`.
+    *   The `$default` route invokes the consolidated `masterApiFn` Lambda (defined in `sst.config.ts`).
+    *   `masterApiFn` (implemented in `functions/api/master.ts`) uses internal routing to delegate the request to the appropriate backend service (e.g., query service, sites service).
+    *   For query requests, the query service constructs and runs Athena SQL queries against the Glue Iceberg tables.
     *   Athena uses the Glue Catalog and Iceberg metadata to efficiently query the Parquet data in S3. Results are stored in `athenaResultsBucket`.
 
 5.  **Maintenance:** (Handled by Iceberg)

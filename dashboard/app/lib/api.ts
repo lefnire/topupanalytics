@@ -3,6 +3,7 @@ import { AuthContext } from '~/contexts/AuthContext';
 import { fetchAuthSession } from 'aws-amplify/auth'; // Import fetchAuthSession
 
 const API_BASE_URL = import.meta.env.VITE_API_URL;
+// const API_BASE_URL = import.meta.env.VITE_APP_URL;
 
 interface RequestOptions extends RequestInit {
   token?: string | null;
