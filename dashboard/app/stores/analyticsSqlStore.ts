@@ -1,3 +1,12 @@
+/*
+The final table, used for building the various aggregations, is constructed by taking
+{initial_events, events} from the HTTP response of /api/query, and merging them like so.
+1. initial_events has all the properties from an initial page load. referer, utm_*, screen_height, session_id, etc.
+1. events has only the subsequenty properties that are different. Eg pathname, properties, timestamp, session_id.
+
+So intial_events has everything, and events are deltas. Then, the DB joins each session (a sequence of initial_events->evenst[]) via session_id, forward-filling (like df.ffill()) any missing properties from the first event (initial_events).
+ */
+
 import { create } from "zustand";
 import * as duckdb from '@duckdb/duckdb-wasm';
 import { type DateRange } from 'react-day-picker';

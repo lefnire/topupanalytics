@@ -91,8 +91,12 @@ export const generateWhereClause = (segments: Segment[]): string => {
                  // Need to double-escape the backslash in the regex string for SQL
                  return `regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\\\.', '') = ${quotedValue}`;
              }
+        } else if (segment.type === 'source') {
+            // Special handling: source is derived like in the sourcesQuery aggregation
+            const sourceDerivation = `CASE WHEN COALESCE(referer_domain, '$direct', 'Unknown') = '$direct' THEN '$direct' ELSE regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\\\.', '') END`;
+            return `${sourceDerivation} = ${quotedValue}`;
         } else {
-            // Default: simple equality check
+            // Default: simple equality check for other columns assumed to exist directly on the view
             return `${column} = ${quotedValue}`;
         }
     });
