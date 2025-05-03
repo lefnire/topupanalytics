@@ -59,7 +59,7 @@ declare module "sst" {
       "type": "sst.aws.Router"
       "url": string
     }
-    "QueryFn2": {
+    "QueryFn": {
       "name": string
       "type": "sst.aws.Function"
     }

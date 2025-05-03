@@ -111,7 +111,7 @@ export default $config({
     });
     // === Glue Data Catalog ===
     const glueCatalogDatabase = new aws.glue.CatalogDatabase(`GlueCatalogDatabase`, {
-        name: `${basename}_db`, // Use explicit name, underscores only
+        name: `${basename}_events`, // Use explicit name, underscores only
       // Point location to a logical path within the S3 Table Bucket for organization
       // locationUri is not typically needed for Glue DB, especially with Iceberg tables managing their own locations.
     },);
@@ -411,7 +411,7 @@ export default $config({
       } : undefined,
     });
 
-    const queryFn = new sst.aws.Function("QueryFn2", {
+    const queryFn = new sst.aws.Function("QueryFn", {
       handler: "functions/analytics/query.handler",
       timeout: "60 second",
       memory: "512 MB",

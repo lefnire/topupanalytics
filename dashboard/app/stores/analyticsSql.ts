@@ -74,27 +74,19 @@ export const generateWhereClause = (segments: Segment[]): string => {
              // Special handling: screen size is derived from width and height columns
              return `(screen_width::VARCHAR || 'x' || screen_height::VARCHAR) = ${quotedValue}`;
         } else if (segment.type === 'channel') {
-            // Special handling: Map channel names back to complex DB conditions
-            const lowerValue = String(value).toLowerCase();
-             if (lowerValue === 'direct') return "COALESCE(referer_domain, '$direct', 'Unknown') = '$direct'";
-             if (lowerValue === 'organic search') return `LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) IN ('google', 'bing', 'duckduckgo', 'yahoo', 'ecosia', 'baidu', 'google.com', 'google.co.uk', 'google.com.hk', 'yandex.ru', 'search.brave.com', 'perplexity.ai')`;
-             if (lowerValue === 'social') return `LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) IN ('facebook.com', 't.co', 'twitter.com', 'linkedin.com', 'instagram.com', 'pinterest.com', 'reddit.com', 'com.reddit.frontpage', 'old.reddit.com', 'youtube.com', 'm.youtube.com')`;
-             if (lowerValue === 'email') return `(utm_medium = 'email' OR LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) IN ('mail.google.com', 'com.google.android.gm'))`;
-             if (lowerValue === 'paid search') return `utm_medium IN ('cpc', 'ppc')`;
-             if (lowerValue === 'referral') return `(COALESCE(referer_domain, '$direct', 'Unknown') IS NOT NULL AND LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) NOT IN ('$direct', 'unknown', 'google', 'bing', 'duckduckgo', 'yahoo', 'ecosia', 'baidu', 'facebook.com', 't.co', 'twitter.com', 'linkedin.com', 'instagram.com', 'pinterest.com', 'reddit.com', 'mail.google.com', 'com.google.android.gm', 'com.reddit.frontpage', 'old.reddit.com', 'youtube.com', 'm.youtube.com', 'google.com', 'google.co.uk', 'google.com.hk', 'yandex.ru', 'search.brave.com', 'perplexity.ai') AND utm_medium NOT IN ('cpc', 'ppc', 'email'))`;
-             return `COALESCE(referer_domain, '$direct', 'Unknown') = 'Unknown'`; // Default/Unknown
+            // Channel is now a pre-calculated column
+            return `channel = ${quotedValue}`;
         } else if (segment.type === 'referer_domain') {
              // Special handling: strip www. from DB value for comparison, handle '$direct'
              if (value === '$direct') {
                  return `COALESCE(referer_domain, '$direct', 'Unknown') = '$direct'`;
              } else {
                  // Need to double-escape the backslash in the regex string for SQL
-                 return `regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\\\.', '') = ${quotedValue}`;
+                 return `regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\.', '') = ${quotedValue}`;
              }
         } else if (segment.type === 'source') {
-            // Special handling: source is derived like in the sourcesQuery aggregation
-            const sourceDerivation = `CASE WHEN COALESCE(referer_domain, '$direct', 'Unknown') = '$direct' THEN '$direct' ELSE regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\\\.', '') END`;
-            return `${sourceDerivation} = ${quotedValue}`;
+            // Source is now a pre-calculated column
+            return `source = ${quotedValue}`;
         } else {
             // Default: simple equality check for other columns assumed to exist directly on the view
             return `${column} = ${quotedValue}`;
@@ -176,32 +168,10 @@ export const runAggregations = async (
         // Sources Query
         const sourcesQuery = `
             WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
-            SourceMapping AS (
-                SELECT session_id, COALESCE(referer_domain, '$direct', 'Unknown') AS raw_source,
-                       LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) AS referrer_lower,
-                       utm_source, utm_medium, utm_campaign,
-                       CASE
-                           WHEN utm_medium = 'cpc' OR utm_medium = 'ppc' THEN 'Paid Search'
-                           WHEN utm_medium = 'email' OR list_contains(['mail.google.com', 'com.google.android.gm'], referrer_lower) THEN 'Email'
-                           WHEN utm_medium = 'social' OR list_contains([
-                                'facebook', 'twitter', 'linkedin', 'instagram', 'pinterest', 'reddit', 't.co',
-                                'facebook.com', 'twitter.com', 'linkedin.com', 'instagram.com', 'pinterest.com', 'reddit.com',
-                                'com.reddit.frontpage', 'old.reddit.com', 'youtube.com', 'm.youtube.com'
-                               ], referrer_lower) THEN 'Social'
-                           WHEN list_contains([
-                                'google', 'bing', 'duckduckgo', 'yahoo', 'ecosia', 'baidu',
-                                'google.com', 'google.co.uk', 'google.com.hk', 'yandex.ru', 'search.brave.com', 'perplexity.ai'
-                               ], referrer_lower) THEN 'Organic Search'
-                           WHEN referrer_lower = '$direct' THEN 'Direct'
-                           WHEN referrer_lower = 'Unknown' THEN 'Unknown'
-                           WHEN referrer_lower IS NOT NULL AND referrer_lower != '$direct' THEN 'Referral'
-                           ELSE 'Unknown'
-                       END AS channel
-                FROM FilteredAnalytics
-            ),
-            ChannelCounts AS ( SELECT channel AS name, COUNT(DISTINCT session_id) AS value FROM SourceMapping GROUP BY channel ),
-            SourceCounts AS ( SELECT CASE WHEN raw_source = '$direct' THEN '$direct' ELSE regexp_replace(raw_source, '^www\\.', '') END AS name, COUNT(DISTINCT session_id) AS value FROM SourceMapping GROUP BY name ),
-            CampaignCounts AS ( SELECT COALESCE(utm_campaign, '(not set)') AS name, COUNT(DISTINCT session_id) AS value FROM SourceMapping WHERE utm_campaign IS NOT NULL GROUP BY name )
+            -- Channel, Source, and Campaign counts from the pre-calculated columns in the view
+            ChannelCounts AS ( SELECT channel AS name, COUNT(DISTINCT session_id) AS value FROM FilteredAnalytics GROUP BY channel ),
+            SourceCounts AS ( SELECT source AS name, COUNT(DISTINCT session_id) AS value FROM FilteredAnalytics GROUP BY source ),
+            CampaignCounts AS ( SELECT COALESCE(utm_campaign, '(not set)') AS name, COUNT(DISTINCT session_id) AS value FROM FilteredAnalytics WHERE utm_campaign IS NOT NULL GROUP BY name )
             SELECT 'channels' as type, name, value FROM ChannelCounts WHERE value > 0
             UNION ALL SELECT 'sources' as type, name, value FROM SourceCounts WHERE value > 0
             UNION ALL SELECT 'campaigns' as type, name, value FROM CampaignCounts WHERE value > 0

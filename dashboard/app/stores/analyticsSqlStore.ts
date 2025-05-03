@@ -207,8 +207,8 @@ export const useSqlStore = create<AnalyticsSqlState>()(
         const partitionKey = staticCols.includes('session_id') ? 'session_id' : (staticCols.length > 0 ? staticCols[0] : null); // Fallback if no session_id
         const staticColFirstValues = staticCols.map(col =>
           partitionKey
-            ? `FIRST_VALUE(b."${col}") OVER (PARTITION BY b."${partitionKey}" ORDER BY b."timestamp") AS "${col}"`
-            : `b."${col}"` // If no partition key, just select the column
+            ? `FIRST_VALUE(d."${col}") OVER (PARTITION BY d."${partitionKey}" ORDER BY d."timestamp") AS "${col}"`
+            : `d."${col}"`
         ).join(',\n                 ');
 
         const nullPlaceholders = initialOnlySchema.map(c => `NULL AS "${c.name}"`).join(', ');
@@ -222,8 +222,37 @@ export const useSqlStore = create<AnalyticsSqlState>()(
                 SELECT ${allColsSelectString} FROM initial_events
                 UNION ALL
                 SELECT ${commonSelectColsQuoted.join(', ')}${initialOnlySchema.length > 0 ? ', ' + nullPlaceholders : ''} FROM events
+            ),
+            -- Pre-calculate channel and source for easier filtering
+            derived AS (
+                SELECT *,
+                       LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) AS referrer_lower,
+                       CASE
+                           WHEN utm_medium = 'cpc' OR utm_medium = 'ppc' THEN 'Paid Search'
+                           WHEN utm_medium = 'email' OR list_contains(['mail.google.com', 'com.google.android.gm'], LOWER(COALESCE(referer_domain, '$direct', 'Unknown'))) THEN 'Email'
+                           WHEN utm_medium = 'social' OR list_contains([
+                                'facebook', 'twitter', 'linkedin', 'instagram', 'pinterest', 'reddit', 't.co',
+                                'facebook.com', 'twitter.com', 'linkedin.com', 'instagram.com', 'pinterest.com', 'reddit.com',
+                                'com.reddit.frontpage', 'old.reddit.com', 'youtube.com', 'm.youtube.com'
+                               ], LOWER(COALESCE(referer_domain, '$direct', 'Unknown'))) THEN 'Social'
+                           WHEN list_contains([
+                                'google', 'bing', 'duckduckgo', 'yahoo', 'ecosia', 'baidu',
+                                'google.com', 'google.co.uk', 'google.com.hk', 'yandex.ru', 'search.brave.com', 'perplexity.ai'
+                               ], LOWER(COALESCE(referer_domain, '$direct', 'Unknown'))) THEN 'Organic Search'
+                           WHEN LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) = '$direct' THEN 'Direct'
+                           WHEN LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) = 'Unknown' THEN 'Unknown'
+                           WHEN COALESCE(referer_domain, '$direct', 'Unknown') IS NOT NULL AND LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) != '$direct' THEN 'Referral'
+                           ELSE 'Unknown'
+                       END AS channel,
+                       CASE
+                           WHEN COALESCE(referer_domain, '$direct', 'Unknown') = '$direct' THEN '$direct'
+                           ELSE regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\\\.', '') -- Corrected: Double escape for SQL string literal
+                       END AS source
+                FROM base
             )
-            SELECT b."event", b."pathname", b."timestamp", b."properties"${staticColFirstValues ? ', ' + staticColFirstValues : ''} FROM base b;
+            -- Select base event columns, forward-filled static columns, and derived channel/source
+            SELECT d."event", d."pathname", d."timestamp", d."properties", d."channel", d."source"${staticColFirstValues ? ', ' + staticColFirstValues : ''}
+            FROM derived d;
         `;
 
         // --- Execute SQL Transaction for Table Data ---
