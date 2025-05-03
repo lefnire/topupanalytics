@@ -9,10 +9,12 @@ import { EventsCard } from './EventsCard';
 import { UsageCard } from './UsageCard';
 import { useApiClient } from '../../lib/api';
 import { toast } from 'sonner';
-import { useStore, type AnalyticsState } from '../../stores/analyticsStore'; // Import hook and state
-import type { Segment, AggregatedData } from '../../stores/analyticsTypes'; // Import types separately
-import { useShallow } from 'zustand/shallow'; // Import useShallow from zustand
-import { type Site } from '../../lib/api'; // Import Site type
+// Import from new stores
+import { useSqlStore, type AnalyticsSqlState } from '../../stores/analyticsSqlStore';
+import { useHttpStore, type AnalyticsHttpState } from '../../stores/analyticsHttpStore';
+import type { Segment, AggregatedData } from '../../stores/analyticsTypes'; // Keep type imports
+import { useShallow } from 'zustand/shallow';
+import { type Site } from '../../lib/api'; // Keep Site type import
 
 // --- Helper Functions ---
 const formatNumber = (num: number) => num.toLocaleString();
@@ -27,32 +29,37 @@ const LazySankeyCard = lazy(() =>
 // --- Component Definition ---
 const DashboardContent = () => {
 
-  // Fetch state and actions directly from the store
+  // Select state from SQL store
   const {
     status,
     error,
     db,
-    selectedSiteId,
-    sites,
     segments,
     aggregatedData,
-    userPreferences,
-    selectedRange,
     addSegment,
-  } = useStore(useShallow((state: AnalyticsState) => ({ // Add AnalyticsState type
+  } = useSqlStore(useShallow((state: AnalyticsSqlState) => ({
     status: state.status,
     error: state.error,
     db: state.db,
-    selectedSiteId: state.selectedSiteId,
-    sites: state.sites,
     segments: state.segments,
     aggregatedData: state.aggregatedData,
-    userPreferences: state.userPreferences,
-    selectedRange: state.selectedRange,
     addSegment: state.addSegment,
   })));
 
-  // Derive states locally
+  // Select state from HTTP store
+  const {
+    selectedSiteId,
+    sites,
+    userPreferences,
+    selectedRange,
+  } = useHttpStore(useShallow((state: AnalyticsHttpState) => ({
+    selectedSiteId: state.selectedSiteId,
+    sites: state.sites,
+    userPreferences: state.userPreferences,
+    selectedRange: state.selectedRange,
+  })));
+
+  // Derive states locally (logic remains the same, uses state from new stores)
   const useStripe = import.meta.env.VITE_USE_STRIPE === 'true';
   const isLoading = status === 'initializing' || status === 'loading_data' || status === 'aggregating';
   const isError = status === 'error';

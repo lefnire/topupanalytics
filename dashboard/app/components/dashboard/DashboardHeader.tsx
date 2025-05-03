@@ -2,10 +2,11 @@ import React, { useState, useMemo, useEffect } from 'react'; // Added useEffect
 import { Avatar, AvatarImage, AvatarFallback } from '~/components/ui/avatar'; // Use path alias
 // Removed Popover, Calendar, Button, CalendarIcon, cn, format imports as they are replaced by Select
 import { Button } from '../ui/button'; // Keep Button for DropdownMenuTrigger
-import { User, LogOut, PlusCircle } from 'lucide-react'; // Keep icons
-import { useStore, type AnalyticsState } from '../../stores/analyticsStore';
-import type { Segment, Site } from '../../stores/analyticsTypes'; // Added Site import
-// Removed the old import line, it was combined into the line above
+import { User, LogOut, PlusCircle } from 'lucide-react';
+// Import from new stores
+import { useHttpStore, type AnalyticsHttpState } from '../../stores/analyticsHttpStore';
+import { useSqlStore, type AnalyticsSqlState } from '../../stores/analyticsSqlStore';
+import type { Segment, Site } from '../../stores/analyticsTypes';
 import { useShallow } from 'zustand/shallow';
 import { type DateRange } from 'react-day-picker';
 import { useAuth } from '../../contexts/AuthContext';
@@ -68,34 +69,42 @@ export const DashboardHeader = () => {
   const timePeriods = ["24 hours", "7 days", "30 days", "90 days"];
   const [selectedPeriod, setSelectedPeriod] = useState<string>(timePeriods[0]); // Default to "24 hours"
 
+  // Select state from HTTP store
   const {
     selectedSiteId,
     sites,
-    status,
-    isRefreshing,
-    segments,
+    httpStatus, // Renamed to avoid clash
     selectedRange,
     setSelectedSiteId,
-    removeSegment,
-    clearSegments,
     setSelectedRange,
-    isAddSiteModalOpen, // Added from store
-    setAddSiteModalOpen, // Added from store
-    fetchSites, // Added fetchSites
-  } = useStore(useShallow((state: AnalyticsState) => ({
+    isAddSiteModalOpen,
+    setAddSiteModalOpen,
+    fetchSites,
+  } = useHttpStore(useShallow((state: AnalyticsHttpState) => ({
     selectedSiteId: state.selectedSiteId,
     sites: state.sites,
-    status: state.status,
-    isRefreshing: state.isRefreshing,
-    segments: state.segments,
+    httpStatus: state.status,
     selectedRange: state.selectedRange,
     setSelectedSiteId: state.setSelectedSiteId,
+    setSelectedRange: state.setSelectedRange,
+    isAddSiteModalOpen: state.isAddSiteModalOpen,
+    setAddSiteModalOpen: state.setAddSiteModalOpen,
+    fetchSites: state.fetchSites,
+  })));
+
+  // Select state from SQL store
+  const {
+    sqlStatus, // Renamed to avoid clash
+    // isRefreshing, // Removed
+    segments,
+    removeSegment,
+    clearSegments,
+  } = useSqlStore(useShallow((state: AnalyticsSqlState) => ({
+    sqlStatus: state.status,
+    // isRefreshing: state.isRefreshing, // Removed
+    segments: state.segments,
     removeSegment: state.removeSegment,
     clearSegments: state.clearSegments,
-    setSelectedRange: state.setSelectedRange,
-    isAddSiteModalOpen: state.isAddSiteModalOpen, // Added selector
-    setAddSiteModalOpen: state.setAddSiteModalOpen, // Added selector
-    fetchSites: state.fetchSites, // Added selector
   })));
 
   const { user, logout } = useAuth();
@@ -111,8 +120,11 @@ export const DashboardHeader = () => {
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
   const [selectedSiteIdForModal, setSelectedSiteIdForModal] = useState<string | null>(null);
 
-  // Derive isLoading state locally based on status
-  const isLoading = status === 'initializing' || status === 'loading_data' || status === 'aggregating';
+  // Derive combined loading and error states locally
+  const isLoadingHttp = httpStatus === 'fetching_sites';
+  const isLoadingSql = sqlStatus === 'initializing' || sqlStatus === 'loading_data' || sqlStatus === 'aggregating';
+  const isLoading = isLoadingHttp || isLoadingSql;
+  const isError = httpStatus === 'error' || sqlStatus === 'error';
 
   // Effect to select first site AND set initial date range
   useEffect(() => {
@@ -134,15 +146,15 @@ export const DashboardHeader = () => {
     if (selectedSite) return selectedSite.name;
     // If sites are loaded, but none is selected yet (e.g., initial load), show the first site's name
     if (sites.length > 0 && !selectedSiteId) return sites[0].name;
-    // If sites are loaded but the array is empty
-    if (sites.length === 0 && status !== 'initializing' && status !== 'loading_data') return "No Sites Found";
-    // If still loading sites (or analytics, as status is shared)
-    if (isLoading) return "Loading..."; // Generic loading
-    // If there was an error (could be site fetch or analytics fetch)
-    if (status === 'error') return "Error"; // Generic error
+    // If sites are loaded but the array is empty (check HTTP status specifically)
+    if (sites.length === 0 && httpStatus === 'idle' && !isLoadingSql) return "No Sites Found";
+    // If still loading (either HTTP or SQL)
+    if (isLoading) return "Loading...";
+    // If there was an error (either HTTP or SQL)
+    if (isError) return "Error";
     // Default fallback
     return "Admin";
-  }, [selectedSite, sites, selectedSiteId, isLoading, status]);
+  }, [selectedSite, sites, selectedSiteId, isLoading, isError, httpStatus, isLoadingSql]);
 
 
   const handleOpenSiteSettings = (siteId: string) => {
@@ -244,8 +256,8 @@ export const DashboardHeader = () => {
                </SelectContent>
              </Select>
 
-             {/* Refresh Indicator */}
-             {isRefreshing && <span className="text-xs text-gray-400 animate-pulse">(syncing...)</span>}
+             {/* Refresh Indicator - Show when loading or aggregating */}
+             {(sqlStatus === 'loading_data' || sqlStatus === 'aggregating') && <span className="text-xs text-gray-400 animate-pulse">(syncing...)</span>}
         </div>
       </header>
 

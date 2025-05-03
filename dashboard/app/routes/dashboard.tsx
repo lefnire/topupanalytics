@@ -1,10 +1,11 @@
 import React, { useEffect } from 'react';
-import { Navigate } from 'react-router'; // Import Navigate for redirection
-import { useAuth } from '~/contexts/AuthContext'; // Import the auth hook
-import { useStore } from '~/stores/analyticsStore';
-// Keep Select imports for DashboardHeader (even though Header is separate, imports might be shared or needed indirectly) - NOTE: Removing the actual imports as they are unused in *this* file.
+import { Navigate } from 'react-router';
+import { useAuth } from '~/contexts/AuthContext';
+// Remove import for old useStore
+import { useSqlStore } from '~/stores/analyticsSqlStore'; // Import the SQL store for cleanup
+// Keep Select imports for DashboardHeader...
 
-import { DashboardHeader } from '~/components/dashboard/DashboardHeader'; // Import the new header component
+import { DashboardHeader } from '~/components/dashboard/DashboardHeader';
 import { DashboardContent } from '~/components/dashboard/DashboardContent'; // Import the new content component
 
 
@@ -35,12 +36,13 @@ export default function AnalyticsDashboard() {
 
   useEffect(() => {
     if (isServer) return;
-    // fetchAndLoadData now handles DB init and fetching sites if necessary
-    useStore.getState().fetchAndLoadData();
+    // No need to explicitly call fetchAndLoadData here.
+    // analyticsHttpStore handles initial site fetch on rehydration.
+    // analyticsSqlStore handles DB init and fetches data via subscription.
 
-    return () => { useStore.getState().cleanup(); }
-    // Depend on endpoint to refetch if it changes
-  }, []); // Empty dependency array ensures this runs only once on mount
+    // Cleanup function should now call the SQL store's cleanup
+    return () => { useSqlStore.getState().cleanup(); }
+  }, []);
 
   // Removed dbInitError check (handled in DashboardContent)
 

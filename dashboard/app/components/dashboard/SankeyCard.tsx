@@ -1,7 +1,10 @@
 import React from 'react';
 import { ResponsiveSankey } from '@nivo/sankey';
-import type { SankeyNodeDatum, SankeyLinkDatum } from '@nivo/sankey'; // Import specific types if needed for tooltips
-import { useStore, type SankeyNode, type SankeyLink, type AnalyticsStatus } from '../../stores/analyticsStore'; // Adjust path as needed
+import type { SankeyNodeDatum, SankeyLinkDatum } from '@nivo/sankey';
+// Import from the new SQL store
+import { useSqlStore } from '../../stores/analyticsSqlStore';
+// Import types that were previously exported from analyticsStore (now likely in analyticsTypes or SQL store)
+import type { SankeyNode, SankeyLink, AnalyticsStatus } from '../../stores/analyticsTypes'; // Assuming types are in analyticsTypes
 import { useShallow } from 'zustand/shallow';
 
 // Helper to map store status + data availability to display state
@@ -19,8 +22,8 @@ const getDisplayState = (status: AnalyticsStatus, hasData: boolean): 'loading' |
 // but Nivo's types often suffice. We get data directly from the store here.
 
 export const SankeyCard: React.FC = () => {
-    // Select only what's needed using useShallow for optimization
-    const { sankeyData, status, error } = useStore(useShallow(state => ({
+    // Select state from the SQL store
+    const { sankeyData, status, error } = useSqlStore(useShallow(state => ({
         sankeyData: state.sankeyData,
         status: state.status,
         error: state.error,

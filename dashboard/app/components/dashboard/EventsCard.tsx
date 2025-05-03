@@ -1,7 +1,8 @@
 import React, { useCallback } from 'react';
-import { useShallow } from 'zustand/shallow'; // Import from zustand/shallow
-import { useStore, type AnalyticsState } from '../../stores/analyticsStore'; // Adjusted path, added AnalyticsState
-import type { CardDataItem, Segment } from '../../stores/analyticsTypes'; // Import types from analyticsTypes
+import { useShallow } from 'zustand/shallow';
+import { useSqlStore } from '../../stores/analyticsSqlStore'; // Import SQL store
+import { useHttpStore } from '../../stores/analyticsHttpStore'; // Import HTTP store
+import type { CardDataItem, Segment } from '../../stores/analyticsTypes'; // Keep type imports
 
 // Helper function (defined locally as per instructions)
 const formatNumber = (num: number) => num.toLocaleString();
@@ -11,19 +12,24 @@ export const EventsCard: React.FC<{
     // Changed: onItemClick now takes a Segment object directly
     onItemClick: (segment: Segment) => void;
 }> = ({ onItemClick }) => {
+  // Select state from SQL store
   const {
-    eventsData, availableKeys, aggregatedValues, selectedKey, activeTab, status, error,
-    setActiveTab, runCustomPropertyAggregation,
-  } = useStore(useShallow((state: AnalyticsState) => ({ // Added AnalyticsState type
+    eventsData, availableKeys, aggregatedValues, selectedKey, status, error,
+    runCustomPropertyAggregation,
+  } = useSqlStore(useShallow(state => ({
     eventsData: state.aggregatedData?.eventsData ?? [],
     availableKeys: state.aggregatedData?.customProperties?.availableKeys ?? [],
     aggregatedValues: state.aggregatedData?.customProperties?.aggregatedValues ?? null,
     selectedKey: state.selectedPropertyKey,
-    activeTab: state.eventsTab,
     status: state.status,
     error: state.error,
-    setActiveTab: state.setEventsTab,
     runCustomPropertyAggregation: state.runCustomPropertyAggregation,
+  })));
+
+  // Select state from HTTP store
+  const { activeTab, setActiveTab } = useHttpStore(useShallow(state => ({
+    activeTab: state.eventsTab,
+    setActiveTab: state.setEventsTab,
   })));
 
   const handlePropertyKeyChange = (event: React.ChangeEvent<HTMLSelectElement>) => {

@@ -1,9 +1,9 @@
 import React, { memo, useCallback } from 'react';
-import { useStore } from '../../stores/analyticsStore'; // Adjusted path
-import { useShallow } from 'zustand/shallow'; // Import useShallow from zustand
-import type { AnalyticsState } from '../../stores/analyticsStore'; // Import state
-import type { AggregatedData, CardDataItem, Segment } from '../../stores/analyticsTypes'; // Import types separately
-import { BaseCard } from './BaseCard'; // Adjusted path
+import { useHttpStore, type AnalyticsHttpState } from '../../stores/analyticsHttpStore'; // Import HTTP store and state
+import { useShallow } from 'zustand/shallow';
+// Remove AnalyticsState import from old store
+import type { AggregatedData, CardDataItem, Segment } from '../../stores/analyticsTypes'; // Keep type imports
+import { BaseCard } from './BaseCard';
 
 // ===================== Generic Card machinery =====================
 export type CardMeta = { // Added export
@@ -11,8 +11,8 @@ export type CardMeta = { // Added export
   title: string;
   tabs: { key: string; label: string }[];
   dataSelector: (agg: AggregatedData | null) => Record<string, CardDataItem[]>;
-  tabGet: (s: AnalyticsState) => string;
-  tabSet: (s: AnalyticsState) => (key: string) => void;
+  tabGet: (s: AnalyticsHttpState) => string; // Use HTTP state for tabs
+  tabSet: (s: AnalyticsHttpState) => (key: string) => void; // Use HTTP state for tabs
   renderHeader?: (active: string) => React.ReactNode;
   renderItem?: (item: CardDataItem, idx: number, active: string) => React.ReactNode;
   // Updated: getSegment now returns the full Segment object or null
@@ -140,9 +140,10 @@ export const CardContainer: React.FC<{ // Added export
     aggregatedData: AggregatedData | null;
     onItemClick: (segment: Segment) => void; // Pass handler down
 }> = memo(({ meta, loading, aggregatedData, onItemClick }) => {
-  const { activeTab, setActiveTab } = useStore(useShallow((state: AnalyticsState) => ({ // Add AnalyticsState type
-    activeTab: meta.tabGet(state),
-    setActiveTab: meta.tabSet(state),
+  // Select tab state and setter from HTTP store
+  const { activeTab, setActiveTab } = useHttpStore(useShallow((state: AnalyticsHttpState) => ({ // Use HTTP state
+    activeTab: meta.tabGet(state), // tabGet now expects AnalyticsHttpState
+    setActiveTab: meta.tabSet(state), // tabSet now expects AnalyticsHttpState
   })));
 
   // Use the meta.getSegment function defined in CARD_META

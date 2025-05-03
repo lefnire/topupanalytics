@@ -1,8 +1,9 @@
 import React from 'react';
-import { useStore } from '~/stores/analyticsStore'; // Import the Zustand store
-import { useShallow } from 'zustand/react/shallow'; // Import useShallow for performance
+// Import from the new HTTP store
+import { useHttpStore, type AnalyticsHttpState } from '../../stores/analyticsHttpStore';
+import { useShallow } from 'zustand/react/shallow';
 import { Settings } from 'lucide-react';
-import { type Site } from '../../stores/analyticsTypes'; // Import Site type from store types
+import { type Site } from '../../stores/analyticsTypes'; // Keep Site type import
 
 interface SiteSelectorDropdownContentProps {
   // onSiteSelect is no longer needed as selection is handled by the store's action
@@ -12,21 +13,21 @@ interface SiteSelectorDropdownContentProps {
 }
 
 export function SiteSelectorDropdownContent({ onSettingsClick, closeDropdown }: SiteSelectorDropdownContentProps) {
-  // Select necessary state and actions from the store
-  const { sites, selectedSiteId, setSelectedSiteId, status, error } = useStore(
-    useShallow(state => ({
+  // Select necessary state and actions from the HTTP store
+  const { sites, selectedSiteId, setSelectedSiteId, status, error } = useHttpStore(
+    useShallow((state: AnalyticsHttpState) => ({ // Use AnalyticsHttpState type
       sites: state.sites,
       selectedSiteId: state.selectedSiteId,
       setSelectedSiteId: state.setSelectedSiteId,
-      status: state.status,
+      status: state.status, // This is now the HTTP store status ('idle', 'fetching_sites', 'error')
       error: state.error,
     }))
   );
 
   // Determine loading state based on store status and site data
   // Sites might be empty initially before fetchSites completes, even if status isn't 'loading_data' yet.
-  // Consider status 'initializing' or 'idle' before sites are populated as loading.
-  const isLoading = (status === 'initializing' || status === 'idle') && sites.length === 0 && !error;
+  // Loading state is now simpler: just check if the HTTP store is fetching sites.
+  const isLoading = status === 'fetching_sites';
 
   const handleSiteClick = (siteId: string) => {
     console.log(`Site selected via dropdown: ${siteId}`);

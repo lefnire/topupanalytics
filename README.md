@@ -56,7 +56,12 @@ The primary goal of this data pipeline is extreme cost-effectiveness and scalabi
 5.  **Maintenance:** (Handled by Iceberg)
     *   Iceberg manages small file compaction automatically. Manual `OPTIMIZE TABLE` via Athena might be run periodically if needed, but the automated compaction function (`CompactionFn`/`CompactionCron`) has been removed.
 
+### Frontend Dashboard
 ---
+*   The frontend dashboard (built with React/Vite) uses Zustand for state management.
+    *   State is split into two main stores:
+        *   `analyticsHttpStore.ts`: Manages site/preference data fetching, selected site/range, UI state (tabs, modals), and persists selections to `localStorage`.
+        *   `analyticsSqlStore.ts`: Manages the DuckDB WASM instance, fetches query data (`/api/query`), loads data into DuckDB, runs aggregations, and handles segment filtering. It subscribes to the HTTP store for site/range changes.
 
 ## Future Plans
 Later I'll add more "pay per use" alternatives to common website tools. Next would be comments with auto moderation, like Disqus ($20/m). Then webpage upvotes / downvotes and discoverability.
