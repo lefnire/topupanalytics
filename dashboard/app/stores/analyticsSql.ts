@@ -74,8 +74,15 @@ export const generateWhereClause = (segments: Segment[]): string => {
              // Special handling: screen size is derived from width and height columns
              return `(screen_width::VARCHAR || 'x' || screen_height::VARCHAR) = ${quotedValue}`;
         } else if (segment.type === 'channel') {
-            // Simplified: Filter directly on the pre-calculated 'channel' column in the view
-            return `"channel" = ${quotedValue}`;
+            // Special handling: Map channel names back to complex DB conditions
+            const lowerValue = String(value).toLowerCase();
+             if (lowerValue === 'direct') return "COALESCE(referer_domain, '$direct', 'Unknown') = '$direct'";
+             if (lowerValue === 'organic search') return `LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) IN ('google', 'bing', 'duckduckgo', 'yahoo', 'ecosia', 'baidu', 'google.com', 'google.co.uk', 'google.com.hk', 'yandex.ru', 'search.brave.com', 'perplexity.ai')`;
+             if (lowerValue === 'social') return `LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) IN ('facebook.com', 't.co', 'twitter.com', 'linkedin.com', 'instagram.com', 'pinterest.com', 'reddit.com', 'com.reddit.frontpage', 'old.reddit.com', 'youtube.com', 'm.youtube.com')`;
+             if (lowerValue === 'email') return `(utm_medium = 'email' OR LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) IN ('mail.google.com', 'com.google.android.gm'))`;
+             if (lowerValue === 'paid search') return `utm_medium IN ('cpc', 'ppc')`;
+             if (lowerValue === 'referral') return `(COALESCE(referer_domain, '$direct', 'Unknown') IS NOT NULL AND LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) NOT IN ('$direct', 'unknown', 'google', 'bing', 'duckduckgo', 'yahoo', 'ecosia', 'baidu', 'facebook.com', 't.co', 'twitter.com', 'linkedin.com', 'instagram.com', 'pinterest.com', 'reddit.com', 'mail.google.com', 'com.google.android.gm', 'com.reddit.frontpage', 'old.reddit.com', 'youtube.com', 'm.youtube.com', 'google.com', 'google.co.uk', 'google.com.hk', 'yandex.ru', 'search.brave.com', 'perplexity.ai') AND utm_medium NOT IN ('cpc', 'ppc', 'email'))`;
+             return `COALESCE(referer_domain, '$direct', 'Unknown') = 'Unknown'`; // Default/Unknown
         } else if (segment.type === 'referer_domain') {
              // Special handling: strip www. from DB value for comparison, handle '$direct'
              if (value === '$direct') {
@@ -85,8 +92,9 @@ export const generateWhereClause = (segments: Segment[]): string => {
                  return `regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\\\.', '') = ${quotedValue}`;
              }
         } else if (segment.type === 'source') {
-            // Simplified: Filter directly on the pre-calculated 'source' column in the view
-            return `"source" = ${quotedValue}`;
+            // Special handling: source is derived like in the sourcesQuery aggregation
+            const sourceDerivation = `CASE WHEN COALESCE(referer_domain, '$direct', 'Unknown') = '$direct' THEN '$direct' ELSE regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\\\.', '') END`;
+            return `${sourceDerivation} = ${quotedValue}`;
         } else {
             // Default: simple equality check for other columns assumed to exist directly on the view
             return `${column} = ${quotedValue}`;
