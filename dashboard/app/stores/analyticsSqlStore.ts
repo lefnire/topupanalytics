@@ -80,12 +80,10 @@ export interface AnalyticsSqlState extends Pick<AnalyticsStateBase,
   db: duckdb.AsyncDuckDB | null;
   connection: duckdb.AsyncDuckDBConnection | null;
 
-  // Internal state to track last fetch trigger
-  lastFetchHash: string | null; // Hash of siteId + range for the last successful fetch
-
   // Actions
   initialize: () => Promise<void>; // Renamed for clarity
-  fetchAndLoadData: (siteId: string, range: DateRange) => Promise<void>; // Requires siteId/range
+  lastFetchHash: string;
+  fetchAndLoadData: () => Promise<void>; // Requires siteId/range
   runAggregations: () => Promise<void>; // Runs base + initial tabs
   runSpecificAggregation: (cardType: 'sources' | 'pages' | 'regions' | 'devices' | 'events', viewType: string) => Promise<void>; // Runs single tab aggregation
   runCustomPropertyAggregation: (key: string) => Promise<void>;
@@ -115,10 +113,11 @@ export interface AnalyticsSqlState extends Pick<AnalyticsStateBase,
 const initialSqlState: Pick<AnalyticsSqlState,
   'status' | 'error' | 'aggregatedData' | 'selectedPropertyKey' |
   'sankeyData' | 'segments' | 'db' | 'connection' | // Removed isRefreshing
-  'lastFetchHash' | // Replaced lastProcessed*
-  'sourcesTab' | 'pagesTab' | 'regionsTab' | 'devicesTab' | 'eventsTab'
+  'sourcesTab' | 'pagesTab' | 'regionsTab' | 'devicesTab' | 'eventsTab' |
+  'lastFetchHash'
 > = {
   status: 'idle',
+  lastFetchHash: '',
   error: null,
   aggregatedData: {
     stats: null, chartData: null, eventsData: null, sources: null, pages: null, regions: null, devices: null,
@@ -130,7 +129,6 @@ const initialSqlState: Pick<AnalyticsSqlState,
   // isRefreshing: false, // Removed
   db: null,
   connection: null,
-  lastFetchHash: null, // Initialize new state
   // Default Tab Values
   sourcesTab: 'channels',
   pagesTab: 'pages',
@@ -220,7 +218,6 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
         aggregatedData: initialSqlState.aggregatedData, // Reset data
         sankeyData: initialSqlState.sankeyData,
         // Keep persisted state: tabs, selectedPropertyKey, segments
-        lastFetchHash: null, // Reset fetch hash
       });
       // Trigger DB initialization after resetting state
       // Use setTimeout to ensure state update completes before initialize potentially updates state again
@@ -262,35 +259,41 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
         const { db: newDb, connection: newConnection } = await initializeDb();
         _setIdle({ db: newDb, connection: newConnection }); // Use helper
         console.log("SQL Store: DB Initialized successfully.");
-        // DO NOT trigger fetchAndLoadData here. The subscriber will handle it.
+        setTimeout(useSqlStore.getState().fetchAndLoadData, 0);
       } catch (initError: any) {
         console.error("SQL Store: DB Initialization failed:", initError);
         _setError(initError.message || 'DB Initialization failed', { db: null, connection: null }); // Use helper
       }
     },
 
-    fetchAndLoadData: async (siteId: string, range: DateRange) => {
-      console.log(`SQL Store: fetchAndLoadData called for site ${siteId}, range: ${range?.from ? format(range.from, 'P') : 'N/A'} - ${range?.to ? format(range.to, 'P') : 'N/A'}`);
-      const { db, connection, status } = get();
-
+    fetchAndLoadData: async () => {
+      const { db, connection, status, lastFetchHash } = get();
       // --- Pre-checks (Remain the same) ---
       if (status === 'loading_data') {
           console.log("SQL Store: fetchAndLoadData skipped (already loading_data).");
           return;
       }
-      if (!siteId || !range?.from || !range?.to) {
-          console.log("SQL Store: fetchAndLoadData skipped (missing siteId or valid range).", { siteId, range });
-          return;
-      }
       if (!db || !connection) {
-          console.error("SQL Store: fetchAndLoadData called but DB not initialized. This shouldn't happen.");
-          _setError('DB not initialized before data fetch attempt.');
+          console.log("SQL Store: fetchAndLoadData called but DB not initialized.");
+          // _setError('DB not initialized before data fetch attempt.');
           return;
       }
       if (status === 'initializing' || status === 'aggregating' || status === 'aggregating_tab') {
         console.log(`SQL Store: Skipping fetchAndLoadData, current status: ${status}`);
         return;
       }
+      const { selectedSiteId: siteId, selectedRange: range } = useHttpStore.getState();
+      if (!siteId || !range?.from || !range?.to) {
+          console.log("SQL Store: fetchAndLoadData skipped (missing siteId or valid range).", { siteId, range });
+          return;
+      }
+      // skip if the same siteId & range are selected as last time
+      console.log(`SQL Store: fetchAndLoadData called for site ${siteId}, range: ${range?.from ? format(range.from, 'P') : 'N/A'} - ${range?.to ? format(range.to, 'P') : 'N/A'}`);
+      const currFetchHash = `${siteId}|${range.from?.toISOString()}|${range.to?.toISOString()}`
+      if (currFetchHash === lastFetchHash) {
+        return console.log("SQL Store: fetchAndLoadData already called for this siteId & range combo")
+      }
+      set({lastFetchHash: currFetchHash})
 
       console.log(`SQL Store: Starting data fetch & load process...`);
       _setLoading('loading_data', {
@@ -664,132 +667,15 @@ export const useSqlStore = create<AnalyticsSqlState>()(
   ) // End persist wrapper
 );
 
-// --- Subscription to HTTP Store ---
-// Run initial checks and subscribe after the store is created.
-const initialState = useSqlStore.getState();
-initialState.initialize(); // Attempt to initialize DB on load
-
-// Define the type for the state slice we are selecting in the subscriber
-type HttpSubscriptionState = Pick<AnalyticsHttpState, 'selectedSiteId' | 'selectedRange'>;
-
-// Helper to generate a consistent hash for fetch triggers
-const generateFetchHash = (siteId: string | null, range: DateRange | undefined): string | null => {
-  if (!siteId || !range?.from || !range?.to) {
-    return null; // Cannot fetch without site and full range
-  }
-  // Use ISO strings for dates to ensure consistency
-  return `${siteId}|${range.from.toISOString()}|${range.to.toISOString()}`;
-};
-
-// Variable to hold the last known state relevant to the subscription logic
-let lastKnownHttpState: HttpSubscriptionState | null = null;
-
 useHttpStore.subscribe(
-  // Listener reacts to *any* change in the HTTP store
-  (currentHttpState: AnalyticsHttpState) => {
-    const { selectedSiteId: currentSiteId, selectedRange: currentRange } = currentHttpState;
-    const currentStateSlice: HttpSubscriptionState = { selectedSiteId: currentSiteId, selectedRange: currentRange };
-
-    // Compare current relevant slice with the last known relevant slice
-    const rangeA = lastKnownHttpState?.selectedRange;
-    const rangeB = currentStateSlice.selectedRange;
-    const rangeChanged = (rangeA?.from?.getTime() !== rangeB?.from?.getTime()) || (rangeA?.to?.getTime() !== rangeB?.to?.getTime());
-    const siteChanged = lastKnownHttpState?.selectedSiteId !== currentStateSlice.selectedSiteId;
-
-    // If the relevant parts haven't changed, update lastKnownHttpState and exit
-    if (!siteChanged && !rangeChanged) {
-      lastKnownHttpState = currentStateSlice; // Update state for the next comparison
-      return;
-    }
-
-    // Update last known state *before* proceeding with logic that might return early
-    lastKnownHttpState = currentStateSlice;
-
-    // --- Proceed with fetch logic using currentSiteId and currentRange ---
-    const sqlState = useSqlStore.getState();
-    const { db, connection, status: sqlStatus, lastFetchHash } = sqlState;
-
-    console.log("SQL Store: Subscriber notified by HTTP store change.", { currentSiteId, currentRange, sqlStatus, lastFetchHash });
-
-    // --- Condition Checks ---
-
-    // A. Is DB ready?
-    if (!db || !connection) {
-      if (sqlStatus !== 'initializing' && sqlStatus !== 'error') {
-        console.warn("SQL Store: Subscriber triggered but DB not ready and not initializing/error. State:", sqlStatus);
-      } else {
-        console.log("SQL Store: Subscriber waiting, DB status:", sqlStatus);
-      }
-      return; // Wait for DB initialization or error resolution
-    }
-
-    // B. Generate the hash for the *current* desired state
-    const currentFetchHash = generateFetchHash(currentSiteId, currentRange);
-
-    // C. Is site/range valid for fetching? (Handled by generateFetchHash returning null)
-    if (!currentFetchHash) {
-      console.log("SQL Store: No site selected or range is invalid in HTTP store. Clearing data or waiting.");
-      // Clear data if site/range becomes invalid and wasn't already cleared (based on hash)
-      if (lastFetchHash !== null) {
-        useSqlStore.setState({
-          ...initialSqlState, // Reset most state
-          db: sqlState.db, // Keep DB
-          connection: sqlState.connection, // Keep Connection
-          status: 'idle',
-          error: currentSiteId ? 'Date range is incomplete.' : 'No site selected.',
-          lastFetchHash: null, // Mark as processed null state
-        });
-      }
-      return;
-    }
-
-    // D. Has this specific site/range combination already been successfully processed?
-    if (currentFetchHash === lastFetchHash) {
-      console.log("SQL Store: Current site/range hash matches last fetch hash. Skipping fetch.", { currentFetchHash });
-      return;
-    }
-
-    // E. Is the SQL store busy with a critical operation?
-    // Allow fetch even if 'aggregating_tab' is active, but not during init/load/full-aggregate
-    const isBusyForFetch = ['loading_data', 'aggregating', 'initializing'].includes(sqlStatus);
-    if (isBusyForFetch) {
-      console.log(`SQL Store: Store is busy (${sqlStatus}). Deferring fetch for hash: ${currentFetchHash}`);
-      return;
-    }
-
-    // --- Trigger Data Load ---
-    console.log("SQL Store: Conditions met. Triggering fetchAndLoadData.", { currentSiteId, currentRange, currentFetchHash, lastFetchHash });
-
-    // Use async immediately to handle the promise
-    (async () => {
-      try {
-        // Pass currentSiteId and currentRange directly (already validated by hash check)
-        await sqlState.fetchAndLoadData(currentSiteId!, currentRange!); // Non-null assertion safe here
-
-        // If fetchAndLoadData completes without throwing, update lastFetchHash
-        // Check status again in case of errors within fetchAndLoadData that set status='error'
-        const finalSqlState = useSqlStore.getState();
-        if (finalSqlState.status !== 'error') {
-          console.log("SQL Store: fetchAndLoadData completed successfully. Updating lastFetchHash.", { newHash: currentFetchHash });
-          useSqlStore.setState({ lastFetchHash: currentFetchHash });
-        } else {
-          console.warn("SQL Store: fetchAndLoadData finished but ended in error state. Not updating lastFetchHash.");
-          // Optionally reset lastFetchHash to null if the fetch failed?
-          // useSqlStore.setState({ lastFetchHash: null });
-        }
-      } catch (error) {
-        // Error should have been handled and state set within fetchAndLoadData,
-        // but log here just in case. Resetting hash might be appropriate here too.
-        console.error("SQL Store: Uncaught error during fetchAndLoadData triggered by subscriber:", error);
-        // useSqlStore.setState({ lastFetchHash: null }); // Consider resetting hash on unexpected error
-      }
-    })();
-  }
-  // No selector or options object used with the basic subscribe signature
+  (state) => [
+    state.selectedSiteId,
+    state.selectedRange
+  ],
+  () => {
+    const {status, fetchAndLoadData} = useSqlStore.getState();
+    if (status !== "idle") { return; }
+    fetchAndLoadData();
+  },
+  { fireImmediately: true }
 );
-
-// Initialize lastKnownHttpState after store creation
-lastKnownHttpState = {
-  selectedSiteId: useHttpStore.getState().selectedSiteId,
-  selectedRange: useHttpStore.getState().selectedRange,
-};

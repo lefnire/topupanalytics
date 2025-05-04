@@ -3,7 +3,7 @@
  * Any and all things analytics data (aggregation, SQL, SanKey, etc) belong to ./analyticsSqlStore.ts
  */
 import { create } from "zustand";
-import { persist, createJSONStorage } from 'zustand/middleware';
+import {persist, createJSONStorage, subscribeWithSelector} from 'zustand/middleware';
 import { type DateRange } from 'react-day-picker';
 import { subDays, startOfDay, endOfDay, isValid, parseISO } from 'date-fns';
 
@@ -51,7 +51,7 @@ const initialHttpState: Pick<AnalyticsHttpState,
 
 // --- Zustand Store ---
 export const useHttpStore = create<AnalyticsHttpState>()(
-  persist(
+  subscribeWithSelector(persist(
     (set, get) => ({
       ...initialHttpState,
 
@@ -207,5 +207,5 @@ export const useHttpStore = create<AnalyticsHttpState>()(
         }, 0);
       }
     }
-  )
+  ))
 );
