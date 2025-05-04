@@ -257,7 +257,7 @@ export const createOrReplaceAnalyticsView = async (
                    END AS channel,
                    CASE
                        WHEN COALESCE(referer_domain, '$direct', 'Unknown') = '$direct' THEN '$direct'
-                       ELSE regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\\\.', '') -- Corrected: Double escape for SQL string literal
+                       ELSE regexp_replace(LOWER(TRIM(COALESCE(referer_domain, '$direct', 'Unknown'))), '^www\.', '') -- Handle case/whitespace
                    END AS source
             FROM base
         )
