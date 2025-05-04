@@ -1,3 +1,7 @@
+/**
+ * This file should handle only handle state-management and data related to HTTP
+ * Any and all things analytics data (aggregation, SQL, SanKey, etc) belong to ./analyticsSqlStore.ts
+ */
 import { create } from "zustand";
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { type DateRange } from 'react-day-picker';
@@ -20,31 +24,18 @@ export interface AnalyticsHttpState {
   selectedRange: DateRange | undefined;
   isAddSiteModalOpen: boolean;
 
-  // Card Tab Preferences
-  sourcesTab: string;
-  pagesTab: string;
-  regionsTab: string;
-  devicesTab: string;
-  eventsTab: string;
-
   // Actions
   fetchSites: () => Promise<void>;
   setSelectedSiteId: (siteId: string | null) => void;
   setSelectedRange: (range: DateRange | undefined) => void;
   setAddSiteModalOpen: (isOpen: boolean) => void;
-  setSourcesTab: (tab: string) => void;
-  setPagesTab: (tab: string) => void;
-  setRegionsTab: (tab: string) => void;
-  setDevicesTab: (tab: string) => void;
-  setEventsTab: (tab: string) => void;
   resetHttpState: () => Partial<AnalyticsHttpState>; // Renamed for clarity
 }
 
 // Define the initial state for the HTTP store
 const initialHttpState: Pick<AnalyticsHttpState,
   'status' | 'error' | 'sites' | 'selectedSiteId' | 'userPreferences' |
-  'selectedRange' | 'isAddSiteModalOpen' | 'sourcesTab' | 'pagesTab' |
-  'regionsTab' | 'devicesTab' | 'eventsTab'
+  'selectedRange' | 'isAddSiteModalOpen'
 > = {
   status: 'idle',
   error: null,
@@ -56,11 +47,6 @@ const initialHttpState: Pick<AnalyticsHttpState,
     to: endOfDay(new Date()),
   },
   isAddSiteModalOpen: false,
-  sourcesTab: 'channels',
-  pagesTab: 'topPages',
-  regionsTab: 'countries',
-  devicesTab: 'browsers',
-  eventsTab: 'events',
 };
 
 // --- Zustand Store ---
@@ -148,11 +134,6 @@ export const useHttpStore = create<AnalyticsHttpState>()(
         console.log(`HTTP Store: Setting Add Site Modal open state to: ${isOpen}`);
         set({ isAddSiteModalOpen: isOpen });
       },
-      setSourcesTab: (tab: string) => set({ sourcesTab: tab }),
-      setPagesTab: (tab: string) => set({ pagesTab: tab }),
-      setRegionsTab: (tab: string) => set({ regionsTab: tab }),
-      setDevicesTab: (tab: string) => set({ devicesTab: tab }),
-      setEventsTab: (tab: string) => set({ eventsTab: tab }),
 
     }),
     {
@@ -162,12 +143,7 @@ export const useHttpStore = create<AnalyticsHttpState>()(
         // Persist only user preferences and selections
         selectedSiteId: state.selectedSiteId,
         selectedRange: state.selectedRange, // Let middleware handle serialization
-        sourcesTab: state.sourcesTab,
-        pagesTab: state.pagesTab,
-        regionsTab: state.regionsTab,
-        devicesTab: state.devicesTab,
-        eventsTab: state.eventsTab,
-        // Do not persist: status, error, sites, userPreferences, isAddSiteModalOpen
+        // Do not persist: status, error, sites, userPreferences, isAddSiteModalOpen, tabs
       }),
       onRehydrateStorage: () => (state, error) => {
         console.log("HTTP Store: Rehydrating state...");

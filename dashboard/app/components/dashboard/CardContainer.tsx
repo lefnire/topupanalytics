@@ -1,5 +1,5 @@
 import React, { memo, useCallback } from 'react';
-import { useHttpStore, type AnalyticsHttpState } from '../../stores/analyticsHttpStore'; // Import HTTP store and state
+import { useSqlStore, type AnalyticsSqlState } from '../../stores/analyticsSqlStore'; // Import SQL store and state
 import { useShallow } from 'zustand/shallow';
 // Remove AnalyticsState import from old store
 import type { AggregatedData, CardDataItem, Segment } from '../../stores/analyticsTypes'; // Keep type imports
@@ -11,8 +11,8 @@ export type CardMeta = { // Added export
   title: string;
   tabs: { key: string; label: string }[];
   dataSelector: (agg: AggregatedData | null) => Record<string, CardDataItem[]>;
-  tabGet: (s: AnalyticsHttpState) => string; // Use HTTP state for tabs
-  tabSet: (s: AnalyticsHttpState) => (key: string) => void; // Use HTTP state for tabs
+  tabGet: (s: AnalyticsSqlState) => string; // Use SQL state for tabs
+  tabSet: (s: AnalyticsSqlState) => (key: string) => void; // Use SQL state for tabs
   renderHeader?: (active: string) => React.ReactNode;
   renderItem?: (item: CardDataItem, idx: number, active: string) => React.ReactNode;
   // Updated: getSegment now returns the full Segment object or null
@@ -140,10 +140,10 @@ export const CardContainer: React.FC<{ // Added export
     aggregatedData: AggregatedData | null;
     onItemClick: (segment: Segment) => void; // Pass handler down
 }> = memo(({ meta, loading, aggregatedData, onItemClick }) => {
-  // Select tab state and setter from HTTP store
-  const { activeTab, setActiveTab } = useHttpStore(useShallow((state: AnalyticsHttpState) => ({ // Use HTTP state
-    activeTab: meta.tabGet(state), // tabGet now expects AnalyticsHttpState
-    setActiveTab: meta.tabSet(state), // tabSet now expects AnalyticsHttpState
+  // Select tab state and setter from SQL store
+  const { activeTab, setActiveTab } = useSqlStore(useShallow((state: AnalyticsSqlState) => ({ // Use SQL state
+    activeTab: meta.tabGet(state), // tabGet now expects AnalyticsSqlState
+    setActiveTab: meta.tabSet(state), // tabSet now expects AnalyticsSqlState
   })));
 
   // Use the meta.getSegment function defined in CARD_META

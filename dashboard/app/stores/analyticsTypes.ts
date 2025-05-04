@@ -89,7 +89,7 @@ export interface SankeyData {
 }
 
 // Define status types
-export type AnalyticsStatus = 'idle' | 'initializing' | 'loading_data' | 'aggregating' | 'error';
+export type AnalyticsStatus = 'idle' | 'initializing' | 'loading_data' | 'aggregating' | 'aggregating_tab' | 'error';
 
 // Define Segment structure
 export interface Segment {

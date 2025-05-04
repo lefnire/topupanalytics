@@ -104,27 +104,40 @@ export const generateWhereClause = (segments: Segment[]): string => {
  * @param connection The DuckDB connection.
  * @param selectedRange The selected date range.
  * @param segments The active segments.
- * @returns A promise resolving to the AggregatedData object.
+ * Runs the essential base aggregations (stats, chart, available keys) and the aggregations for the initially selected tabs.
+ * @param connection The DuckDB connection.
+ * @param selectedRange The selected date range (needed for chart).
+ * @param segments The active segments.
+ * @param views An object containing the initially selected view/tab for each category.
+ * @returns A promise resolving to the AggregatedData object containing base data and initial tab data.
  */
 export const runAggregations = async (
     connection: duckdb.AsyncDuckDBConnection,
     selectedRange: DateRange,
-    segments: Segment[]
-): Promise<AggregatedData> => {
+    segments: Segment[],
+    views: {
+        sourcesView: string;
+        pagesView: string;
+        regionsView: string;
+        devicesView: string;
+        eventsView: string; // Assuming 'events' is the only view for now
+    }
+): Promise<Partial<AggregatedData>> => { // Return Partial as only initial tabs are loaded
     if (!connection || !selectedRange?.from || !selectedRange?.to) {
         throw new Error("Invalid connection or date range for aggregation.");
     }
 
-    console.log("Running aggregations...");
+    console.log("Running initial aggregations for views:", views);
     const whereClause = generateWhereClause(segments);
     console.log("Aggregating with WHERE clause:", whereClause);
 
     try {
+        // --- Base Aggregations (Always Run) ---
+
         // Stats Query
         const statsQuery = `
             WITH SessionPageViews AS (
-                SELECT session_id,
-                       COUNT(*) FILTER (WHERE event = 'page_view') as page_view_count
+                SELECT session_id, COUNT(*) FILTER (WHERE event = 'page_view') as page_view_count
                 FROM analytics ${whereClause} GROUP BY session_id
             ), SessionDurations AS (
                  SELECT session_id, epoch_ms(MAX(timestamp)) - epoch_ms(MIN(timestamp)) AS duration_ms
@@ -165,91 +178,6 @@ export const runAggregations = async (
         `;
         const chartDataPromise = connection.query(chartDataQuery).then(arrowTableToObjects<ChartDataPoint>);
 
-        // Sources Query
-        const sourcesQuery = `
-            WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
-            -- Channel, Source, and Campaign counts from the pre-calculated columns in the view
-            ChannelCounts AS ( SELECT channel AS name, COUNT(DISTINCT session_id) AS value FROM FilteredAnalytics GROUP BY channel ),
-            SourceCounts AS ( SELECT source AS name, COUNT(DISTINCT session_id) AS value FROM FilteredAnalytics GROUP BY source ),
-            CampaignCounts AS ( SELECT COALESCE(utm_campaign, '(not set)') AS name, COUNT(DISTINCT session_id) AS value FROM FilteredAnalytics WHERE utm_campaign IS NOT NULL GROUP BY name )
-            SELECT 'channels' as type, name, value FROM ChannelCounts WHERE value > 0
-            UNION ALL SELECT 'sources' as type, name, value FROM SourceCounts WHERE value > 0
-            UNION ALL SELECT 'campaigns' as type, name, value FROM CampaignCounts WHERE value > 0
-            ORDER BY type, value DESC LIMIT 300;
-        `;
-        const sourcesPromise = connection.query(sourcesQuery).then(result => {
-            const rows = arrowTableToObjects<{ type: string; name: string; value: number }>(result);
-            return { channels: toCards(rows, 'channels'), sources: toCards(rows, 'sources'), campaigns: toCards(rows, 'campaigns') };
-        });
-
-        // Pages Query
-        const pagesQuery = `
-            WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
-            PageViews AS ( SELECT session_id, pathname, timestamp FROM FilteredAnalytics WHERE event = 'page_view' AND pathname IS NOT NULL AND trim(pathname) != '' ),
-            RankedPageViews AS ( SELECT *, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp ASC) as rn_asc, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp DESC) as rn_desc FROM PageViews ),
-            TopPages AS ( SELECT pathname AS name, COUNT (*) AS value FROM RankedPageViews GROUP BY pathname ),
-            EntryPages AS ( SELECT pathname AS name, COUNT (*) AS value FROM RankedPageViews WHERE rn_asc = 1 GROUP BY pathname ),
-            ExitPages AS ( SELECT pathname AS name, COUNT (*) AS value FROM RankedPageViews WHERE rn_desc = 1 GROUP BY pathname )
-            SELECT 'topPages' as type, name, value FROM TopPages WHERE value > 0
-            UNION ALL SELECT 'entryPages' as type, name, value FROM EntryPages WHERE value > 0
-            UNION ALL SELECT 'exitPages' as type, name, value FROM ExitPages WHERE value > 0
-            ORDER BY type, value DESC LIMIT 300;
-        `;
-        const pagesPromise = connection.query(pagesQuery).then(result => {
-            const rows = arrowTableToObjects<{ type: string; name: string; value: number }>(result);
-            return { topPages: toCards(rows, 'topPages'), entryPages: toCards(rows, 'entryPages'), exitPages: toCards(rows, 'exitPages') };
-        });
-
-        // Regions Query
-        const regionsQuery = `
-            WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
-            CountryCounts AS ( SELECT COALESCE(country, 'Unknown') AS name, COUNT(DISTINCT session_id) AS value FROM FilteredAnalytics GROUP BY name ),
-            RegionCounts AS ( SELECT COALESCE(region, 'Unknown') AS name, COUNT(DISTINCT session_id) AS value FROM FilteredAnalytics GROUP BY name )
-            SELECT 'countries' as type, name, value FROM CountryCounts WHERE value > 0
-            UNION ALL SELECT 'regions' as type, name, value FROM RegionCounts WHERE value > 0 AND name != 'Unknown'
-            ORDER BY type, value DESC LIMIT 200;
-        `;
-        const regionsPromise = connection.query(regionsQuery).then(result => {
-            const rows = arrowTableToObjects<{ type: string; name: string; value: number }>(result);
-            return { countries: toCards(rows, 'countries'), regions: toCards(rows, 'regions') };
-        });
-
-        // Devices Query
-        const devicesQuery = `
-            WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
-            VisitorCounts AS (
-                SELECT session_id, FIRST(COALESCE(browser, 'Unknown')) as browser, FIRST(COALESCE(os, 'Unknown')) as os,
-                       FIRST(CASE WHEN screen_width IS NOT NULL AND screen_height IS NOT NULL THEN screen_width::VARCHAR || 'x' || screen_height::VARCHAR ELSE 'Unknown' END) as screen_size
-                FROM FilteredAnalytics GROUP BY session_id
-            ),
-            TotalVisitors AS ( SELECT COUNT(*) as total FROM VisitorCounts ),
-            BrowserCounts AS ( SELECT browser AS name, COUNT (*) AS value FROM VisitorCounts GROUP BY name ),
-            OsCounts AS ( SELECT os AS name, COUNT (*) AS value FROM VisitorCounts GROUP BY name ),
-            ScreenSizeCounts AS ( SELECT screen_size AS name, COUNT (*) AS value FROM VisitorCounts GROUP BY name )
-            SELECT 'browsers' as type, BC.name, BC.value, (BC.value::DOUBLE / TV.total) * 100 AS percentage FROM BrowserCounts BC, TotalVisitors TV WHERE BC.value > 0
-            UNION ALL SELECT 'os' as type, OC.name, OC.value, (OC.value::DOUBLE / TV.total) * 100 AS percentage FROM OsCounts OC, TotalVisitors TV WHERE OC.value > 0
-            UNION ALL SELECT 'screenSizes' as type, SC.name, SC.value, (SC.value::DOUBLE / TV.total) * 100 AS percentage FROM ScreenSizeCounts SC, TotalVisitors TV WHERE SC.value > 0 AND SC.name != 'Unknown'
-            ORDER BY type, value DESC LIMIT 300;
-        `;
-        const devicesPromise = connection.query(devicesQuery).then(result => {
-            const rows = arrowTableToObjects<{ type: string; name: string; value: number; percentage: number }>(result);
-            return { browsers: toCards(rows, 'browsers'), os: toCards(rows, 'os'), screenSizes: toCards(rows, 'screenSizes') };
-        });
-
-        // Events Query
-        const eventsQuery = `
-           WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
-            EventCounts AS (
-                SELECT COALESCE(event, 'Unknown') AS name,
-                    COUNT(*) as events, COUNT(DISTINCT session_id) as value
-                FROM FilteredAnalytics GROUP BY name
-            ), TotalVisitors AS ( SELECT COUNT(DISTINCT session_id) as total FROM FilteredAnalytics )
-            SELECT E.name, E.value, E.events,
-                   CASE WHEN T.total > 0 THEN (E.value::DOUBLE / T.total) * 100 ELSE 0 END AS percentage
-            FROM EventCounts E, TotalVisitors T WHERE E.value > 0 ORDER BY E.value DESC LIMIT 100;
-        `;
-        const eventsPromise = connection.query(eventsQuery).then(arrowTableToObjects<CardDataItem>);
-
         // Available Custom Property Keys Query
         const keysQuery = `
             SELECT DISTINCT unnest(json_keys(json(properties))) AS key
@@ -258,24 +186,281 @@ export const runAggregations = async (
         const keysPromise = connection.query(keysQuery).then(result => arrowTableToObjects<{ key: string }>(result).map(row => row.key))
             .catch(err => { console.warn("Could not get custom property keys:", err); return []; });
 
+
+        // --- Initial Tab Aggregations (Run based on views argument) ---
+        const sourcesPromise = runSourcesAggregationSql(connection, segments, views.sourcesView);
+        const pagesPromise = runPagesAggregationSql(connection, segments, views.pagesView);
+        const regionsPromise = runRegionsAggregationSql(connection, segments, views.regionsView);
+        const devicesPromise = runDevicesAggregationSql(connection, segments, views.devicesView);
+        const eventsPromise = runEventsAggregationSql(connection, segments, views.eventsView); // Assuming 'events' is the only view type for now
+
+
         // --- Execute & Combine ---
-        const [stats, chartData, sources, pages, regions, devices, eventsData, availableKeys] = await Promise.all([
-            statsPromise, chartDataPromise, sourcesPromise, pagesPromise, regionsPromise, devicesPromise, eventsPromise, keysPromise
+        const [stats, chartData, availableKeys, sources, pages, regions, devices, eventsData] = await Promise.all([
+            statsPromise, chartDataPromise, keysPromise,
+            sourcesPromise, pagesPromise, regionsPromise, devicesPromise, eventsPromise
         ]);
 
-        const aggregatedData: AggregatedData = {
-            stats, chartData, eventsData, sources, pages, regions, devices,
+        // Construct the initial aggregated data object
+        // Note: sources, pages, etc., will only contain data for the *initial* view
+        const aggregatedData: Partial<AggregatedData> = {
+            stats,
+            chartData,
+            eventsData, // This comes directly from runEventsAggregationSql
+            sources,    // Result from runSourcesAggregationSql
+            pages,      // Result from runPagesAggregationSql
+            regions,    // Result from runRegionsAggregationSql
+            devices,    // Result from runDevicesAggregationSql
             customProperties: { availableKeys, aggregatedValues: null } // Initialize aggregatedValues as null
         };
 
-        console.log("Aggregation complete.");
+        console.log("Initial aggregation complete.");
         return aggregatedData;
 
     } catch (aggregationError: any) {
-        console.error("Error during data aggregation:", aggregationError);
+        console.error("Error during initial data aggregation:", aggregationError);
         throw aggregationError; // Re-throw to be handled by the store
     }
 };
+
+
+// ============================================================================
+// Specific Aggregation Functions (Called by Routers or runSpecificAggregation)
+// ============================================================================
+
+// --- Sources ---
+export const runSourcesChannelsSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
+    const whereClause = generateWhereClause(segments);
+    const query = `
+        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} )
+        SELECT channel AS name, COUNT(DISTINCT session_id) AS value
+        FROM FilteredAnalytics GROUP BY channel HAVING value > 0 ORDER BY value DESC LIMIT 100;
+    `;
+    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+export const runSourcesSourcesSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
+    const whereClause = generateWhereClause(segments);
+    const query = `
+        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} )
+        SELECT source AS name, COUNT(DISTINCT session_id) AS value
+        FROM FilteredAnalytics GROUP BY source HAVING value > 0 ORDER BY value DESC LIMIT 100;
+    `;
+    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+export const runSourcesCampaignsSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
+    const whereClause = generateWhereClause(segments);
+    const query = `
+        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} )
+        SELECT COALESCE(utm_campaign, '(not set)') AS name, COUNT(DISTINCT session_id) AS value
+        FROM FilteredAnalytics WHERE utm_campaign IS NOT NULL GROUP BY name HAVING value > 0 ORDER BY value DESC LIMIT 100;
+    `;
+    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+// --- Pages ---
+export const runPagesTopPagesSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
+    const whereClause = generateWhereClause(segments);
+    const query = `
+        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
+        PageViews AS ( SELECT pathname FROM FilteredAnalytics WHERE event = 'page_view' AND pathname IS NOT NULL AND trim(pathname) != '' )
+        SELECT pathname AS name, COUNT (*) AS value FROM PageViews GROUP BY pathname HAVING value > 0 ORDER BY value DESC LIMIT 100;
+    `;
+    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+export const runPagesEntryPagesSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
+    const whereClause = generateWhereClause(segments);
+    const query = `
+        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
+        PageViews AS ( SELECT session_id, pathname, timestamp FROM FilteredAnalytics WHERE event = 'page_view' AND pathname IS NOT NULL AND trim(pathname) != '' ),
+        RankedPageViews AS ( SELECT *, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp ASC) as rn_asc FROM PageViews )
+        SELECT pathname AS name, COUNT (*) AS value FROM RankedPageViews WHERE rn_asc = 1 GROUP BY pathname HAVING value > 0 ORDER BY value DESC LIMIT 100;
+    `;
+    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+export const runPagesExitPagesSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
+    const whereClause = generateWhereClause(segments);
+    const query = `
+        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
+        PageViews AS ( SELECT session_id, pathname, timestamp FROM FilteredAnalytics WHERE event = 'page_view' AND pathname IS NOT NULL AND trim(pathname) != '' ),
+        RankedPageViews AS ( SELECT *, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp DESC) as rn_desc FROM PageViews )
+        SELECT pathname AS name, COUNT (*) AS value FROM RankedPageViews WHERE rn_desc = 1 GROUP BY pathname HAVING value > 0 ORDER BY value DESC LIMIT 100;
+    `;
+    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+// --- Regions ---
+export const runRegionsCountriesSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
+    const whereClause = generateWhereClause(segments);
+    const query = `
+        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} )
+        SELECT COALESCE(country, 'Unknown') AS name, COUNT(DISTINCT session_id) AS value
+        FROM FilteredAnalytics GROUP BY name HAVING value > 0 ORDER BY value DESC LIMIT 100;
+    `;
+    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+export const runRegionsRegionsSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
+    const whereClause = generateWhereClause(segments);
+    const query = `
+        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} )
+        SELECT COALESCE(region, 'Unknown') AS name, COUNT(DISTINCT session_id) AS value
+        FROM FilteredAnalytics WHERE name != 'Unknown' GROUP BY name HAVING value > 0 ORDER BY value DESC LIMIT 100;
+    `;
+    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+// --- Devices ---
+export const runDevicesBrowsersSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
+    const whereClause = generateWhereClause(segments);
+    const query = `
+        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
+        VisitorCounts AS ( SELECT session_id, FIRST(COALESCE(browser, 'Unknown')) as browser FROM FilteredAnalytics GROUP BY session_id ),
+        TotalVisitors AS ( SELECT COUNT(*) as total FROM VisitorCounts ),
+        BrowserCounts AS ( SELECT browser AS name, COUNT (*) AS value FROM VisitorCounts GROUP BY name )
+        SELECT BC.name, BC.value, (BC.value::DOUBLE / TV.total) * 100 AS percentage
+        FROM BrowserCounts BC, TotalVisitors TV WHERE BC.value > 0 ORDER BY value DESC LIMIT 100;
+    `;
+    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+export const runDevicesOsSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
+    const whereClause = generateWhereClause(segments);
+    const query = `
+        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
+        VisitorCounts AS ( SELECT session_id, FIRST(COALESCE(os, 'Unknown')) as os FROM FilteredAnalytics GROUP BY session_id ),
+        TotalVisitors AS ( SELECT COUNT(*) as total FROM VisitorCounts ),
+        OsCounts AS ( SELECT os AS name, COUNT (*) AS value FROM VisitorCounts GROUP BY name )
+        SELECT OC.name, OC.value, (OC.value::DOUBLE / TV.total) * 100 AS percentage
+        FROM OsCounts OC, TotalVisitors TV WHERE OC.value > 0 ORDER BY value DESC LIMIT 100;
+    `;
+    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+export const runDevicesScreenSizesSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
+    const whereClause = generateWhereClause(segments);
+    const query = `
+        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
+        VisitorCounts AS (
+            SELECT session_id, FIRST(CASE WHEN screen_width IS NOT NULL AND screen_height IS NOT NULL THEN screen_width::VARCHAR || 'x' || screen_height::VARCHAR ELSE 'Unknown' END) as screen_size
+            FROM FilteredAnalytics GROUP BY session_id
+        ),
+        TotalVisitors AS ( SELECT COUNT(*) as total FROM VisitorCounts ),
+        ScreenSizeCounts AS ( SELECT screen_size AS name, COUNT (*) AS value FROM VisitorCounts GROUP BY name )
+        SELECT SC.name, SC.value, (SC.value::DOUBLE / TV.total) * 100 AS percentage
+        FROM ScreenSizeCounts SC, TotalVisitors TV WHERE SC.value > 0 AND SC.name != 'Unknown' ORDER BY value DESC LIMIT 100;
+    `;
+    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+// --- Events ---
+// Assuming only one type of event aggregation for now
+export const runEventsEventsSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
+    const whereClause = generateWhereClause(segments);
+    const query = `
+       WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
+        EventCounts AS (
+            SELECT COALESCE(event, 'Unknown') AS name,
+                COUNT(*) as events, COUNT(DISTINCT session_id) as value
+            FROM FilteredAnalytics GROUP BY name
+        ), TotalVisitors AS ( SELECT COUNT(DISTINCT session_id) as total FROM FilteredAnalytics )
+        SELECT E.name, E.value, E.events,
+               CASE WHEN T.total > 0 THEN (E.value::DOUBLE / T.total) * 100 ELSE 0 END AS percentage
+        FROM EventCounts E, TotalVisitors T WHERE E.value > 0 ORDER BY E.value DESC LIMIT 100;
+    `;
+    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+
+// ============================================================================
+// Aggregation Router Functions (Called by runAggregations or runSpecificAggregation)
+// ============================================================================
+
+export const runSourcesAggregationSql = async (
+    conn: duckdb.AsyncDuckDBConnection,
+    segments: Segment[],
+    viewType: string
+): Promise<AggregatedData['sources']> => {
+    console.log(`Running sources aggregation for view: ${viewType}`);
+    const emptyResult = { channels: [], sources: [], campaigns: [] };
+    switch (viewType) {
+        case 'channels': return { ...emptyResult, channels: await runSourcesChannelsSql(conn, segments) };
+        case 'sources': return { ...emptyResult, sources: await runSourcesSourcesSql(conn, segments) };
+        case 'campaigns': return { ...emptyResult, campaigns: await runSourcesCampaignsSql(conn, segments) };
+        default:
+            console.warn(`Unknown sources viewType: ${viewType}, defaulting to channels.`);
+            return { ...emptyResult, channels: await runSourcesChannelsSql(conn, segments) };
+    }
+};
+
+export const runPagesAggregationSql = async (
+    conn: duckdb.AsyncDuckDBConnection,
+    segments: Segment[],
+    viewType: string
+): Promise<AggregatedData['pages']> => {
+    console.log(`Running pages aggregation for view: ${viewType}`);
+    const emptyResult = { topPages: [], entryPages: [], exitPages: [] };
+    switch (viewType) {
+        case 'topPages': return { ...emptyResult, topPages: await runPagesTopPagesSql(conn, segments) };
+        case 'entryPages': return { ...emptyResult, entryPages: await runPagesEntryPagesSql(conn, segments) };
+        case 'exitPages': return { ...emptyResult, exitPages: await runPagesExitPagesSql(conn, segments) };
+        default:
+            console.warn(`Unknown pages viewType: ${viewType}, defaulting to topPages.`);
+            return { ...emptyResult, topPages: await runPagesTopPagesSql(conn, segments) };
+    }
+};
+
+export const runRegionsAggregationSql = async (
+    conn: duckdb.AsyncDuckDBConnection,
+    segments: Segment[],
+    viewType: string
+): Promise<AggregatedData['regions']> => {
+    console.log(`Running regions aggregation for view: ${viewType}`);
+    const emptyResult = { countries: [], regions: [] };
+    switch (viewType) {
+        case 'countries': return { ...emptyResult, countries: await runRegionsCountriesSql(conn, segments) };
+        case 'regions': return { ...emptyResult, regions: await runRegionsRegionsSql(conn, segments) };
+        default:
+            console.warn(`Unknown regions viewType: ${viewType}, defaulting to countries.`);
+            return { ...emptyResult, countries: await runRegionsCountriesSql(conn, segments) };
+    }
+};
+
+export const runDevicesAggregationSql = async (
+    conn: duckdb.AsyncDuckDBConnection,
+    segments: Segment[],
+    viewType: string
+): Promise<AggregatedData['devices']> => {
+    console.log(`Running devices aggregation for view: ${viewType}`);
+    const emptyResult = { browsers: [], os: [], screenSizes: [] };
+    switch (viewType) {
+        case 'browsers': return { ...emptyResult, browsers: await runDevicesBrowsersSql(conn, segments) };
+        case 'os': return { ...emptyResult, os: await runDevicesOsSql(conn, segments) };
+        case 'screenSizes': return { ...emptyResult, screenSizes: await runDevicesScreenSizesSql(conn, segments) };
+        default:
+            console.warn(`Unknown devices viewType: ${viewType}, defaulting to browsers.`);
+            return { ...emptyResult, browsers: await runDevicesBrowsersSql(conn, segments) };
+    }
+};
+
+// Assuming only 'events' view type for now
+export const runEventsAggregationSql = async (
+    conn: duckdb.AsyncDuckDBConnection,
+    segments: Segment[],
+    viewType: string // Keep signature consistent, even if unused for now
+): Promise<AggregatedData['eventsData']> => {
+    console.log(`Running events aggregation (view: ${viewType})`);
+    // Currently only one event aggregation type exists
+    return runEventsEventsSql(conn, segments);
+};
+
+
+// ============================================================================
+// Other Aggregations (Custom Properties, Sankey) - Unchanged for Phase 2
+// ============================================================================
 
 /**
  * Runs aggregation for a specific custom property key.
