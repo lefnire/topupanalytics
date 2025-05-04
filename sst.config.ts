@@ -536,6 +536,12 @@ export default $config({
         allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allowHeaders: ["Content-Type", "Authorization"],
       },
+      // Enable compression for all responses if client supports it
+      transform: {
+        stage: (args) => {
+          args.minimumCompressionSize = 0;
+        },
+      },
     });
     // Define JWT Authorizer (Using SST User Pool and Client)
     const jwtAuthorizer = api.addAuthorizer({
