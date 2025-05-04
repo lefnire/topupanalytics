@@ -4,11 +4,11 @@
  * 1. Aggregating the data based on applied segments, filters, etc.
  * It should never fetch data from an HTTP endpoint, nor handle general site variables unrelated to analytics data management. See ./analyticsHttpStore for those.
  *
- * The final table, used for building the various aggregations, is constructed by taking {initial_events, events} from the HTTP response of /api/query, and merging them like so.
- * 1. initial_events has all the properties from an initial page load. referer, utm_*, screen_height, session_id, etc.
- * 1. events has only the subsequenty properties that are different. Eg pathname, properties, timestamp, session_id.
- *
- * So intial_events has everything, and events are deltas. Then, the DB joins each session (a sequence of initial_events->evenst[]) via session_id, forward-filling (like df.ffill()) any missing properties from the first event (initial_events).
+ * 1. /api/query fetches {initial_events, events}.
+ * 1. initial_events are "fully hydrated" web analytics page-view events which include everything that can be known about a page_view (referer, screen_height, utm_*, etc)
+ * 1. events are all subsequent events of the same session_id, and only include the "deltas": pathname, properties (eg if they click a button that has some property tag), etc.
+ * 1. when the DuckDB is initialized, it joins a chain of initial_events & events by session_id as initial_events[0]->events[*]. It "hydrates" all events by filling in their missing properties from that session's initial_events, like `pandas.DataFrame.ffill()`.
+ * 1. The goal of ffill is (1) so that the DuckDB table has the same number of columns for the merged initial_events & events (that's to say, the number of columns from initial_events, since that's the full picture); and (2) so that every event row has all the relevant properties to perform segmentation.
  */
 
 import { create, type StateCreator } from "zustand"; // Import StateCreator as type

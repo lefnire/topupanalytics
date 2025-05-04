@@ -62,39 +62,42 @@ export const generateCreateTableSQL = (tableName: string, schema: { name: string
 export const generateWhereClause = (segments: Segment[]): string => {
     if (segments.length === 0) return 'WHERE 1=1'; // Return a clause that always evaluates to true if no segments
 
-    const conditions = segments.map(segment => {
+    const subQueries = segments.map(segment => {
         const column = segment.dbColumn || `\"${segment.type}\"`; // Use dbColumn if provided, else derive from type
         let value = segment.dbValue !== undefined ? segment.dbValue : segment.value; // Use dbValue if provided
         const quotedValue = typeof value === 'string' ? `'${value.replace(/'/g, "''")}'` : value; // Quote strings and escape single quotes
 
+        let condition: string;
         if (segment.type.startsWith('custom:')) {
             // Handle custom properties stored in a JSON column
             const propKey = segment.type.split(':')[1].replace(/[^a-zA-Z0-9_]/g, ''); // Sanitize key
-            return `json_extract_string(properties, '$.${propKey}') = ${quotedValue}`;
+            condition = `json_extract_string(properties, '$.${propKey}') = ${quotedValue}`;
         } else if (segment.type === 'screen_size') {
              // Special handling: screen size is derived from width and height columns
-             return `(screen_width::VARCHAR || 'x' || screen_height::VARCHAR) = ${quotedValue}`;
+             condition = `(screen_width::VARCHAR || 'x' || screen_height::VARCHAR) = ${quotedValue}`;
         } else if (segment.type === 'channel') {
             // Channel is now a pre-calculated column
-            return `channel = ${quotedValue}`;
+            condition = `channel = ${quotedValue}`;
         } else if (segment.type === 'referer_domain') {
              // Special handling: strip www. from DB value for comparison, handle '$direct'
              if (value === '$direct') {
-                 return `COALESCE(referer_domain, '$direct', 'Unknown') = '$direct'`;
+                 condition = `COALESCE(referer_domain, '$direct', 'Unknown') = '$direct'`;
              } else {
                  // Need to double-escape the backslash in the regex string for SQL
-                 return `regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\.', '') = ${quotedValue}`;
+                 condition = `regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\.', '') = ${quotedValue}`;
              }
         } else if (segment.type === 'source') {
             // Source is now a pre-calculated column
-            return `source = ${quotedValue}`;
+            condition = `source = ${quotedValue}`;
         } else {
             // Default: simple equality check for other columns assumed to exist directly on the view
-            return `${column} = ${quotedValue}`;
+            condition = `${column} = ${quotedValue}`;
         }
+        // Wrap the condition in the subquery
+        return `session_id IN (SELECT DISTINCT session_id FROM analytics WHERE ${condition})`;
     });
 
-    return `WHERE ${conditions.join(' AND ')}`;
+    return `WHERE ${subQueries.join('\n      AND\n      ')}`; // Add newlines and indentation for readability
 };
 
 // ============================================================================
@@ -211,59 +214,94 @@ export const createOrReplaceAnalyticsView = async (
    initialOnlySchema: { name: string; type: string }[] // Use inline type
 ): Promise<void> => {
     const fullInitialSchema = [...commonSchema, ...initialOnlySchema];
-    const eventSpecificCols = ['event', 'pathname', 'timestamp', 'properties']; // Columns specific to 'events' table or derived later
-    const staticCols = fullInitialSchema.filter(col => !eventSpecificCols.includes(col.name)).map(col => col.name);
+    // Define which columns are event-specific (not filled) vs static (filled)
+    const eventSpecificCols = ['event', 'pathname', 'timestamp', 'properties'];
+    const staticColsSchema = fullInitialSchema.filter(col => !eventSpecificCols.includes(col.name));
+    const staticColNames = staticColsSchema.map(col => col.name);
 
-    // Ensure session_id exists before partitioning by it, fallback needed
-    const partitionKey = staticCols.includes('session_id') ? 'session_id' : (staticCols.length > 0 ? staticCols[0] : null); // Fallback if no session_id
+    // Ensure session_id exists for partitioning, otherwise error (should always exist)
+    if (!staticColNames.includes('session_id')) {
+        throw new Error("Critical Error: session_id column is missing from the schema, cannot create analytics view.");
+    }
+    const partitionKey = 'session_id'; // Always partition by session_id
 
-    const staticColFirstValues = staticCols.map(col =>
-      partitionKey
-        ? `FIRST_VALUE(d."${col}") OVER (PARTITION BY d."${partitionKey}" ORDER BY d."timestamp") AS "${col}"`
-        : `d."${col}"` // If no partition key, just select the column directly (shouldn't happen with session_id)
-    ).join(',\n                 ');
+    // --- SQL Generation ---
 
+    // Columns for the initial SELECT from initial_events and events
     const nullPlaceholders = initialOnlySchema.map(c => `NULL AS "${c.name}"`).join(', ');
     const commonSelectColsQuoted = commonSchema.map(c => `"${c.name}"`);
-    const allColsSelectString = [...commonSelectColsQuoted, ...initialOnlySchema.map(c => `"${c.name}"`)].join(', ');
+    const allInitialColsSelectString = fullInitialSchema.map(c => `"${c.name}"`).join(', ');
+    const allEventColsSelectString = `${commonSelectColsQuoted.join(', ')}${initialOnlySchema.length > 0 ? ', ' + nullPlaceholders : ''}`;
 
+    // Columns for the forward-fill CTE (filled_base)
+    const eventColsSelect = eventSpecificCols.map(c => `b."${c}"`).join(', ');
+    const staticColsFilledSelect = staticColNames.map(col =>
+        `FIRST_VALUE(b."${col}") OVER (PARTITION BY b."${partitionKey}" ORDER BY b."timestamp" ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS "${col}"`
+    ).join(',\n            '); // Added explicit frame clause for clarity/correctness
+
+    // Columns for the final derived CTE (derived_final) - select all from filled_base + calculate channel/source
+    const allFilledColsSelect = [...eventSpecificCols, ...staticColNames].map(c => `fb."${c}"`).join(', ');
+
+    // Channel and Source calculation logic (using filled columns)
+    // Ensure all potentially used columns (referer_domain, utm_medium) are quoted correctly
+    const channelCalculation = `
+        CASE
+            WHEN fb."utm_medium" = 'cpc' OR fb."utm_medium" = 'ppc' THEN 'Paid Search'
+            WHEN fb."utm_medium" = 'email' OR list_contains(['mail.google.com', 'com.google.android.gm'], LOWER(COALESCE(fb."referer_domain", '$direct', 'Unknown'))) THEN 'Email'
+            WHEN fb."utm_medium" = 'social' OR list_contains([
+                 'facebook', 'twitter', 'linkedin', 'instagram', 'pinterest', 'reddit', 't.co',
+                 'facebook.com', 'twitter.com', 'linkedin.com', 'instagram.com', 'pinterest.com', 'reddit.com',
+                 'com.reddit.frontpage', 'old.reddit.com', 'youtube.com', 'm.youtube.com'
+                ], LOWER(COALESCE(fb."referer_domain", '$direct', 'Unknown'))) THEN 'Social'
+            WHEN list_contains([
+                 'google', 'bing', 'duckduckgo', 'yahoo', 'ecosia', 'baidu',
+                 'google.com', 'google.co.uk', 'google.com.hk', 'yandex.ru', 'search.brave.com', 'perplexity.ai'
+                ], LOWER(COALESCE(fb."referer_domain", '$direct', 'Unknown'))) THEN 'Organic Search'
+            WHEN LOWER(COALESCE(fb."referer_domain", '$direct', 'Unknown')) = '$direct' THEN 'Direct'
+            WHEN LOWER(COALESCE(fb."referer_domain", '$direct', 'Unknown')) = 'Unknown' THEN 'Unknown'
+            WHEN COALESCE(fb."referer_domain", '$direct', 'Unknown') IS NOT NULL AND LOWER(COALESCE(fb."referer_domain", '$direct', 'Unknown')) != '$direct' THEN 'Referral'
+            ELSE 'Unknown'
+        END AS channel
+    `.trim();
+
+    const sourceCalculation = `
+        CASE
+            WHEN COALESCE(fb."referer_domain", '$direct', 'Unknown') = '$direct' THEN '$direct'
+            ELSE regexp_replace(LOWER(TRIM(COALESCE(fb."referer_domain", '$direct', 'Unknown'))), '^www\\.', '') -- Handle case/whitespace
+        END AS source
+    `.trim();
+
+    // Final SELECT statement columns
+    const finalSelectCols = [...eventSpecificCols, ...staticColNames, 'channel', 'source'].map(c => `df."${c}"`).join(', ');
+
+
+    // --- Construct the Full SQL Query ---
     const createAnalyticsViewSql = `
         CREATE OR REPLACE VIEW analytics AS
         WITH base AS (
-            SELECT ${allColsSelectString} FROM initial_events
+            -- Combine initial and subsequent events
+            SELECT ${allInitialColsSelectString} FROM initial_events
             UNION ALL
-            SELECT ${commonSelectColsQuoted.join(', ')}${initialOnlySchema.length > 0 ? ', ' + nullPlaceholders : ''} FROM events
+            SELECT ${allEventColsSelectString} FROM events
         ),
-        -- Pre-calculate channel and source for easier filtering
-        derived AS (
-            SELECT *,
-                   LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) AS referrer_lower,
-                   CASE
-                       WHEN utm_medium = 'cpc' OR utm_medium = 'ppc' THEN 'Paid Search'
-                       WHEN utm_medium = 'email' OR list_contains(['mail.google.com', 'com.google.android.gm'], LOWER(COALESCE(referer_domain, '$direct', 'Unknown'))) THEN 'Email'
-                       WHEN utm_medium = 'social' OR list_contains([
-                            'facebook', 'twitter', 'linkedin', 'instagram', 'pinterest', 'reddit', 't.co',
-                            'facebook.com', 'twitter.com', 'linkedin.com', 'instagram.com', 'pinterest.com', 'reddit.com',
-                            'com.reddit.frontpage', 'old.reddit.com', 'youtube.com', 'm.youtube.com'
-                           ], LOWER(COALESCE(referer_domain, '$direct', 'Unknown'))) THEN 'Social'
-                       WHEN list_contains([
-                            'google', 'bing', 'duckduckgo', 'yahoo', 'ecosia', 'baidu',
-                            'google.com', 'google.co.uk', 'google.com.hk', 'yandex.ru', 'search.brave.com', 'perplexity.ai'
-                           ], LOWER(COALESCE(referer_domain, '$direct', 'Unknown'))) THEN 'Organic Search'
-                       WHEN LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) = '$direct' THEN 'Direct'
-                       WHEN LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) = 'Unknown' THEN 'Unknown'
-                       WHEN COALESCE(referer_domain, '$direct', 'Unknown') IS NOT NULL AND LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) != '$direct' THEN 'Referral'
-                       ELSE 'Unknown'
-                   END AS channel,
-                   CASE
-                       WHEN COALESCE(referer_domain, '$direct', 'Unknown') = '$direct' THEN '$direct'
-                       ELSE regexp_replace(LOWER(TRIM(COALESCE(referer_domain, '$direct', 'Unknown'))), '^www\.', '') -- Handle case/whitespace
-                   END AS source
-            FROM base
+        filled_base AS (
+            -- Forward-fill static columns within each session
+            SELECT
+            ${eventColsSelect},
+            ${staticColsFilledSelect}
+            FROM base b
+        ),
+        derived_final AS (
+             -- Calculate channel and source based on filled data
+             SELECT
+                ${allFilledColsSelect},
+                ${channelCalculation},
+                ${sourceCalculation}
+             FROM filled_base fb
         )
-        -- Select base event columns, forward-filled static columns, and derived channel/source
-        SELECT d."event", d."pathname", d."timestamp", d."properties", d."channel", d."source"${staticColFirstValues ? ', ' + staticColFirstValues : ''}
-        FROM derived d;
+        -- Final view output
+        SELECT ${finalSelectCols}
+        FROM derived_final df;
     `;
 
     try {
@@ -273,6 +311,7 @@ export const createOrReplaceAnalyticsView = async (
         console.log(`SQL Util: Analytics view created/recreated successfully with ${firstRow<{ count: number }>(countResult)?.count ?? 0} events.`);
     } catch (viewError: any) {
         console.error('SQL Util: Failed to create analytics view:', viewError);
+        console.error('Failed SQL:', createAnalyticsViewSql); // Log the failed SQL
         throw viewError; // Re-throw to be handled by the caller
     }
 };
