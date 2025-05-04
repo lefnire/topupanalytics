@@ -19,7 +19,7 @@ export default $config({
   },
   async run() {
     // Read .env variables for local prod testing
-    const useProdResourcesLocally = process.env.USE_PROD_RESOURCES_LOCALLY === "true";
+    const useProdResourcesLocally = $app.stage === 'lefnire' && process.env.USE_PROD_RESOURCES_LOCALLY === "true";
     const prodApiUrl = process.env.PROD_API_URL;
     const prodUserPoolId = process.env.PROD_COGNITO_USER_POOL_ID;
     const prodClientId = process.env.PROD_COGNITO_CLIENT_ID;

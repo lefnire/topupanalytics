@@ -31,35 +31,33 @@ const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
 // Helper function for sleep
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Helper to parse Athena results into a more usable format
-const parseResults = (rows: Row[] | undefined): Record<string, any>[] => {
-    if (!rows || rows.length === 0) return [];
-    const headerRow = rows[0].Data;
-    if (!headerRow) return [];
-    const headers = headerRow.map(d => d.VarCharValue ?? 'unknown');
-    const dataRows = rows.slice(1); // Skip header row
+// Helper to parse Athena data rows using provided headers
+const parseResults = (headers: string[], dataRows: Row[] | undefined): Record<string, any>[] => {
+    if (!dataRows || dataRows.length === 0 || headers.length === 0) return [];
+
     return dataRows.map(row => {
         const record: Record<string, any> = {};
         row.Data?.forEach((datum: Datum, index: number) => {
-            // Basic type inference (can be expanded)
+            if (index >= headers.length) return; // Avoid index out of bounds if row has more data than headers somehow
+
+            const header = headers[index];
             const value = datum.VarCharValue;
+
             if (value === undefined || value === null) {
-                record[headers[index]] = null;
+                record[header] = null;
             } else if (!isNaN(Number(value))) {
-                record[headers[index]] = Number(value);
+                record[header] = Number(value);
             } else if (value.toLowerCase() === 'true' || value.toLowerCase() === 'false') {
-                record[headers[index]] = value.toLowerCase() === 'true';
+                record[header] = value.toLowerCase() === 'true';
             } else {
                  // Attempt JSON parsing for complex types like maps/arrays if needed
                  try {
-                    // Only parse if it looks like JSON (starts with { or [)
-                    if (value.trim().startsWith('{') || value.trim().startsWith('[')) {
-                        record[headers[index]] = JSON.parse(value);
-                    } else {
-                        record[headers[index]] = value;
-                    }
+                     // Attempt to parse if it looks like JSON, otherwise keep as string
+                     record[header] = (value.trim().startsWith('{') || value.trim().startsWith('['))
+                         ? JSON.parse(value)
+                         : value;
                  } catch (e) {
-                    record[headers[index]] = value; // Fallback to string if JSON parse fails
+                     record[header] = value; // Fallback to string if JSON parse fails
                  }
             }
         });
@@ -153,29 +151,67 @@ async function executeAthenaQuery(
             throw new Error(`${queryName} query did not succeed after ${attempts} attempts. Final state: ${queryState}`);
         }
 
-        // Fetch Results with Pagination Loop
-        log(`${queryName} query succeeded. Fetching all results...`);
+        // Fetch Results with Pagination
+        log(`${queryName} query succeeded. Fetching results...`);
         const allResults: Record<string, any>[] = [];
+        let headers: string[] = [];
         let currentNextToken: string | undefined = undefined;
         const maxResultsPerFetch = 1000; // Athena's max
 
-        do {
-            const resultsInput: GetQueryResultsCommandInput = {
+        // 1. Fetch the first page to get headers
+        const firstPageInput: GetQueryResultsCommandInput = {
+            QueryExecutionId: queryExecutionId,
+            MaxResults: maxResultsPerFetch,
+        };
+        log(`Fetching first results page...`);
+        const firstPageResponse: GetQueryResultsCommandOutput = await athenaClient.send(
+            new GetQueryResultsCommand(firstPageInput)
+        );
+
+        const firstPageRows = firstPageResponse.ResultSet?.Rows;
+        currentNextToken = firstPageResponse.NextToken; // Get token for the next potential fetch
+
+        if (firstPageRows && firstPageRows.length > 0) {
+            // Extract headers from the *first* row of the *first* page
+            const headerRow = firstPageRows[0].Data;
+            if (headerRow) {
+                headers = headerRow.map(d => d.VarCharValue ?? 'unknown');
+                log(`Extracted headers: ${headers.join(', ')}`);
+
+                // Parse data rows from the first page (skip header row)
+                const firstPageDataRows = firstPageRows.slice(1);
+                const firstPageParsedResults = parseResults(headers, firstPageDataRows);
+                allResults.push(...firstPageParsedResults);
+                log(`Parsed ${firstPageParsedResults.length} results from first page. Total: ${allResults.length}. More pages: ${!!currentNextToken}`);
+            } else {
+                log(`Warning: First page response has rows but no header data.`);
+            }
+        } else {
+            log(`No results found for ${queryName} query.`);
+            // No results, return empty array
+             return { results: [] };
+        }
+
+
+        // 2. Fetch subsequent pages if NextToken exists
+        while (currentNextToken) {
+            const nextPageInput: GetQueryResultsCommandInput = {
                 QueryExecutionId: queryExecutionId,
-                MaxResults: maxResultsPerFetch, // Use max allowed
-                NextToken: currentNextToken // Use token from previous fetch
+                MaxResults: maxResultsPerFetch,
+                NextToken: currentNextToken
             };
-            log(`Fetching results page... NextToken: ${currentNextToken ?? 'start'}`);
-            const resultsResponse: GetQueryResultsCommandOutput = await athenaClient.send(
-                new GetQueryResultsCommand(resultsInput)
+            log(`Fetching next results page... NextToken: ${currentNextToken}`);
+            const nextPageResponse: GetQueryResultsCommandOutput = await athenaClient.send(
+                new GetQueryResultsCommand(nextPageInput)
             );
-            const pageResults = parseResults(resultsResponse.ResultSet?.Rows);
-            allResults.push(...pageResults);
-            currentNextToken = resultsResponse.NextToken;
-            log(`Fetched ${pageResults.length} results this page. Total: ${allResults.length}. More pages: ${!!currentNextToken}`);
 
-        } while (currentNextToken); // Continue while there's a next token
-
+            // Subsequent pages do NOT contain headers, parse all rows using the headers from the first page
+            const nextPageRows = nextPageResponse.ResultSet?.Rows;
+            const nextPageParsedResults = parseResults(headers, nextPageRows); // Pass headers, parse all rows
+            allResults.push(...nextPageParsedResults);
+            currentNextToken = nextPageResponse.NextToken;
+            log(`Fetched ${nextPageParsedResults.length} results this page. Total: ${allResults.length}. More pages: ${!!currentNextToken}`);
+        }
 
         log(`Fetched a total of ${allResults.length} ${queryName} results.`);
         return { results: allResults }; // Return all accumulated results
