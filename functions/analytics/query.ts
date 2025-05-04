@@ -32,67 +32,91 @@ const ddbDocClient = DynamoDBDocumentClient.from(ddbClient);
 // Helper function for sleep
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Helper to parse Athena data rows using provided headers
-const parseResults = (headers: string[], dataRows: Row[] | undefined): Record<string, any>[] => {
-    if (!dataRows || dataRows.length === 0 || headers.length === 0) return [];
+// Helper to parse a single Athena Datum value into its appropriate JS type
+const parseDatumValue = (datum: Datum | undefined): any => {
+  const value = datum?.VarCharValue;
+  if (value === undefined || value === null) {
+    return null;
+  }
+  // Check for boolean first to avoid parsing 'true'/'false' as numbers
+  if (value.toLowerCase() === 'true') return true;
+  if (value.toLowerCase() === 'false') return false;
+  // Check for number
+  const num = Number(value);
+  if (!isNaN(num)) {
+    return num;
+  }
+  // Attempt JSON parsing for complex types
+  try {
+    if (value.trim().startsWith('{') || value.trim().startsWith('[')) {
+      return JSON.parse(value);
+    }
+  } catch (e) {
+    // Fallback to string if JSON parse fails or it's not JSON-like
+  }
+  return value; // Return as string if no other type matches
+};
 
-    return dataRows.map(row => {
-        const record: Record<string, any> = {};
-        row.Data?.forEach((datum: Datum, index: number) => {
-            if (index >= headers.length) return; // Avoid index out of bounds if row has more data than headers somehow
+// Helper to parse Athena data rows into an array of arrays based on expected headers
+const parseResults = (
+  expectedHeaders: string[],
+  actualHeaderMap: Map<string, number>,
+  dataRows: Row[] | undefined
+): any[][] => {
+  if (!dataRows || dataRows.length === 0 || expectedHeaders.length === 0 || actualHeaderMap.size === 0) {
+    return [];
+  }
 
-            const header = headers[index];
-            const value = datum.VarCharValue;
-
-            if (value === undefined || value === null) {
-                record[header] = null;
-            } else if (!isNaN(Number(value))) {
-                record[header] = Number(value);
-            } else if (value.toLowerCase() === 'true' || value.toLowerCase() === 'false') {
-                record[header] = value.toLowerCase() === 'true';
-            } else {
-                 // Attempt JSON parsing for complex types like maps/arrays if needed
-                 try {
-                     // Attempt to parse if it looks like JSON, otherwise keep as string
-                     record[header] = (value.trim().startsWith('{') || value.trim().startsWith('['))
-                         ? JSON.parse(value)
-                         : value;
-                 } catch (e) {
-                     record[header] = value; // Fallback to string if JSON parse fails
-                 }
-            }
-        });
-        return record;
-    });
+  return dataRows.map(row => {
+    const rowData: any[] = [];
+    const actualData = row.Data ?? [];
+    for (const expectedHeader of expectedHeaders) {
+      const actualIndex = actualHeaderMap.get(expectedHeader);
+      // If the expected header exists in the actual results, parse its value
+      // Otherwise, push null as a placeholder
+      const value = (actualIndex !== undefined && actualIndex < actualData.length)
+        ? parseDatumValue(actualData[actualIndex])
+        : null;
+      rowData.push(value);
+    }
+    return rowData;
+  });
 };
 
 
 /**
- * Execute an Athena query and return the results with pagination support.
+ * Defines the structure for the result of executeAthenaQuery, containing only the values array.
  */
-interface AthenaQueryResult {
-    results: Record<string, any>[];
+interface AthenaQueryResultValuesOnly {
+    values: any[][]; // Only values are returned, order matches expectedHeaders
 }
 
+/**
+ * Execute an Athena query and return the results as an array of value arrays,
+ * ordered according to the provided expectedHeaders.
+ */
 async function executeAthenaQuery(
     queryString: string,
     queryName: string,
-): Promise<AthenaQueryResult> { // Updated return type
-    log(`Executing ${queryName} Query:`, queryString);
+    expectedHeaders: string[], // Added parameter
+): Promise<AthenaQueryResultValuesOnly> { // Use the new interface type
+   log(`Executing ${queryName} Query:`, queryString);
 
     const finalQuery = queryString.replace(/\\s*--.*$/gm, '').trim().replace(/;$/, '');
 
-    const s3OutputLocation = `s3://${Resource.AthenaResults.name}/`; // Construct the full path using the bucket name
-    console.log(`Using Athena Output Location: ${s3OutputLocation}`);
+    // @ts-ignore - Ignore SST Resource type error
+    const s3OutputLocation = `s3://${Resource.AthenaResults.name}/`;
+    log(`Using Athena Output Location: ${s3OutputLocation}`);
 
     const startQueryCmd = new StartQueryExecutionCommand({
         QueryString: finalQuery,
+        // @ts-ignore - Ignore SST Resource type error
         QueryExecutionContext: { Database: Resource.GlueCatalogDatabase.name },
-        ResultConfiguration: { OutputLocation: s3OutputLocation }, // Use the constructed path
+        ResultConfiguration: { OutputLocation: s3OutputLocation },
     });
 
     let queryExecutionId: string | undefined;
-    let queryState: QueryExecutionState | undefined = undefined; // Define here for broader scope
+    let queryState: QueryExecutionState | undefined = undefined;
 
     try {
         const startResponse = await athenaClient.send(startQueryCmd);
@@ -103,7 +127,7 @@ async function executeAthenaQuery(
         }
         log(`Started ${queryName} Query Execution ID: ${queryExecutionId}. Waiting for completion...`);
 
-        // Polling logic
+        // Polling logic (remains largely the same)
         let getQueryExecOutput: GetQueryExecutionCommandOutput | undefined;
         const maxAttempts = 30;
         let attempts = 0;
@@ -133,7 +157,6 @@ async function executeAthenaQuery(
             if (queryState === QueryExecutionState.FAILED || queryState === QueryExecutionState.CANCELLED) {
                 const reason = getQueryExecOutput?.QueryExecution?.Status?.StateChangeReason || 'Unknown reason';
                 console.error(`${queryName} query failed or was cancelled:`, reason);
-                // Attempt to stop the query if it failed or was cancelled unexpectedly during polling
                 try {
                     await athenaClient.send(new StopQueryExecutionCommand({ QueryExecutionId: queryExecutionId }));
                     log(`Attempted to stop failed/cancelled query ${queryExecutionId}`);
@@ -154,12 +177,12 @@ async function executeAthenaQuery(
 
         // Fetch Results with Pagination
         log(`${queryName} query succeeded. Fetching results...`);
-        const allResults: Record<string, any>[] = [];
-        let headers: string[] = [];
+        const allParsedValues: any[][] = [];
+        let actualHeaderMap: Map<string, number> = new Map(); // To store actual headers and their indices
         let currentNextToken: string | undefined = undefined;
-        const maxResultsPerFetch = 1000; // Athena's max
+        const maxResultsPerFetch = 1000;
 
-        // 1. Fetch the first page to get headers
+        // 1. Fetch the first page to get headers and first batch of data
         const firstPageInput: GetQueryResultsCommandInput = {
             QueryExecutionId: queryExecutionId,
             MaxResults: maxResultsPerFetch,
@@ -170,28 +193,31 @@ async function executeAthenaQuery(
         );
 
         const firstPageRows = firstPageResponse.ResultSet?.Rows;
-        currentNextToken = firstPageResponse.NextToken; // Get token for the next potential fetch
+        currentNextToken = firstPageResponse.NextToken;
 
         if (firstPageRows && firstPageRows.length > 0) {
-            // Extract headers from the *first* row of the *first* page
+            // Extract actual headers from the *first* row and create the map
             const headerRow = firstPageRows[0].Data;
             if (headerRow) {
-                headers = headerRow.map(d => d.VarCharValue ?? 'unknown');
-                log(`Extracted headers: ${headers.join(', ')}`);
+                headerRow.forEach((d, index) => {
+                    const headerName = d.VarCharValue ?? `unknown_${index}`;
+                    actualHeaderMap.set(headerName, index);
+                });
+                log(`Extracted actual headers: ${Array.from(actualHeaderMap.keys()).join(', ')}`);
 
-                // Parse data rows from the first page (skip header row)
+                // Parse data rows from the first page (skip header row) using the new parseResults
                 const firstPageDataRows = firstPageRows.slice(1);
-                const firstPageParsedResults = parseResults(headers, firstPageDataRows);
-                allResults.push(...firstPageParsedResults);
-                log(`Parsed ${firstPageParsedResults.length} results from first page. Total: ${allResults.length}. More pages: ${!!currentNextToken}`);
+                const firstPageParsedValues = parseResults(expectedHeaders, actualHeaderMap, firstPageDataRows);
+                allParsedValues.push(...firstPageParsedValues);
+                log(`Parsed ${firstPageParsedValues.length} value arrays from first page. Total: ${allParsedValues.length}. More pages: ${!!currentNextToken}`);
             } else {
                 log(`Warning: First page response has rows but no header data.`);
             }
         } else {
             log(`No results found for ${queryName} query.`);
-            // No results, return empty array
-             return { results: [] };
-        }
+            // No results, return empty values array matching the interface
+             return { values: [] };
+     }
 
 
         // 2. Fetch subsequent pages if NextToken exists
@@ -206,20 +232,21 @@ async function executeAthenaQuery(
                 new GetQueryResultsCommand(nextPageInput)
             );
 
-            // Subsequent pages do NOT contain headers, parse all rows using the headers from the first page
+            // Subsequent pages do NOT contain headers, parse all rows using the headers map from the first page
             const nextPageRows = nextPageResponse.ResultSet?.Rows;
-            const nextPageParsedResults = parseResults(headers, nextPageRows); // Pass headers, parse all rows
-            allResults.push(...nextPageParsedResults);
+            // Pass expectedHeaders and the actualHeaderMap
+            const nextPageParsedValues = parseResults(expectedHeaders, actualHeaderMap, nextPageRows);
+            allParsedValues.push(...nextPageParsedValues);
             currentNextToken = nextPageResponse.NextToken;
-            log(`Fetched ${nextPageParsedResults.length} results this page. Total: ${allResults.length}. More pages: ${!!currentNextToken}`);
+            log(`Fetched ${nextPageParsedValues.length} value arrays this page. Total: ${allParsedValues.length}. More pages: ${!!currentNextToken}`);
         }
 
-        log(`Fetched a total of ${allResults.length} ${queryName} results.`);
-        return { results: allResults }; // Return all accumulated results
+        log(`Fetched a total of ${allParsedValues.length} ${queryName} value arrays.`);
+       // Return only the parsed values, ordered according to expectedHeaders
+       return { values: allParsedValues };
 
-    } catch (error: any) {
+   } catch (error: any) {
         console.error(`Error executing ${queryName} Athena query (ID: ${queryExecutionId}):`, error);
-        // Best effort stop query if it exists and the error isn't about it not being found
         if (queryExecutionId && error.name !== 'ResourceNotFoundException' && queryState !== QueryExecutionState.SUCCEEDED) {
             try {
                 await athenaClient.send(new StopQueryExecutionCommand({ QueryExecutionId: queryExecutionId }));
@@ -287,7 +314,7 @@ const createApiResponse = (
  * Handles requests to /api/query.
  * Validates user authentication and site ownership.
  * Executes Athena queries based on provided parameters.
- * Returns analytics data, compressed if client supports gzip.
+ * Returns analytics data (schemas + value arrays), compressed if client supports gzip.
  */
 export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     event: APIGatewayProxyEventV2WithJWTAuthorizer
@@ -309,6 +336,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     let ownedSiteIds: string[] = [];
     try {
         const queryCommand = new QueryCommand({
+            // @ts-ignore - Ignore SST Resource type error
             TableName: Resource.SitesTable.name,
             IndexName: "ownerSubIndex",
             KeyConditionExpression: "owner_sub = :sub",
@@ -320,8 +348,14 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
 
         if (ownedSiteIds.length === 0) {
             log(`No sites found for user sub: ${userSub}`);
-            // Use helper function for response
-            return createApiResponse(200, { initialEvents: [], events: [], commonSchema: [], initialOnlySchema: [], nextToken: null }, event.headers);
+            // Return empty structure matching the new format
+            return createApiResponse(200, {
+                initialEventsValues: [],
+                eventsValues: [],
+                commonSchema: [],
+                initialOnlySchema: [],
+                nextToken: null
+            }, event.headers);
         }
         log(`User ${userSub} owns sites: ${ownedSiteIds.join(', ')}`);
 
@@ -355,8 +389,8 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
              // Use helper function for response
              return createApiResponse(403, {
                  message: "You do not have permission to access the requested site IDs.",
-                 initialEvents: [],
-                 events: [],
+                 initialEventsValues: [],
+                 eventsValues: [],
                  commonSchema: [],
                  initialOnlySchema: [],
                  nextToken: null
@@ -368,7 +402,13 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     if (finalSiteIds.length === 0) {
          log(`No accessible sites to query for user ${userSub} after applying filters.`);
          // Use helper function for response
-         return createApiResponse(200, { initialEvents: [], events: [], commonSchema: [], initialOnlySchema: [], nextToken: null }, event.headers);
+         return createApiResponse(200, {
+             initialEventsValues: [],
+             eventsValues: [],
+             commonSchema: [],
+             initialOnlySchema: [],
+             nextToken: null
+         }, event.headers);
     }
 
 
@@ -406,37 +446,39 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     const siteIdFilterSql = `site_id IN (${finalSiteIds.map(id => `'${id.replace(/'/g, "''")}'`).join(', ')})`; // Basic SQL injection prevention for IDs
 
     try {
-        // --- Determine Schemas based on Safety Level ---
+        // --- Determine Schemas and Expected Headers ---
         const commonSchemaFields = commonSchema.filter(s => s.safe === 'yes' || s.safe === 'maybe');
         const initialOnlySchemaFields = initialOnlySchema.filter(s => s.safe === 'yes' || s.safe === 'maybe');
 
         const commonSelectColNames = commonSchemaFields.map(s => s.name);
         const initialOnlySelectColNames = initialOnlySchemaFields.map(s => s.name);
 
+        // Define the exact order of headers we expect in the response
+        const expectedEventsHeaders = commonSelectColNames;
+        const expectedInitialHeaders = [...commonSelectColNames, ...initialOnlySelectColNames];
+
         // --- Construct SELECT Strings for Athena ---
         const mapColumnToSelect = (colName: string): string => {
-            // Quote column names to handle reserved keywords or special characters
-            const quotedName = `"${colName.replace(/"/g, '""')}"`; // Prevent basic SQL injection in column names
-            // Cast JSON columns explicitly
+            const quotedName = `"${colName.replace(/"/g, '""')}"`;
             if (['properties', 'user_properties', 'group_properties'].includes(colName)) {
-                 return `TRY_CAST(${quotedName} AS JSON) AS ${quotedName}`; // Use TRY_CAST for resilience
+                 return `TRY_CAST(${quotedName} AS JSON) AS ${quotedName}`;
             }
-            // Cast known numeric types if necessary for consistent output, otherwise just select
              if (['value', 'session_duration'].includes(colName)) {
                  return `TRY_CAST(${quotedName} AS DOUBLE) AS ${quotedName}`;
              }
             return quotedName;
         };
 
-
-        const eventsSelectCols = commonSelectColNames.map(mapColumnToSelect).join(', ');
-        const initialSelectCols = [...commonSelectColNames, ...initialOnlySelectColNames].map(mapColumnToSelect).join(', ');
+        // Select columns based on the expected headers to ensure order matches if possible,
+        // although Athena doesn't guarantee column order in SELECT * or similar scenarios.
+        // The parsing logic relies on the *actual* headers returned by Athena.
+        const eventsSelectCols = expectedEventsHeaders.map(mapColumnToSelect).join(', ');
+        const initialSelectCols = expectedInitialHeaders.map(mapColumnToSelect).join(', ');
 
         // --- Construct Queries for Iceberg Tables ---
-        // Limit is applied via GetQueryResults MaxResults, not in the SQL itself for better pagination handling by Athena SDK
         const initialEventsQuery = `
 SELECT
-    ${initialSelectCols}
+  ${initialSelectCols}
 FROM "${Resource.GlueCatalogDatabase.name}"."${Resource.GlueCatalogTableinitial_events.name}"
 WHERE ${dateFilterSql} AND ${siteIdFilterSql}
 ORDER BY "timestamp" DESC
@@ -444,7 +486,7 @@ ORDER BY "timestamp" DESC
 
         const eventsQuery = `
 SELECT
-    ${eventsSelectCols}
+  ${eventsSelectCols}
 FROM "${Resource.GlueCatalogDatabase.name}"."${Resource.GlueCatalogTableevents.name}"
 WHERE ${dateFilterSql} AND ${siteIdFilterSql}
 ORDER BY "timestamp" DESC
@@ -452,20 +494,26 @@ ORDER BY "timestamp" DESC
 
         // --- Execute Queries in Parallel ---
         log('Executing queries in parallel...');
-        const [initialEventsResult, eventsResult] = await Promise.all([
-            executeAthenaQuery(initialEventsQuery, "Initial Events (Iceberg)"),
-            executeAthenaQuery(eventsQuery, "Events (Iceberg)")
-        ]);
+       // Destructure only the 'values' part from the results
+       const [{ values: initialEventsValues }, { values: eventsValues }] = await Promise.all([
+           // Pass the expected headers to the query function
+           // @ts-ignore - Ignore SST Resource type error
+           executeAthenaQuery(initialEventsQuery, "Initial Events (Iceberg)", expectedInitialHeaders),
+           // @ts-ignore - Ignore SST Resource type error
+           executeAthenaQuery(eventsQuery, "Events (Iceberg)", expectedEventsHeaders)
+       ]);
 
-        log(`Finished executing queries. Initial: ${initialEventsResult.results.length}, Events: ${eventsResult.results.length}`);
+        log(`Finished executing queries. Initial values arrays: ${initialEventsValues.length}, Events values arrays: ${eventsValues.length}`);
 
-        // Use helper function for response
+        // --- Prepare Response ---
+        // Use the new structure with only values arrays and schemas
         return createApiResponse(200, {
-            initialEvents: initialEventsResult.results,
-            events: eventsResult.results,
+            initialEventsValues: initialEventsValues, // Use the destructured values
+            eventsValues: eventsValues,             // Use the destructured values
+            // Keep schema definitions for the frontend to reconstruct objects
             commonSchema: commonSchemaFields.map(({ name, type }) => ({ name, type })),
             initialOnlySchema: initialOnlySchemaFields.map(({ name, type }) => ({ name, type })),
-            nextToken: null // Always null as we return all results
+            nextToken: null // Pagination token not implemented in this version
         }, event.headers);
 
     } catch (error: any) {

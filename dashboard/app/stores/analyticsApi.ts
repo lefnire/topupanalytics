@@ -1,21 +1,35 @@
-import { api, type Site, type UserPreferences } from '../lib/api';
+import { api, type Site, type UserPreferences } from '~/lib/api';
 import { type DateRange } from 'react-day-picker';
 import { format, isToday, addDays } from 'date-fns'; // Add isToday, addDays
 
 /**
  * Fetches the raw analytics event data for a given site and date range.
+ * The API returns data as value arrays and schemas, which are reconstructed here.
  * @param selectedSiteId The ID of the site to fetch data for.
  * @param selectedRange The date range for the data.
- * @returns A promise resolving to the fetched data.
+ * @returns A promise resolving to the fetched and reconstructed data.
  */
-export const fetchData = async (selectedSiteId: string, selectedRange: DateRange): Promise<{
-    initialEvents: any[];
-    events: any[];
-    commonSchema: { name: string; type: string }[];
-    initialOnlySchema: { name: string; type: string }[];
-}> => {
-    if (!selectedSiteId) throw new Error("No site selected for fetching data.");
-    if (!selectedRange?.from || !selectedRange?.to) throw new Error("Date range not selected for fetching data.");
+
+// Type for the raw API response (values arrays + schemas)
+type AnalyticsApiResponse = {
+   initialEventsValues: any[][];
+   eventsValues: any[][];
+   commonSchema: { name: string; type: string }[];
+   initialOnlySchema: { name: string; type: string }[];
+};
+
+// Return type of fetchData (reconstructed objects + schemas)
+type FetchDataResult = {
+   initialEvents: Record<string, any>[];
+   events: Record<string, any>[];
+   commonSchema: { name: string; type: string }[];
+   initialOnlySchema: { name: string; type: string }[];
+};
+
+
+export const fetchData = async (selectedSiteId: string, selectedRange: DateRange): Promise<FetchDataResult> => {
+   if (!selectedSiteId) throw new Error("No site selected for fetching data.");
+   if (!selectedRange?.from || !selectedRange?.to) throw new Error("Date range not selected for fetching data.");
 
     // Format dates for query parameters
     const startDateParam = format(selectedRange.from, 'yyyy-MM-dd');
@@ -33,16 +47,40 @@ export const fetchData = async (selectedSiteId: string, selectedRange: DateRange
     console.log(`Fetching query data from endpoint: ${endpoint}`); // Log will show adjusted date if applicable
 
     // Use the api helper which handles base URL and auth
-    const data = await api.get<any>(endpoint); // Define a proper type for the response later
+    const data = await api.get<AnalyticsApiResponse>(endpoint); // Use the defined API response type
 
-    const { initialEvents, events, commonSchema, initialOnlySchema } = data;
+    const { initialEventsValues, eventsValues, commonSchema, initialOnlySchema } = data;
 
     // Validate the structure of the received data
-    if (!Array.isArray(initialEvents) || !Array.isArray(events) || !Array.isArray(commonSchema) || !Array.isArray(initialOnlySchema)) {
+    if (!Array.isArray(initialEventsValues) || !Array.isArray(eventsValues) || !Array.isArray(commonSchema) || !Array.isArray(initialOnlySchema)) {
         throw new Error("Invalid data structure received from /api/query endpoint.");
     }
 
-    console.log(`Received ${initialEvents.length} initial events, ${events.length} subsequent events, ${commonSchema.length} common fields, ${initialOnlySchema.length} initial-only fields.`);
+    // Helper function to reconstruct objects from schema and value arrays
+    const reconstructObjects = (schema: { name: string }[], values: any[][]): Record<string, any>[] => {
+        if (!values || values.length === 0 || !schema || schema.length === 0) {
+            return [];
+        }
+        const headers = schema.map(s => s.name);
+        return values.map(row => {
+            const eventObject: Record<string, any> = {};
+            headers.forEach((header, index) => {
+                // Ensure row has enough elements, default to null if not
+                eventObject[header] = index < row.length ? row[index] : null;
+            });
+            return eventObject;
+        });
+    };
+
+    // Reconstruct the event objects
+    const initialEventSchema = [...commonSchema, ...initialOnlySchema]; // Combine schemas for initial events
+    const initialEvents = reconstructObjects(initialEventSchema, initialEventsValues);
+    const events = reconstructObjects(commonSchema, eventsValues); // Use only commonSchema for subsequent events
+
+    console.log(`Received ${initialEventsValues.length} initial event value arrays, ${eventsValues.length} subsequent event value arrays.`);
+    console.log(`Reconstructed ${initialEvents.length} initial events, ${events.length} subsequent events.`);
+
+    // Return the reconstructed objects and schemas
     return { initialEvents, events, commonSchema, initialOnlySchema };
 };
 
