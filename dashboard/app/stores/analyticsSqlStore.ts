@@ -11,8 +11,8 @@
  * So intial_events has everything, and events are deltas. Then, the DB joins each session (a sequence of initial_events->evenst[]) via session_id, forward-filling (like df.ffill()) any missing properties from the first event (initial_events).
  */
 
-import { create } from "zustand";
-import { persist, createJSONStorage } from 'zustand/middleware'; // Added persist
+import { create, type StateCreator } from "zustand"; // Import StateCreator as type
+import { persist, createJSONStorage } from 'zustand/middleware';
 import * as duckdb from '@duckdb/duckdb-wasm';
 import { type DateRange } from 'react-day-picker';
 import { format } from 'date-fns';
@@ -41,12 +41,35 @@ import {
   // Other helpers
   runCustomPropertyAggregation as runCustomPropertyAggregationSql,
   runSankeyAggregation as runSankeyAggregationSql,
-  generateCreateTableSQL,
-  mapSchemaToDuckDBType
+  // generateCreateTableSQL, // No longer needed directly in store
+  // mapSchemaToDuckDBType, // No longer needed directly in store
+  loadDataIntoTables, // New function for loading data
+  createOrReplaceAnalyticsView // New function for view creation
 } from './analyticsSql';
+import type { AsyncDuckDBConnection } from "@duckdb/duckdb-wasm"; // Import if not already
 
 // Import the HTTP store to subscribe to it
 import { useHttpStore, type AnalyticsHttpState } from './analyticsHttpStore'; // Import state type
+
+// --- Refactored Aggregation Maps ---
+// Define Maps outside the store for clarity and potential reuse
+const aggregationExecutors = new Map<string, (conn: AsyncDuckDBConnection, seg: Segment[], view: string) => Promise<any>>([
+  ['sources', runSourcesAggregationSql],
+  ['pages', runPagesAggregationSql],
+  ['regions', runRegionsAggregationSql],
+  ['devices', runDevicesAggregationSql],
+  ['events', runEventsAggregationSql],
+]);
+
+const aggregationStateUpdaters = new Map<string, (result: any) => Partial<AggregatedData>>([
+  ['sources', (result) => ({ sources: result as AggregatedData['sources'] })],
+  ['pages', (result) => ({ pages: result as AggregatedData['pages'] })],
+  ['regions', (result) => ({ regions: result as AggregatedData['regions'] })],
+  ['devices', (result) => ({ devices: result as AggregatedData['devices'] })],
+  ['events', (result) => ({ eventsData: result as AggregatedData['eventsData'] })], // eventsData is top-level
+]);
+// --- End Refactored Aggregation Maps ---
+
 
 // Define the state structure for the SQL store
 export interface AnalyticsSqlState extends Pick<AnalyticsStateBase,
@@ -81,6 +104,12 @@ export interface AnalyticsSqlState extends Pick<AnalyticsStateBase,
   setEventsTab: (tab: string) => Promise<void>;
   // Internal helper for rehydration
   _initializeNonPersistedState: () => void;
+
+  // Internal helpers (not part of the public interface, but defined within create)
+  // _setIdle: (partialState?: Partial<AnalyticsSqlState>) => void;
+  // _setLoading: (status: 'initializing' | 'loading_data', partialState?: Partial<AnalyticsSqlState>) => void;
+  // _setAggregating: (status: 'aggregating' | 'aggregating_tab', partialState?: Partial<AnalyticsSqlState>) => void;
+  // _setError: (errorMessage: string, partialState?: Partial<AnalyticsSqlState>) => void;
 }
 
 // Define the initial state for the SQL store
@@ -112,39 +141,112 @@ const initialSqlState: Pick<AnalyticsSqlState,
   eventsTab: 'events',
 };
 
+// Helper function to compare two DateRange objects (moved outside creator for subscriber access)
+const _isRangeChanged = (range1?: DateRange, range2?: DateRange): boolean => {
+  // Handle cases where one or both are undefined/null
+  if (!range1 && !range2) return false; // Both null/undefined, no change
+  if (!range1 || !range2) return true;  // One is null/undefined, the other isn't, change
+  // Compare stringified versions for simplicity (as done previously)
+  return JSON.stringify(range1) !== JSON.stringify(range2);
+};
+
+
 // --- Zustand Store ---
-export const useSqlStore = create<AnalyticsSqlState>()(
-  persist( // Wrap with persist
-    (set, get) => ({
-      ...initialSqlState,
+// Use StateCreator for better typing with internal helpers
+const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", unknown]]> = (set, get) => {
+  // --- Internal State Transition Helpers ---
+  const _setIdle = (partialState: Partial<AnalyticsSqlState> = {}) => {
+    set({ status: 'idle', error: null, ...partialState });
+  };
 
-      // --- Actions ---
+  const _setLoading = (status: 'initializing' | 'loading_data', partialState: Partial<AnalyticsSqlState> = {}) => {
+    set({ status, error: null, ...partialState });
+  };
 
-      // Helper to reset non-persisted state during rehydration or manual reset
-      _initializeNonPersistedState: () => {
-        set({
-          status: 'idle',
-          error: null,
-          db: null, // DB needs re-initialization
-          connection: null,
-          aggregatedData: initialSqlState.aggregatedData, // Reset data
-          sankeyData: initialSqlState.sankeyData,
-          // Keep persisted state: tabs, selectedPropertyKey, segments? (Decide if segments should reset)
-          // lastProcessedSiteId and lastProcessedRange are handled by the subscriber logic
-        });
-        // Trigger DB initialization after resetting state
-        // Use setTimeout to ensure state update completes before initialize potentially updates state again
-        setTimeout(() => get().initialize(), 0);
-      },
+  const _setAggregating = (status: 'aggregating' | 'aggregating_tab', partialState: Partial<AnalyticsSqlState> = {}) => {
+    set({ status, error: null, ...partialState });
+  };
+
+  const _setError = (errorMessage: string, partialState: Partial<AnalyticsSqlState> = {}) => {
+    set({ status: 'error', error: errorMessage, ...partialState });
+  };
+
+  // Helper function to check if the store is in a busy state
+  const _isBusy = (status: AnalyticsStatus): boolean => {
+    return ['loading_data', 'aggregating', 'initializing', 'aggregating_tab'].includes(status);
+  };
+  // --- End Helpers ---
+
+  // --- Internal Data Loading Helpers ---
+  const _fetchApiData = async (siteId: string, range: DateRange) => {
+    console.log("SQL Store: Fetching data from API...");
+    // This helper focuses solely on the API call. Error handling is done by the caller.
+    return await fetchData(siteId, range);
+  };
+
+  const _loadTables = async (
+    db: duckdb.AsyncDuckDB,
+    connection: duckdb.AsyncDuckDBConnection,
+    initialEvents: any[], // Consider using specific types if available
+    events: any[],
+    commonSchema: { name: string; type: string; }[], // Corrected type
+    initialOnlySchema: { name: string; type: string; }[] // Corrected type
+  ) => {
+    console.log("SQL Store: Loading data into tables...");
+    // This helper focuses on loading data. Error handling by caller.
+    return await loadDataIntoTables(db, connection, initialEvents, events, commonSchema, initialOnlySchema);
+  };
+
+  const _createView = async (
+    connection: duckdb.AsyncDuckDBConnection,
+    commonSchema: { name: string; type: string; }[], // Corrected type
+    initialOnlySchema: { name: string; type: string; }[] // Corrected type
+  ) => {
+    console.log("SQL Store: Creating or replacing analytics view...");
+    // This helper focuses on view creation. Error handling by caller.
+    await createOrReplaceAnalyticsView(connection, commonSchema, initialOnlySchema);
+  };
+
+  const _runInitialAggregations = async () => {
+    console.log("SQL Store: Triggering initial aggregations...");
+    _setAggregating('aggregating'); // Set status before calling
+    // Error handling is within runAggregations itself
+    await get().runAggregations();
+  };
+  // --- End Internal Data Loading Helpers ---
+
+  return {
+    ...initialSqlState,
+
+    // --- Actions ---
+
+    // Helper to reset non-persisted state during rehydration or manual reset
+    _initializeNonPersistedState: () => {
+      // Use _setIdle here? Or keep manual set for specific reset logic?
+      // Let's keep manual set for now as it resets DB/connection too.
+      set({
+        status: 'idle',
+        error: null,
+        db: null, // DB needs re-initialization
+        connection: null,
+        aggregatedData: initialSqlState.aggregatedData, // Reset data
+        sankeyData: initialSqlState.sankeyData,
+        // Keep persisted state: tabs, selectedPropertyKey, segments? (Decide if segments should reset)
+        // lastProcessedSiteId and lastProcessedRange are handled by the subscriber logic
+      });
+      // Trigger DB initialization after resetting state
+      // Use setTimeout to ensure state update completes before initialize potentially updates state again
+      setTimeout(() => get().initialize(), 0);
+    },
 
     resetSqlState: () => {
-      // Preserve DB/connection if they exist, reset data/status
+      // This resets parts of the state but keeps db/connection and status if busy.
+      // It doesn't fit neatly into the simple helpers. Keep as is.
       const currentStatus = get().status;
       const currentAggData = get().aggregatedData;
-      const currentSelectedKey = get().selectedPropertyKey;
       // Reset data/segments/error etc., but keep DB/connection and last processed info
       return {
-        status: ['loading_data', 'aggregating', 'initializing'].includes(currentStatus) ? currentStatus : 'idle',
+        status: _isBusy(currentStatus) ? currentStatus : 'idle', // Use helper
         error: null,
         aggregatedData: { // Reset aggregated data
           stats: null, chartData: null, eventsData: null, sources: null, pages: null, regions: null, devices: null,
@@ -168,24 +270,23 @@ export const useSqlStore = create<AnalyticsSqlState>()(
         return;
       }
       console.log("SQL Store: Initializing DB...");
-      set({ status: 'initializing', error: null });
+      _setLoading('initializing'); // Use helper
       try {
         const { db: newDb, connection: newConnection } = await initializeDb();
-        set({ db: newDb, connection: newConnection, status: 'idle' });
+        _setIdle({ db: newDb, connection: newConnection }); // Use helper
         console.log("SQL Store: DB Initialized successfully.");
         // DO NOT trigger fetchAndLoadData here. The subscriber will handle it.
       } catch (initError: any) {
         console.error("SQL Store: DB Initialization failed:", initError);
-        set({ status: 'error', error: initError.message || 'DB Initialization failed', db: null, connection: null });
+        _setError(initError.message || 'DB Initialization failed', { db: null, connection: null }); // Use helper
       }
     },
 
     fetchAndLoadData: async (siteId: string, range: DateRange) => {
       console.log(`SQL Store: fetchAndLoadData called for site ${siteId}, range: ${range?.from ? format(range.from, 'P') : 'N/A'} - ${range?.to ? format(range.to, 'P') : 'N/A'}`);
-      const { db, connection, status } = get(); // Removed isRefreshing
+      const { db, connection, status } = get();
 
-      // --- Pre-checks ---
-      // Use status check instead of isRefreshing
+      // --- Pre-checks (Remain the same) ---
       if (status === 'loading_data') {
           console.log("SQL Store: fetchAndLoadData skipped (already loading_data).");
           return;
@@ -196,191 +297,49 @@ export const useSqlStore = create<AnalyticsSqlState>()(
       }
       if (!db || !connection) {
           console.error("SQL Store: fetchAndLoadData called but DB not initialized. This shouldn't happen.");
-          set({ status: 'error', error: 'DB not initialized before data fetch attempt.' });
+          _setError('DB not initialized before data fetch attempt.');
           return;
       }
-      // Check only for initializing or aggregating, as loading_data is checked above
-      if (status === 'initializing' || status === 'aggregating') {
+      if (status === 'initializing' || status === 'aggregating' || status === 'aggregating_tab') {
         console.log(`SQL Store: Skipping fetchAndLoadData, current status: ${status}`);
         return;
       }
 
       console.log(`SQL Store: Starting data fetch & load process...`);
-      set(state => ({
-        // isRefreshing: true, // Removed
-        status: 'loading_data',
-        error: null, // Clear previous errors
-        // Reset data, segments/key will be handled by runAggregations
+      _setLoading('loading_data', {
         aggregatedData: initialSqlState.aggregatedData,
         sankeyData: initialSqlState.sankeyData,
-        // Keep segments and selectedPropertyKey for now
-        // segments: [], // Don't clear segments here, let runAggregations handle it based on current segments
-        // selectedPropertyKey: null, // Keep key
-      }));
+      });
 
-      // Use a variable to track success for updating lastProcessed values
-      let loadSuccessful = false;
       try {
-        // Fetch data using imported API function
-        const { initialEvents, events, commonSchema, initialOnlySchema } = await fetchData(siteId, range);
+        // Step 1: Fetch data from API
+        const { initialEvents, events, commonSchema, initialOnlySchema } = await _fetchApiData(siteId, range);
 
-        // --- Register Data Buffers & Create View ---
-        // Use fixed filenames and register buffers
-        const initialEventsFileName = 'initial_events.json';
-        const eventsFileName = 'events.json';
-        const initialEventsBuffer = new TextEncoder().encode(JSON.stringify(initialEvents));
-        const eventsBuffer = new TextEncoder().encode(JSON.stringify(events));
-        await Promise.all([
-          db.registerFileBuffer(initialEventsFileName, initialEventsBuffer),
-          db.registerFileBuffer(eventsFileName, eventsBuffer)
-        ]);
-        console.log(`SQL Store: Registered ${initialEventsFileName} and ${eventsFileName}`);
+        // Step 2: Load data into tables
+        const tablesLoaded = await _loadTables(db, connection, initialEvents, events, commonSchema, initialOnlySchema);
 
-        // Define schemas and SQL generation functions
-        const fullInitialSchema = [...commonSchema, ...initialOnlySchema];
-        const createInitialTableSql = generateCreateTableSQL('initial_events', fullInitialSchema);
-        const createEventsTableSql = generateCreateTableSQL('events', commonSchema);
-
-        const readInitialJsonColumnsSql = `{${fullInitialSchema.map(c => `"${c.name}": '${mapSchemaToDuckDBType(c.type)}'`).join(', ')}}`;
-        const readEventsJsonColumnsSql = `{${commonSchema.map(c => `"${c.name}": '${mapSchemaToDuckDBType(c.type)}'`).join(', ')}}`;
-
-        const insertInitialSql = `INSERT INTO initial_events SELECT * FROM read_json('${initialEventsFileName}', auto_detect=false, columns=${readInitialJsonColumnsSql});`;
-        const insertEventsSql = `INSERT INTO events SELECT * FROM read_json('${eventsFileName}', auto_detect=false, columns=${readEventsJsonColumnsSql});`;
-
-        // --- Define the Analytics View SQL ---
-        const eventSpecificCols = ['event', 'pathname', 'timestamp', 'properties'];
-        const staticCols = fullInitialSchema.filter(col => !eventSpecificCols.includes(col.name)).map(col => col.name);
-        // Ensure session_id exists before partitioning by it
-        const partitionKey = staticCols.includes('session_id') ? 'session_id' : (staticCols.length > 0 ? staticCols[0] : null); // Fallback if no session_id
-        const staticColFirstValues = staticCols.map(col =>
-          partitionKey
-            ? `FIRST_VALUE(d."${col}") OVER (PARTITION BY d."${partitionKey}" ORDER BY d."timestamp") AS "${col}"`
-            : `d."${col}"`
-        ).join(',\n                 ');
-
-        const nullPlaceholders = initialOnlySchema.map(c => `NULL AS "${c.name}"`).join(', ');
-        const commonSelectColsQuoted = commonSchema.map(c => `"${c.name}"`);
-        const allColsSelectString = [...commonSelectColsQuoted, ...initialOnlySchema.map(c => `"${c.name}"`)].join(', ');
-
-        // Note: Removed 'main.' prefix from table names
-        const createAnalyticsViewSql = `
-            CREATE VIEW analytics AS
-            WITH base AS (
-                SELECT ${allColsSelectString} FROM initial_events
-                UNION ALL
-                SELECT ${commonSelectColsQuoted.join(', ')}${initialOnlySchema.length > 0 ? ', ' + nullPlaceholders : ''} FROM events
-            ),
-            -- Pre-calculate channel and source for easier filtering
-            derived AS (
-                SELECT *,
-                       LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) AS referrer_lower,
-                       CASE
-                           WHEN utm_medium = 'cpc' OR utm_medium = 'ppc' THEN 'Paid Search'
-                           WHEN utm_medium = 'email' OR list_contains(['mail.google.com', 'com.google.android.gm'], LOWER(COALESCE(referer_domain, '$direct', 'Unknown'))) THEN 'Email'
-                           WHEN utm_medium = 'social' OR list_contains([
-                                'facebook', 'twitter', 'linkedin', 'instagram', 'pinterest', 'reddit', 't.co',
-                                'facebook.com', 'twitter.com', 'linkedin.com', 'instagram.com', 'pinterest.com', 'reddit.com',
-                                'com.reddit.frontpage', 'old.reddit.com', 'youtube.com', 'm.youtube.com'
-                               ], LOWER(COALESCE(referer_domain, '$direct', 'Unknown'))) THEN 'Social'
-                           WHEN list_contains([
-                                'google', 'bing', 'duckduckgo', 'yahoo', 'ecosia', 'baidu',
-                                'google.com', 'google.co.uk', 'google.com.hk', 'yandex.ru', 'search.brave.com', 'perplexity.ai'
-                               ], LOWER(COALESCE(referer_domain, '$direct', 'Unknown'))) THEN 'Organic Search'
-                           WHEN LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) = '$direct' THEN 'Direct'
-                           WHEN LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) = 'Unknown' THEN 'Unknown'
-                           WHEN COALESCE(referer_domain, '$direct', 'Unknown') IS NOT NULL AND LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) != '$direct' THEN 'Referral'
-                           ELSE 'Unknown'
-                       END AS channel,
-                       CASE
-                           WHEN COALESCE(referer_domain, '$direct', 'Unknown') = '$direct' THEN '$direct'
-                           ELSE regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\\\.', '') -- Corrected: Double escape for SQL string literal
-                       END AS source
-                FROM base
-            )
-            -- Select base event columns, forward-filled static columns, and derived channel/source
-            SELECT d."event", d."pathname", d."timestamp", d."properties", d."channel", d."source"${staticColFirstValues ? ', ' + staticColFirstValues : ''}
-            FROM derived d;
-        `;
-
-        // --- Execute SQL Transaction for Table Data ---
-        await connection.query('BEGIN TRANSACTION;');
-        let transactionSuccessful = false;
-        try {
-          // 1. Drop existing tables (view dropped separately later)
-          await Promise.all([
-            connection.query(`DROP TABLE IF EXISTS initial_events;`),
-            connection.query(`DROP TABLE IF EXISTS events;`)
-          ]);
-
-          // 2. Create new tables
-          await Promise.all([
-              connection.query(createInitialTableSql),
-              connection.query(createEventsTableSql)
-          ]);
-
-          // 3. Insert data into tables
-          const insertPromises = [];
-          if (initialEvents.length > 0) insertPromises.push(connection.query(insertInitialSql));
-          if (events.length > 0) insertPromises.push(connection.query(insertEventsSql));
-          if (insertPromises.length > 0) await Promise.all(insertPromises);
-
-          // 4. Drop file buffers (no longer needed)
-          await Promise.all([
-            db.dropFile(initialEventsFileName),
-            db.dropFile(eventsFileName)
-          ]);
-          console.log(`SQL Store: Dropped file buffers ${initialEventsFileName} and ${eventsFileName}`);
-
-          // 5. Commit Transaction
-          await connection.query('COMMIT;');
-          transactionSuccessful = true;
-          console.log('SQL Store: Table data transaction committed successfully.');
-
-        } catch (txError) {
-          console.error('SQL Store: Table data transaction failed, rolling back...', txError);
-          await connection.query('ROLLBACK;');
-          // Attempt to drop potentially lingering file buffers on error
-          try {
-            await Promise.all([
-              db.dropFile(initialEventsFileName).catch(e => console.warn(`Failed to drop ${initialEventsFileName} during rollback:`, e)),
-              db.dropFile(eventsFileName).catch(e => console.warn(`Failed to drop ${eventsFileName} during rollback:`, e))
-            ]);
-          } catch (dropError) {
-             console.error('SQL Store: Error dropping files during rollback:', dropError);
+        if (!tablesLoaded) {
+          // If loading fails, set error and exit early
+          console.error('SQL Store: Table loading was not successful, skipping view creation and aggregation.');
+          if (get().status !== 'error') { // Avoid overwriting specific fetch/load error
+             _setError('Data loading into tables failed.');
           }
-          throw txError; // Re-throw original error to be caught by outer catch
+          return; // Stop processing
         }
 
-        // --- Create the Analytics View (Post-Transaction) ---
-        if (transactionSuccessful) {
-          try {
-              await connection.query(`DROP VIEW IF EXISTS analytics;`);
-              await connection.query(createAnalyticsViewSql);
-              const countResult = await connection.query(`SELECT COUNT(*) AS count FROM analytics`); // Verify view exists *now*
-              console.log(`SQL Store: Analytics view created/recreated successfully with ${firstRow<{ count: number }>(countResult)?.count ?? 0} events.`);
+        // Step 3: Create the analytics view
+        await _createView(connection, commonSchema, initialOnlySchema);
 
-              // Data loaded and view created successfully
-              loadSuccessful = true; // Mark success
-              set({ status: 'aggregating' }); // Move to aggregating state (isRefreshing removed)
-              await get().runAggregations(); // Trigger aggregations
-              // Status will be set to 'idle' by runAggregations on success
-
-          } catch (viewError: any) {
-              console.error('SQL Store: Failed to create analytics view after transaction:', viewError);
-               // Set error state as view creation failed (isRefreshing removed)
-               set({ error: `Failed to create analytics view: ${viewError?.message || String(viewError)}`, status: 'error' }); // Safer access
-          }
-        } else {
-           // Should not happen if txError was thrown, but as a safeguard: (isRefreshing removed)
-           console.error('SQL Store: Transaction was not successful, skipping view creation and aggregation.');
-           set({ error: 'Data loading transaction failed.', status: 'error' });
-        }
+        // Step 4: Trigger initial aggregations (this will set status to 'aggregating' and then 'idle' on success)
+        await _runInitialAggregations();
 
       } catch (err: any) {
-        console.error("SQL Store: Failed to fetch, load, or merge analytics data:", err);
-        // isRefreshing removed
-        set({ error: err.message || 'An unknown error occurred during data loading', status: 'error' });
+        // Catch errors from any step (_fetchApiData, _loadTables, _createView)
+        console.error("SQL Store: Error during fetch/load/view process:", err);
+        _setError(err.message || 'An unknown error occurred during data processing');
+        // Note: _runInitialAggregations handles its own errors internally and sets status appropriately.
       }
+      // Note: lastProcessedSiteId/Range update is handled by the subscriber
     },
 
     runAggregations: async () => {
@@ -388,12 +347,18 @@ export const useSqlStore = create<AnalyticsSqlState>()(
       const selectedRange = useHttpStore.getState().selectedRange; // Get range from HTTP store
 
       // Allow running when status is 'aggregating', but guard against other busy/error states
-      if (!connection || !selectedRange?.from || !selectedRange?.to || ['error', 'loading_data', 'initializing'].includes(status)) {
+      // Use _isBusy helper, but exclude 'aggregating' itself from the check here
+      const isBusyForInitialAgg = status === 'loading_data' || status === 'initializing' || status === 'aggregating_tab';
+      if (!connection || !selectedRange?.from || !selectedRange?.to || status === 'error' || isBusyForInitialAgg) {
         console.log("SQL Store: Skipping initial aggregations - invalid state or range", { status, hasConnection: !!connection, selectedRange: !!selectedRange });
+        // If called while aggregating_tab, it might mean a race condition, let the tab finish.
         return;
       }
 
-      set({ status: 'aggregating', error: null });
+      // If status is already 'aggregating', don't reset error (it should be null anyway)
+      if (status !== 'aggregating') {
+        _setAggregating('aggregating'); // Use helper
+      }
 
       try {
         // Define the views based on current tab state
@@ -410,6 +375,8 @@ export const useSqlStore = create<AnalyticsSqlState>()(
 
         // Update state with the partial data (base + initial tabs)
         // Use functional set to merge safely, ensuring undefined from partial becomes null
+        // State merging logic seems okay, keep using functional set for complex merge
+        let finalAggData: AggregatedData | null = null;
         set(state => {
           // Define a guaranteed non-null default based on initial state, explicitly casting
           const defaultAggData = initialSqlState.aggregatedData as AggregatedData;
@@ -432,10 +399,11 @@ export const useSqlStore = create<AnalyticsSqlState>()(
               aggregatedValues: currentAggData.customProperties?.aggregatedValues ?? defaultAggData.customProperties?.aggregatedValues ?? null,
             }
           };
+          finalAggData = newAggData; // Capture for dependent aggregations
           return {
             aggregatedData: newAggData,
-            status: 'idle', // Set to idle *before* triggering dependent aggregations
-            selectedPropertyKey: state.selectedPropertyKey // Preserve current selection temporarily
+            // Status will be set to idle *after* dependent aggregations complete
+            // selectedPropertyKey: state.selectedPropertyKey // Preserve current selection temporarily - handled below
           };
         });
 
@@ -444,11 +412,12 @@ export const useSqlStore = create<AnalyticsSqlState>()(
         const aggregationPromises: Promise<void>[] = [];
 
         // 1. Sankey Aggregation (remains the same)
-        aggregationPromises.push(get().runSankeyAggregation());
+        aggregationPromises.push(get().runSankeyAggregation()); // No status change needed inside
 
         // 2. Custom Property Aggregation (logic remains the same, uses updated availableKeys)
         const currentSelectedKey = get().selectedPropertyKey;
-        const newlyFetchedKeys = initialAggregatedData.customProperties?.availableKeys || [];
+        // Get the updated keys *after* the set call above
+        const newlyFetchedKeys = get().aggregatedData?.customProperties?.availableKeys || [];
         let keyToAggregate: string | null = null;
 
         if (currentSelectedKey && newlyFetchedKeys.includes(currentSelectedKey)) {
@@ -459,7 +428,7 @@ export const useSqlStore = create<AnalyticsSqlState>()(
 
         if (keyToAggregate) {
           // Trigger the aggregation, which will update selectedPropertyKey and aggregatedValues
-          aggregationPromises.push(get().runCustomPropertyAggregation(keyToAggregate));
+          aggregationPromises.push(get().runCustomPropertyAggregation(keyToAggregate)); // No status change needed inside
         } else {
           // If no key to aggregate, ensure the state reflects that
           set(state => ({
@@ -470,23 +439,26 @@ export const useSqlStore = create<AnalyticsSqlState>()(
 
         // Wait for both dependent aggregations to complete
         await Promise.all(aggregationPromises);
+        _setIdle(); // Set status to idle *after* all aggregations succeed
         // --- End Parallelization ---
 
       } catch (aggregationError: any) {
         console.error("SQL Store: Error during initial data aggregation orchestration:", aggregationError);
         // Ensure status is set back correctly on error
-        set({ error: aggregationError.message || 'An error occurred during processing.', status: 'error', aggregatedData: null });
+        _setError(aggregationError.message || 'An error occurred during processing', { aggregatedData: null }); // Use helper
       }
     },
 
     runCustomPropertyAggregation: async (key: string) => {
       const { connection, aggregatedData, status, segments } = get();
-      if (!connection || !key || !aggregatedData?.customProperties || ['aggregating', 'error', 'loading_data', 'initializing'].includes(status)) {
+      // Allow running even if status is 'idle' (triggered after main aggregation)
+      if (!connection || !key || !aggregatedData?.customProperties || ['error', 'loading_data', 'initializing'].includes(status)) {
         console.warn("SQL Store: Skipping custom prop aggregation - invalid state or missing data.");
         return;
       }
 
       // Set the key being processed and clear old results
+      // Set key, clear results, but don't change main status
       set(state => ({
         selectedPropertyKey: key,
         aggregatedData: state.aggregatedData ? { ...state.aggregatedData, customProperties: { ...state.aggregatedData.customProperties!, aggregatedValues: null } } : null,
@@ -499,26 +471,35 @@ export const useSqlStore = create<AnalyticsSqlState>()(
         }));
       } catch (error: any) {
         console.error(`SQL Store: Error aggregating properties for key ${key}:`, error);
+        // Set error, but keep the selected key. Don't change main status here, let the caller handle it.
         set(state => ({
-          error: error.message || `Error aggregating property '${key}'`, status: 'error', selectedPropertyKey: key,
+          error: error.message || `Error aggregating property '${key}'`,
+          // status: 'error', // Don't set main status to error here
+          selectedPropertyKey: key,
           aggregatedData: state.aggregatedData ? { ...state.aggregatedData, customProperties: { ...state.aggregatedData.customProperties!, aggregatedValues: [] } } : null,
         }));
+        // Re-throw the error so Promise.all in runAggregations catches it
+        throw error;
       }
     },
 
     runSankeyAggregation: async () => {
       const { connection, status, segments } = get();
-      if (!connection || ['aggregating', 'error', 'loading_data', 'initializing'].includes(status)) {
+      // Allow running even if status is 'idle'
+      if (!connection || ['error', 'loading_data', 'initializing'].includes(status)) {
         console.log(`SQL Store: Skipping Sankey aggregation (status: ${status})`);
         return;
       }
 
       try {
         const sankeyData = await runSankeyAggregationSql(connection, segments);
-        set({ sankeyData });
+        set({ sankeyData }); // Simple update, no status change needed
       } catch (sankeyError: any) {
         console.error("SQL Store: Error during Sankey data aggregation:", sankeyError);
-        set({ error: sankeyError.message || 'Error during Sankey processing', status: 'error', sankeyData: null });
+        // Set error, but don't change main status here. Let the caller handle it.
+        set({ error: sankeyError.message || 'Error during Sankey processing', sankeyData: null });
+        // Re-throw the error so Promise.all in runAggregations catches it
+        throw sankeyError;
       }
     },
 
@@ -530,63 +511,41 @@ export const useSqlStore = create<AnalyticsSqlState>()(
         console.warn(`SQL Store: Skipping specific aggregation for ${cardType}/${viewType} - DB not ready.`);
         return;
       }
-      // Prevent running if already busy with a major load/aggregation
-      if (['loading_data', 'aggregating', 'initializing'].includes(status)) {
+      // Prevent running if already busy with a major load/aggregation or another tab
+      if (_isBusy(status)) { // Use helper
          console.log(`SQL Store: Skipping specific aggregation for ${cardType}/${viewType} - store busy (${status}).`);
          return;
       }
 
       console.log(`SQL Store: Running specific aggregation for ${cardType}, view: ${viewType}`);
-      set({ status: 'aggregating_tab', error: null }); // Use a distinct status
+      _setAggregating('aggregating_tab'); // Use helper
 
       try {
-        let result: any; // Use 'any' for now, will be typed by the update logic
-        switch (cardType) {
-          case 'sources':
-            result = await runSourcesAggregationSql(connection, segments, viewType);
-            break;
-          case 'pages':
-            result = await runPagesAggregationSql(connection, segments, viewType);
-            break;
-          case 'regions':
-            result = await runRegionsAggregationSql(connection, segments, viewType);
-            break;
-          case 'devices':
-            result = await runDevicesAggregationSql(connection, segments, viewType);
-            break;
-          case 'events':
-            // Assuming runEventsAggregationSql returns CardDataItem[] directly
-            result = await runEventsAggregationSql(connection, segments, viewType);
-            break;
-          default:
-            console.error(`SQL Store: Unknown cardType for specific aggregation: ${cardType}`);
-            throw new Error(`Unknown cardType: ${cardType}`);
+        // --- Refactored: Use Map lookup for execution ---
+        const executor = aggregationExecutors.get(cardType);
+        if (!executor) {
+          // console.error(`SQL Store: Unknown cardType for specific aggregation: ${cardType}`);
+          throw new Error(`Unknown cardType: ${cardType}`);
         }
+        const result = await executor(connection, segments, viewType);
+        // --- End Refactor ---
 
         // Update only the relevant part of aggregatedData using a type-safe approach
+        // State merging logic seems okay, keep using functional set
         set(state => {
           const currentAggData = state.aggregatedData || initialSqlState.aggregatedData as AggregatedData;
-          let updatedSlice: Partial<AggregatedData> = {};
 
-          // Create the specific slice to update based on cardType
-          switch (cardType) {
-            case 'sources':
-              updatedSlice = { sources: result as AggregatedData['sources'] };
-              break;
-            case 'pages':
-              updatedSlice = { pages: result as AggregatedData['pages'] };
-              break;
-            case 'regions':
-              updatedSlice = { regions: result as AggregatedData['regions'] };
-              break;
-            case 'devices':
-              updatedSlice = { devices: result as AggregatedData['devices'] };
-              break;
-            case 'events':
-              // eventsData is top-level
-              updatedSlice = { eventsData: result as AggregatedData['eventsData'] };
-              break;
+          // --- Refactored: Use Map lookup for state update ---
+          const stateUpdater = aggregationStateUpdaters.get(cardType);
+          if (!stateUpdater) {
+            // This should ideally not happen if the executor map is synced, but good practice to check
+            console.error(`SQL Store: Unknown cardType for state update: ${cardType}`);
+            // Potentially throw or handle gracefully
+             // Throw error to be caught below
+             throw new Error(`Internal error: Unknown cardType ${cardType} for state update`);
           }
+          const updatedSlice = stateUpdater(result);
+          // --- End Refactor ---
 
           // Merge the updated slice into the existing aggregatedData
           const finalAggData = {
@@ -596,22 +555,20 @@ export const useSqlStore = create<AnalyticsSqlState>()(
 
           return {
             aggregatedData: finalAggData,
-            // status: 'idle' // Status reset in finally block
+            // status: 'idle' // Status reset in finally block - handled below
           };
         });
+        _setIdle(); // Set idle on success
 
       } catch (error: any) {
         console.error(`SQL Store: Error during specific aggregation for ${cardType}/${viewType}:`, error);
-        set({ error: error.message || `Error aggregating ${cardType} tab`, status: 'error' });
-      } finally {
-        // Ensure status is always reset, even if an error occurred during the set() update
-        if (get().status === 'aggregating_tab') {
-           set({ status: 'idle' });
-        }
+        _setError(error.message || `Error aggregating ${cardType} tab`); // Use helper
       }
+      // No finally block needed as _setIdle/_setError handle status updates
     },
 
     // --- Segment Management ---
+    // No status changes needed here, they trigger runAggregations which handles status
     addSegment: (segment: Segment) => {
       const currentSegments = get().segments;
       if (!currentSegments.some(s => s.type === segment.type && s.value === segment.value)) {
@@ -639,11 +596,10 @@ export const useSqlStore = create<AnalyticsSqlState>()(
       console.log("SQL Store: Cleaning up DB connection.");
       await cleanupDb(db, connection); // Use imported function
       // Reset state explicitly after cleanup, don't spread initialSqlState here
-      set({
+      // Use _setIdle and explicitly reset data structures
+      _setIdle({
         connection: null,
         db: null,
-        status: 'idle',
-        error: null,
         aggregatedData: initialSqlState.aggregatedData, // Reset data structures
         sankeyData: initialSqlState.sankeyData,
         selectedPropertyKey: null,
@@ -653,6 +609,7 @@ export const useSqlStore = create<AnalyticsSqlState>()(
     },
 
     // --- Tab Setters (Now trigger specific aggregation) ---
+    // These now just set the tab state and call runSpecificAggregation, which handles status
     setSourcesTab: async (tab: string) => {
       set({ sourcesTab: tab });
       await get().runSpecificAggregation('sources', tab);
@@ -674,46 +631,51 @@ export const useSqlStore = create<AnalyticsSqlState>()(
       await get().runSpecificAggregation('events', tab);
     },
 
-   }),
-   // --- Persist Configuration ---
-   {
-     name: 'analytics-sql-preferences', // Unique name for this store's persistence
-     storage: createJSONStorage(() => localStorage),
-     partialize: (state): Partial<AnalyticsSqlState> => ({
-       // Persist only the tab selections and the selected custom property key
-       sourcesTab: state.sourcesTab,
-       pagesTab: state.pagesTab,
-       regionsTab: state.regionsTab,
-       devicesTab: state.devicesTab,
-       eventsTab: state.eventsTab,
-       selectedPropertyKey: state.selectedPropertyKey,
-       // Do not persist: status, error, db, connection, aggregatedData, sankeyData, segments, lastProcessed*
-     }),
-     onRehydrateStorage: () => (state, error) => {
-       console.log("SQL Store: Rehydrating state...");
-       if (error) {
-         console.error("SQL Store: Failed to rehydrate state:", error);
-         // Attempt to initialize non-persisted state even on error? Or rely on manual init?
-         state?._initializeNonPersistedState(); // Call helper if state exists
-         return;
-       }
-       if (!state) {
-         console.warn("SQL Store: State is undefined during rehydration.");
-         // Initialize non-persisted state if rehydration provides no state object
-         useSqlStore.getState()._initializeNonPersistedState();
-         return;
-       }
+  }; // End of return object
+}; // End of sqlStoreCreator
 
-       console.log("SQL Store: Rehydration complete. Initializing non-persisted state.");
-       // Initialize non-persisted state after successful rehydration
-       state._initializeNonPersistedState();
+export const useSqlStore = create<AnalyticsSqlState>()(
+  persist(
+    sqlStoreCreator, // Pass the creator function
+    // --- Persist Configuration ---
+    {
+      name: 'analytics-sql-preferences', // Unique name for this store's persistence
+      storage: createJSONStorage(() => localStorage),
+      partialize: (state): Partial<AnalyticsSqlState> => ({
+        // Persist only the tab selections and the selected custom property key
+        sourcesTab: state.sourcesTab,
+        pagesTab: state.pagesTab,
+        regionsTab: state.regionsTab,
+        devicesTab: state.devicesTab,
+        eventsTab: state.eventsTab,
+        selectedPropertyKey: state.selectedPropertyKey,
+        // Do not persist: status, error, db, connection, aggregatedData, sankeyData, segments, lastProcessed*
+      }),
+      onRehydrateStorage: () => (state, error) => {
+        console.log("SQL Store: Rehydrating state...");
+        if (error) {
+          console.error("SQL Store: Failed to rehydrate state:", error);
+          // Attempt to initialize non-persisted state even on error? Or rely on manual init?
+          state?._initializeNonPersistedState(); // Call helper if state exists
+          return;
+        }
+        if (!state) {
+          console.warn("SQL Store: State is undefined during rehydration.");
+          // Initialize non-persisted state if rehydration provides no state object
+          useSqlStore.getState()._initializeNonPersistedState();
+          return;
+        }
 
-       // Note: The HTTP store subscriber will handle fetching data based on
-       // the rehydrated selectedSiteId from the HTTP store's persistence.
-       // We don't need to trigger fetch here directly.
-     }
-   }
- ) // End persist wrapper
+        console.log("SQL Store: Rehydration complete. Initializing non-persisted state.");
+        // Initialize non-persisted state after successful rehydration
+        state._initializeNonPersistedState();
+
+        // Note: The HTTP store subscriber will handle fetching data based on
+        // the rehydrated selectedSiteId from the HTTP store's persistence.
+        // We don't need to trigger fetch here directly.
+      }
+    }
+  ) // End persist wrapper
 );
 
 // --- Subscription to HTTP Store ---
@@ -773,8 +735,7 @@ useHttpStore.subscribe(
 
     // 4. Has site or range actually changed from the last processed values?
     const siteChanged = currentSiteId !== lastProcessedSiteId;
-    // Deep comparison for range object needed
-    const rangeChanged = JSON.stringify(currentRange) !== JSON.stringify(lastProcessedRange);
+    const rangeChanged = _isRangeChanged(currentRange, lastProcessedRange); // Use helper
 
     if (!siteChanged && !rangeChanged) {
       console.log("SQL Store: No change in site or range since last processing. Skipping.");
@@ -782,7 +743,9 @@ useHttpStore.subscribe(
     }
 
     // 5. Is the SQL store busy?
-    if (sqlStatus === 'loading_data' || sqlStatus === 'aggregating' || sqlStatus === 'initializing') {
+    // Use _isBusy helper, but exclude 'aggregating_tab' as fetching should still proceed if only a tab is aggregating
+    const isBusyForFetch = sqlStatus === 'loading_data' || sqlStatus === 'aggregating' || sqlStatus === 'initializing';
+    if (isBusyForFetch) {
       console.log(`SQL Store: Store is busy (${sqlStatus}). Deferring fetch.`);
       // Optionally, could set a flag to re-check later, but usually the next state change will trigger this again.
       return;

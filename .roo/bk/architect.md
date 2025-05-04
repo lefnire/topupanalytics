@@ -1,2 +1,0 @@
-* Always consult @/README.md before starting tasks, to better understand the project.
-* When you're done with a changeset, always update README.md, both to keep it correct based on changes, and to fill in knowledge gaps for future agents.

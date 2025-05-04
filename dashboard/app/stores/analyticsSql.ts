@@ -10,6 +10,7 @@ import {
     type Stats
 } from './analyticsTypes';
 import { arrowTableToObjects, firstRow, formatDuration, toCards, buildSankeyData } from './analyticsUtils';
+// Removed incorrect import: import { type AnalyticsDataSchema } from './analyticsTypes';
 
 // --- Constants ---
 // Moved from analyticsStore.ts as they are used by runSankeyAggregation
@@ -96,6 +97,185 @@ export const generateWhereClause = (segments: Segment[]): string => {
     return `WHERE ${conditions.join(' AND ')}`;
 };
 
+// ============================================================================
+// Data Loading and View Creation Functions (Moved from analyticsSqlStore)
+// ============================================================================
+
+/**
+ * Loads fetched initial events and subsequent events data into DuckDB tables.
+ * Handles table creation (dropping existing), data insertion within a transaction,
+ * and file buffer management.
+ *
+ * @param db The DuckDB instance.
+ * @param connection The DuckDB connection.
+ * @param initialEvents Array of initial event objects.
+ * @param events Array of subsequent event objects.
+ * @param commonSchema Schema definition for columns present in both initial and subsequent events.
+ * @param initialOnlySchema Schema definition for columns present only in initial events.
+ * @returns Promise resolving to true if successful, false otherwise.
+ */
+export const loadDataIntoTables = async (
+  db: duckdb.AsyncDuckDB,
+  connection: duckdb.AsyncDuckDBConnection,
+  initialEvents: any[],
+  events: any[],
+  commonSchema: { name: string; type: string }[], // Use inline type
+  initialOnlySchema: { name: string; type: string }[] // Use inline type
+): Promise<boolean> => {
+  const initialEventsFileName = 'initial_events.json';
+  const eventsFileName = 'events.json';
+  let transactionSuccessful = false;
+
+  try {
+    // 1. Register Data Buffers
+    const initialEventsBuffer = new TextEncoder().encode(JSON.stringify(initialEvents));
+    const eventsBuffer = new TextEncoder().encode(JSON.stringify(events));
+    await Promise.all([
+      db.registerFileBuffer(initialEventsFileName, initialEventsBuffer),
+      db.registerFileBuffer(eventsFileName, eventsBuffer)
+    ]);
+    console.log(`SQL Util: Registered ${initialEventsFileName} and ${eventsFileName}`);
+
+    // 2. Prepare SQL
+    const fullInitialSchema = [...commonSchema, ...initialOnlySchema];
+    const createInitialTableSql = generateCreateTableSQL('initial_events', fullInitialSchema); // generateCreateTableSQL already includes DROP
+    const createEventsTableSql = generateCreateTableSQL('events', commonSchema); // generateCreateTableSQL already includes DROP
+
+    const readInitialJsonColumnsSql = `{${fullInitialSchema.map(c => `"${c.name}": '${mapSchemaToDuckDBType(c.type)}'`).join(', ')}}`;
+    const readEventsJsonColumnsSql = `{${commonSchema.map(c => `"${c.name}": '${mapSchemaToDuckDBType(c.type)}'`).join(', ')}}`;
+
+    const insertInitialSql = `INSERT INTO initial_events SELECT * FROM read_json('${initialEventsFileName}', auto_detect=false, columns=${readInitialJsonColumnsSql});`;
+    const insertEventsSql = `INSERT INTO events SELECT * FROM read_json('${eventsFileName}', auto_detect=false, columns=${readEventsJsonColumnsSql});`;
+
+    // 3. Execute Transaction
+    await connection.query('BEGIN TRANSACTION;');
+    try {
+      // Drop handled by generateCreateTableSQL
+      // Create new tables
+      await Promise.all([
+          connection.query(createInitialTableSql),
+          connection.query(createEventsTableSql)
+      ]);
+
+      // Insert data into tables
+      const insertPromises = [];
+      if (initialEvents.length > 0) insertPromises.push(connection.query(insertInitialSql));
+      if (events.length > 0) insertPromises.push(connection.query(insertEventsSql));
+      if (insertPromises.length > 0) await Promise.all(insertPromises);
+
+      // Commit Transaction
+      await connection.query('COMMIT;');
+      transactionSuccessful = true;
+      console.log('SQL Util: Table data transaction committed successfully.');
+
+    } catch (txError) {
+      console.error('SQL Util: Table data transaction failed, rolling back...', txError);
+      await connection.query('ROLLBACK;');
+      throw txError; // Re-throw original error
+    }
+
+  } catch (error) {
+    console.error("SQL Util: Error during data loading into tables:", error);
+    // Ensure transactionSuccessful remains false or is set to false
+    transactionSuccessful = false;
+    // Re-throw the error to be handled by the caller
+    throw error;
+  } finally {
+    // 4. Drop file buffers regardless of success or failure (after transaction attempt)
+    try {
+      await Promise.all([
+        db.dropFile(initialEventsFileName).catch(e => console.warn(`SQL Util: Failed to drop ${initialEventsFileName}:`, e)),
+        db.dropFile(eventsFileName).catch(e => console.warn(`SQL Util: Failed to drop ${eventsFileName}:`, e))
+      ]);
+      console.log(`SQL Util: Dropped file buffers ${initialEventsFileName} and ${eventsFileName}`);
+    } catch (dropError) {
+       console.error('SQL Util: Error dropping files:', dropError);
+    }
+  }
+  return transactionSuccessful;
+};
+
+/**
+ * Creates or replaces the main 'analytics' view in DuckDB.
+ * This view joins initial and subsequent events, forward-fills static data,
+ * and calculates derived columns like channel and source.
+ *
+ * @param connection The DuckDB connection.
+ * @param commonSchema Schema definition for columns present in both initial and subsequent events.
+ * @param initialOnlySchema Schema definition for columns present only in initial events.
+ * @returns Promise resolving when the view is created.
+ */
+export const createOrReplaceAnalyticsView = async (
+   connection: duckdb.AsyncDuckDBConnection,
+   commonSchema: { name: string; type: string }[], // Use inline type
+   initialOnlySchema: { name: string; type: string }[] // Use inline type
+): Promise<void> => {
+    const fullInitialSchema = [...commonSchema, ...initialOnlySchema];
+    const eventSpecificCols = ['event', 'pathname', 'timestamp', 'properties']; // Columns specific to 'events' table or derived later
+    const staticCols = fullInitialSchema.filter(col => !eventSpecificCols.includes(col.name)).map(col => col.name);
+
+    // Ensure session_id exists before partitioning by it, fallback needed
+    const partitionKey = staticCols.includes('session_id') ? 'session_id' : (staticCols.length > 0 ? staticCols[0] : null); // Fallback if no session_id
+
+    const staticColFirstValues = staticCols.map(col =>
+      partitionKey
+        ? `FIRST_VALUE(d."${col}") OVER (PARTITION BY d."${partitionKey}" ORDER BY d."timestamp") AS "${col}"`
+        : `d."${col}"` // If no partition key, just select the column directly (shouldn't happen with session_id)
+    ).join(',\n                 ');
+
+    const nullPlaceholders = initialOnlySchema.map(c => `NULL AS "${c.name}"`).join(', ');
+    const commonSelectColsQuoted = commonSchema.map(c => `"${c.name}"`);
+    const allColsSelectString = [...commonSelectColsQuoted, ...initialOnlySchema.map(c => `"${c.name}"`)].join(', ');
+
+    const createAnalyticsViewSql = `
+        CREATE OR REPLACE VIEW analytics AS
+        WITH base AS (
+            SELECT ${allColsSelectString} FROM initial_events
+            UNION ALL
+            SELECT ${commonSelectColsQuoted.join(', ')}${initialOnlySchema.length > 0 ? ', ' + nullPlaceholders : ''} FROM events
+        ),
+        -- Pre-calculate channel and source for easier filtering
+        derived AS (
+            SELECT *,
+                   LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) AS referrer_lower,
+                   CASE
+                       WHEN utm_medium = 'cpc' OR utm_medium = 'ppc' THEN 'Paid Search'
+                       WHEN utm_medium = 'email' OR list_contains(['mail.google.com', 'com.google.android.gm'], LOWER(COALESCE(referer_domain, '$direct', 'Unknown'))) THEN 'Email'
+                       WHEN utm_medium = 'social' OR list_contains([
+                            'facebook', 'twitter', 'linkedin', 'instagram', 'pinterest', 'reddit', 't.co',
+                            'facebook.com', 'twitter.com', 'linkedin.com', 'instagram.com', 'pinterest.com', 'reddit.com',
+                            'com.reddit.frontpage', 'old.reddit.com', 'youtube.com', 'm.youtube.com'
+                           ], LOWER(COALESCE(referer_domain, '$direct', 'Unknown'))) THEN 'Social'
+                       WHEN list_contains([
+                            'google', 'bing', 'duckduckgo', 'yahoo', 'ecosia', 'baidu',
+                            'google.com', 'google.co.uk', 'google.com.hk', 'yandex.ru', 'search.brave.com', 'perplexity.ai'
+                           ], LOWER(COALESCE(referer_domain, '$direct', 'Unknown'))) THEN 'Organic Search'
+                       WHEN LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) = '$direct' THEN 'Direct'
+                       WHEN LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) = 'Unknown' THEN 'Unknown'
+                       WHEN COALESCE(referer_domain, '$direct', 'Unknown') IS NOT NULL AND LOWER(COALESCE(referer_domain, '$direct', 'Unknown')) != '$direct' THEN 'Referral'
+                       ELSE 'Unknown'
+                   END AS channel,
+                   CASE
+                       WHEN COALESCE(referer_domain, '$direct', 'Unknown') = '$direct' THEN '$direct'
+                       ELSE regexp_replace(COALESCE(referer_domain, '$direct', 'Unknown'), '^www\\\\.', '') -- Corrected: Double escape for SQL string literal
+                   END AS source
+            FROM base
+        )
+        -- Select base event columns, forward-filled static columns, and derived channel/source
+        SELECT d."event", d."pathname", d."timestamp", d."properties", d."channel", d."source"${staticColFirstValues ? ', ' + staticColFirstValues : ''}
+        FROM derived d;
+    `;
+
+    try {
+        // DROP VIEW IF EXISTS is handled by CREATE OR REPLACE VIEW
+        await connection.query(createAnalyticsViewSql);
+        const countResult = await connection.query(`SELECT COUNT(*) AS count FROM analytics`); // Verify view exists
+        console.log(`SQL Util: Analytics view created/recreated successfully with ${firstRow<{ count: number }>(countResult)?.count ?? 0} events.`);
+    } catch (viewError: any) {
+        console.error('SQL Util: Failed to create analytics view:', viewError);
+        throw viewError; // Re-throw to be handled by the caller
+    }
+};
 
 // --- Aggregation Runners ---
 
@@ -228,48 +408,78 @@ export const runAggregations = async (
 // Specific Aggregation Functions (Called by Routers or runSpecificAggregation)
 // ============================================================================
 
+// --- Helper Function for Simple Aggregations ---
+
+/**
+ * Internal helper to run common aggregation patterns returning CardDataItem[].
+ * SELECT {selectNameExpr} AS name, {selectValueExpr} AS value
+ * FROM analytics
+ * WHERE {segments} AND {additionalWhere}
+ * GROUP BY name
+ * HAVING value > 0 ORDER BY {orderBy} LIMIT {limit}
+ */
+const _runSimpleAggregation = async (
+  conn: duckdb.AsyncDuckDBConnection,
+  segments: Segment[],
+  selectNameExpr: string, // Expression for the 'name' column
+  selectValueExpr: string, // Expression for the 'value' column
+  additionalWhere: string = '1=1', // Additional WHERE conditions beyond segments
+  orderBy: string = 'value DESC',
+  limit: number = 100
+): Promise<CardDataItem[]> => {
+  const whereClause = generateWhereClause(segments);
+  const finalWhere = `${whereClause} AND (${additionalWhere})`; // Combine segment and additional filters
+
+  // Note: We directly use the expressions in SELECT and GROUP BY the alias 'name'
+  // This works in DuckDB and simplifies the call signature.
+  const query = `
+    SELECT
+      ${selectNameExpr} AS name,
+      ${selectValueExpr} AS value
+    FROM analytics
+    ${finalWhere}
+    GROUP BY name
+    HAVING value > 0
+    ORDER BY ${orderBy}
+    LIMIT ${limit};
+  `;
+  // console.log(`_runSimpleAggregation Query for name='${selectNameExpr}':\n${query}`); // Debug logging
+  return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+};
+
+
 // --- Sources ---
 export const runSourcesChannelsSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
-    const whereClause = generateWhereClause(segments);
-    const query = `
-        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} )
-        SELECT channel AS name, COUNT(DISTINCT session_id) AS value
-        FROM FilteredAnalytics GROUP BY channel HAVING value > 0 ORDER BY value DESC LIMIT 100;
-    `;
-    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+    return _runSimpleAggregation(conn, segments, 'channel', 'COUNT(DISTINCT session_id)');
 };
 
 export const runSourcesSourcesSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
-    const whereClause = generateWhereClause(segments);
-    const query = `
-        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} )
-        SELECT source AS name, COUNT(DISTINCT session_id) AS value
-        FROM FilteredAnalytics GROUP BY source HAVING value > 0 ORDER BY value DESC LIMIT 100;
-    `;
-    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+    return _runSimpleAggregation(conn, segments, 'source', 'COUNT(DISTINCT session_id)');
 };
 
 export const runSourcesCampaignsSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
-    const whereClause = generateWhereClause(segments);
-    const query = `
-        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} )
-        SELECT COALESCE(utm_campaign, '(not set)') AS name, COUNT(DISTINCT session_id) AS value
-        FROM FilteredAnalytics WHERE utm_campaign IS NOT NULL GROUP BY name HAVING value > 0 ORDER BY value DESC LIMIT 100;
-    `;
-    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+    return _runSimpleAggregation(
+        conn,
+        segments,
+        "COALESCE(utm_campaign, '(not set)')", // selectNameExpr
+        'COUNT(DISTINCT session_id)',         // selectValueExpr
+        'utm_campaign IS NOT NULL'            // additionalWhere
+    );
 };
 
 // --- Pages ---
 export const runPagesTopPagesSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
-    const whereClause = generateWhereClause(segments);
-    const query = `
-        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} ),
-        PageViews AS ( SELECT pathname FROM FilteredAnalytics WHERE event = 'page_view' AND pathname IS NOT NULL AND trim(pathname) != '' )
-        SELECT pathname AS name, COUNT (*) AS value FROM PageViews GROUP BY pathname HAVING value > 0 ORDER BY value DESC LIMIT 100;
-    `;
-    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+    // This one is slightly different as it counts events, not sessions, and filters events
+    return _runSimpleAggregation(
+        conn,
+        segments,
+        'pathname',                                                               // selectNameExpr
+        'COUNT(*)',                                                               // selectValueExpr
+        "event = 'page_view' AND pathname IS NOT NULL AND trim(pathname) != ''"   // additionalWhere
+    );
 };
 
+// NOTE: Entry/Exit pages use window functions and are too complex for _runSimpleAggregation
 export const runPagesEntryPagesSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
     const whereClause = generateWhereClause(segments);
     const query = `
@@ -294,26 +504,23 @@ export const runPagesExitPagesSql = async (conn: duckdb.AsyncDuckDBConnection, s
 
 // --- Regions ---
 export const runRegionsCountriesSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
-    const whereClause = generateWhereClause(segments);
-    const query = `
-        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} )
-        SELECT COALESCE(country, 'Unknown') AS name, COUNT(DISTINCT session_id) AS value
-        FROM FilteredAnalytics GROUP BY name HAVING value > 0 ORDER BY value DESC LIMIT 100;
-    `;
-    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+    return _runSimpleAggregation(conn, segments, "COALESCE(country, 'Unknown')", 'COUNT(DISTINCT session_id)');
 };
 
 export const runRegionsRegionsSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
-    const whereClause = generateWhereClause(segments);
-    const query = `
-        WITH FilteredAnalytics AS ( SELECT * FROM analytics ${whereClause} )
-        SELECT COALESCE(region, 'Unknown') AS name, COUNT(DISTINCT session_id) AS value
-        FROM FilteredAnalytics WHERE name != 'Unknown' GROUP BY name HAVING value > 0 ORDER BY value DESC LIMIT 100;
-    `;
-    return conn.query(query).then(arrowTableToObjects<CardDataItem>);
+    return _runSimpleAggregation(
+        conn,
+        segments,
+        "COALESCE(region, 'Unknown')", // selectNameExpr
+        'COUNT(DISTINCT session_id)',  // selectValueExpr
+        "region IS NOT NULL AND region != 'Unknown'" // additionalWhere (Filter out Unknown *before* grouping)
+        // Note: The original query filtered *after* grouping (WHERE name != 'Unknown').
+        // Filtering before grouping is generally more efficient and achieves the same result here.
+    );
 };
 
 // --- Devices ---
+// NOTE: Device aggregations calculate percentages and use FIRST(), making them unsuitable for _runSimpleAggregation
 export const runDevicesBrowsersSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
     const whereClause = generateWhereClause(segments);
     const query = `
@@ -357,7 +564,7 @@ export const runDevicesScreenSizesSql = async (conn: duckdb.AsyncDuckDBConnectio
 };
 
 // --- Events ---
-// Assuming only one type of event aggregation for now
+// NOTE: Event aggregation calculates percentages and counts total events, making it unsuitable for _runSimpleAggregation
 export const runEventsEventsSql = async (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]): Promise<CardDataItem[]> => {
     const whereClause = generateWhereClause(segments);
     const query = `
@@ -379,22 +586,36 @@ export const runEventsEventsSql = async (conn: duckdb.AsyncDuckDBConnection, seg
 // Aggregation Router Functions (Called by runAggregations or runSpecificAggregation)
 // ============================================================================
 
+// --- Sources Aggregation Map ---
+const sourcesAggregationMap = new Map<string, (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]) => Promise<AggregatedData['sources']>>([
+  ['channels', async (conn, segments) => ({ channels: await runSourcesChannelsSql(conn, segments), sources: [], campaigns: [] })],
+  ['sources', async (conn, segments) => ({ channels: [], sources: await runSourcesSourcesSql(conn, segments), campaigns: [] })],
+  ['campaigns', async (conn, segments) => ({ channels: [], sources: [], campaigns: await runSourcesCampaignsSql(conn, segments) })],
+]);
+
 export const runSourcesAggregationSql = async (
     conn: duckdb.AsyncDuckDBConnection,
     segments: Segment[],
     viewType: string
 ): Promise<AggregatedData['sources']> => {
     console.log(`Running sources aggregation for view: ${viewType}`);
-    const emptyResult = { channels: [], sources: [], campaigns: [] };
-    switch (viewType) {
-        case 'channels': return { ...emptyResult, channels: await runSourcesChannelsSql(conn, segments) };
-        case 'sources': return { ...emptyResult, sources: await runSourcesSourcesSql(conn, segments) };
-        case 'campaigns': return { ...emptyResult, campaigns: await runSourcesCampaignsSql(conn, segments) };
-        default:
-            console.warn(`Unknown sources viewType: ${viewType}, defaulting to channels.`);
-            return { ...emptyResult, channels: await runSourcesChannelsSql(conn, segments) };
+    const executor = sourcesAggregationMap.get(viewType);
+    if (executor) {
+        return executor(conn, segments);
+    } else {
+        console.warn(`Unknown sources viewType: ${viewType}, defaulting to channels.`);
+        // Default to channels if viewType is unknown
+        const defaultExecutor = sourcesAggregationMap.get('channels');
+        return defaultExecutor!(conn, segments); // Non-null assertion ok as 'channels' is guaranteed key
     }
 };
+
+// --- Pages Aggregation Map ---
+const pagesAggregationMap = new Map<string, (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]) => Promise<AggregatedData['pages']>>([
+  ['topPages', async (conn, segments) => ({ topPages: await runPagesTopPagesSql(conn, segments), entryPages: [], exitPages: [] })],
+  ['entryPages', async (conn, segments) => ({ topPages: [], entryPages: await runPagesEntryPagesSql(conn, segments), exitPages: [] })],
+  ['exitPages', async (conn, segments) => ({ topPages: [], entryPages: [], exitPages: await runPagesExitPagesSql(conn, segments) })],
+]);
 
 export const runPagesAggregationSql = async (
     conn: duckdb.AsyncDuckDBConnection,
@@ -402,16 +623,21 @@ export const runPagesAggregationSql = async (
     viewType: string
 ): Promise<AggregatedData['pages']> => {
     console.log(`Running pages aggregation for view: ${viewType}`);
-    const emptyResult = { topPages: [], entryPages: [], exitPages: [] };
-    switch (viewType) {
-        case 'topPages': return { ...emptyResult, topPages: await runPagesTopPagesSql(conn, segments) };
-        case 'entryPages': return { ...emptyResult, entryPages: await runPagesEntryPagesSql(conn, segments) };
-        case 'exitPages': return { ...emptyResult, exitPages: await runPagesExitPagesSql(conn, segments) };
-        default:
-            console.warn(`Unknown pages viewType: ${viewType}, defaulting to topPages.`);
-            return { ...emptyResult, topPages: await runPagesTopPagesSql(conn, segments) };
+    const executor = pagesAggregationMap.get(viewType);
+    if (executor) {
+        return executor(conn, segments);
+    } else {
+        console.warn(`Unknown pages viewType: ${viewType}, defaulting to topPages.`);
+        const defaultExecutor = pagesAggregationMap.get('topPages');
+        return defaultExecutor!(conn, segments); // Non-null assertion ok
     }
 };
+
+// --- Regions Aggregation Map ---
+const regionsAggregationMap = new Map<string, (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]) => Promise<AggregatedData['regions']>>([
+  ['countries', async (conn, segments) => ({ countries: await runRegionsCountriesSql(conn, segments), regions: [] })],
+  ['regions', async (conn, segments) => ({ countries: [], regions: await runRegionsRegionsSql(conn, segments) })],
+]);
 
 export const runRegionsAggregationSql = async (
     conn: duckdb.AsyncDuckDBConnection,
@@ -419,15 +645,22 @@ export const runRegionsAggregationSql = async (
     viewType: string
 ): Promise<AggregatedData['regions']> => {
     console.log(`Running regions aggregation for view: ${viewType}`);
-    const emptyResult = { countries: [], regions: [] };
-    switch (viewType) {
-        case 'countries': return { ...emptyResult, countries: await runRegionsCountriesSql(conn, segments) };
-        case 'regions': return { ...emptyResult, regions: await runRegionsRegionsSql(conn, segments) };
-        default:
-            console.warn(`Unknown regions viewType: ${viewType}, defaulting to countries.`);
-            return { ...emptyResult, countries: await runRegionsCountriesSql(conn, segments) };
+    const executor = regionsAggregationMap.get(viewType);
+    if (executor) {
+        return executor(conn, segments);
+    } else {
+        console.warn(`Unknown regions viewType: ${viewType}, defaulting to countries.`);
+        const defaultExecutor = regionsAggregationMap.get('countries');
+        return defaultExecutor!(conn, segments); // Non-null assertion ok
     }
 };
+
+// --- Devices Aggregation Map ---
+const devicesAggregationMap = new Map<string, (conn: duckdb.AsyncDuckDBConnection, segments: Segment[]) => Promise<AggregatedData['devices']>>([
+  ['browsers', async (conn, segments) => ({ browsers: await runDevicesBrowsersSql(conn, segments), os: [], screenSizes: [] })],
+  ['os', async (conn, segments) => ({ browsers: [], os: await runDevicesOsSql(conn, segments), screenSizes: [] })],
+  ['screenSizes', async (conn, segments) => ({ browsers: [], os: [], screenSizes: await runDevicesScreenSizesSql(conn, segments) })],
+]);
 
 export const runDevicesAggregationSql = async (
     conn: duckdb.AsyncDuckDBConnection,
@@ -435,14 +668,13 @@ export const runDevicesAggregationSql = async (
     viewType: string
 ): Promise<AggregatedData['devices']> => {
     console.log(`Running devices aggregation for view: ${viewType}`);
-    const emptyResult = { browsers: [], os: [], screenSizes: [] };
-    switch (viewType) {
-        case 'browsers': return { ...emptyResult, browsers: await runDevicesBrowsersSql(conn, segments) };
-        case 'os': return { ...emptyResult, os: await runDevicesOsSql(conn, segments) };
-        case 'screenSizes': return { ...emptyResult, screenSizes: await runDevicesScreenSizesSql(conn, segments) };
-        default:
-            console.warn(`Unknown devices viewType: ${viewType}, defaulting to browsers.`);
-            return { ...emptyResult, browsers: await runDevicesBrowsersSql(conn, segments) };
+    const executor = devicesAggregationMap.get(viewType);
+    if (executor) {
+        return executor(conn, segments);
+    } else {
+        console.warn(`Unknown devices viewType: ${viewType}, defaulting to browsers.`);
+        const defaultExecutor = devicesAggregationMap.get('browsers');
+        return defaultExecutor!(conn, segments); // Non-null assertion ok
     }
 };
 
