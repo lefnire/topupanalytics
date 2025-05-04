@@ -18,6 +18,20 @@ export default $config({
     };
   },
   async run() {
+    // Read .env variables for local prod testing
+    const useProdResourcesLocally = process.env.USE_PROD_RESOURCES_LOCALLY === "true";
+    const prodApiUrl = process.env.PROD_API_URL;
+    const prodUserPoolId = process.env.PROD_COGNITO_USER_POOL_ID;
+    const prodClientId = process.env.PROD_COGNITO_CLIENT_ID;
+    const prodAppUrl = process.env.PROD_APP_URL;
+    const prodStripePubKey = process.env.PROD_STRIPE_PUBLISHABLE_KEY;
+    const prodPublicIngestUrl = prodAppUrl ? `${prodAppUrl}/api/event` : undefined; // Construct prod ingest URL
+
+    // Optional validation (as per plan)
+    if (useProdResourcesLocally && (!prodApiUrl || !prodUserPoolId || !prodClientId || !prodAppUrl)) {
+      console.warn("WARN: USE_PROD_RESOURCES_LOCALLY is true, but one or more PROD_* environment variables are missing in .env. Frontend might not connect correctly.");
+    }
+
     const useStripe = process.env.USE_STRIPE === "true"; // Step 1: Read env var
     const isProd = $app.stage === "production";
     const accountId = aws.getCallerIdentityOutput({}).accountId;
@@ -516,11 +530,11 @@ export default $config({
     const api = new sst.aws.ApiGatewayV2("ManagementApi", {
       cors: {
         allowOrigins: isProd
-          ? [`https://${domain}`]
-          : ["http://localhost:5173", "http://127.0.0.1:5173"], // Adjust port if needed
-        allowCredentials: true, // Allow credentials (needed for JWT)
-        allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"], // Allow necessary methods
-        allowHeaders: ["Content-Type", "Authorization"], // Allow standard headers + Auth
+          ? [`https://${domain}`, "http://localhost:5173", "http://127.0.0.1:5173"] // ADD localhost for prod
+          : ["http://localhost:5173", "http://127.0.0.1:5173"],
+        allowCredentials: true,
+        allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allowHeaders: ["Content-Type", "Authorization"],
       },
     });
     // Define JWT Authorizer (Using SST User Pool and Client)
@@ -577,16 +591,16 @@ export default $config({
         userPoolClientSst, // Link the SST UserPoolClient object
       ],
       environment: {
-        VITE_COGNITO_USER_POOL_ID: userPool.id, // Use ID from SST component
-        VITE_COGNITO_CLIENT_ID: userPoolClientSst.id, // Use ID from SST client object
+        VITE_COGNITO_USER_POOL_ID: useProdResourcesLocally && prodUserPoolId ? prodUserPoolId : userPool.id,
+        VITE_COGNITO_CLIENT_ID: useProdResourcesLocally && prodClientId ? prodClientId : userPoolClientSst.id,
         VITE_AWS_REGION: region,
-        VITE_API_URL: api.url,
-        VITE_APP_URL: router.url, // App URL is the router URL
+        VITE_API_URL: useProdResourcesLocally && prodApiUrl ? prodApiUrl : api.url,
+        VITE_APP_URL: useProdResourcesLocally && prodAppUrl ? prodAppUrl : router.url,
         VITE_STRIPE_PUBLISHABLE_KEY: useStripe
-          ? STRIPE_PUBLISHABLE_KEY!.value
-          : DUMMY_STRIPE_PUBLISHABLE_KEY_PLACEHOLDER, // Correct: Use real value or placeholder string
-        VITE_USE_STRIPE: useStripe.toString(), // Add the flag
-        VITE_PUBLIC_INGEST_URL: publicIngestUrl, // Ensure this still exists and uses the variable
+          ? (useProdResourcesLocally && prodStripePubKey ? prodStripePubKey : STRIPE_PUBLISHABLE_KEY!.value)
+          : DUMMY_STRIPE_PUBLISHABLE_KEY_PLACEHOLDER,
+        VITE_USE_STRIPE: useStripe.toString(),
+        VITE_PUBLIC_INGEST_URL: useProdResourcesLocally && prodPublicIngestUrl ? prodPublicIngestUrl : publicIngestUrl,
       },
     }, {dependsOn: [buildEmbedScripts]});
     // === Compaction Function & Cron (REMOVED - Iceberg handles auto-compaction) ===
@@ -684,6 +698,14 @@ export default $config({
       stripeFunctionName: stripeFn?.name,
       // tableBucketArn: s3Table.tableBucketArn,
       // warehouseLocation: s3Table.warehouseLocation,
-    };
+    productionEnvValues: isProd ? {
+      PROD_API_URL: api.url,
+      PROD_COGNITO_USER_POOL_ID: userPool.id,
+      PROD_COGNITO_CLIENT_ID: userPoolClientSst.id,
+      PROD_APP_URL: router.url,
+      PROD_STRIPE_PUBLISHABLE_KEY: useStripe ? STRIPE_PUBLISHABLE_KEY?.value : "N/A (Stripe not enabled)",
+      // Add any other relevant prod values here if needed
+    } : undefined, // Only include this block for production stage
+  };
   },
 });
