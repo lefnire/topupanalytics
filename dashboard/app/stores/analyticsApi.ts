@@ -1,6 +1,6 @@
 import { api, type Site, type UserPreferences } from '../lib/api';
 import { type DateRange } from 'react-day-picker';
-import { format } from 'date-fns';
+import { format, isToday, addDays } from 'date-fns'; // Add isToday, addDays
 
 /**
  * Fetches the raw analytics event data for a given site and date range.
@@ -19,11 +19,18 @@ export const fetchData = async (selectedSiteId: string, selectedRange: DateRange
 
     // Format dates for query parameters
     const startDateParam = format(selectedRange.from, 'yyyy-MM-dd');
-    const endDateParam = format(selectedRange.to, 'yyyy-MM-dd');
+
+    // Adjust end date if it's today to ensure we capture the full day's partition
+    let effectiveEndDate = selectedRange.to;
+    if (isToday(selectedRange.to)) {
+      console.log("Adjusting end date to tomorrow for 'today' selection.");
+      effectiveEndDate = addDays(selectedRange.to, 1);
+    }
+    const endDateParam = format(effectiveEndDate, 'yyyy-MM-dd'); // Use the potentially adjusted date
 
     // Construct the endpoint path with query parameters
     const endpoint = `/api/query?siteId=${selectedSiteId}&startDate=${startDateParam}&endDate=${endDateParam}`;
-    console.log(`Fetching query data from endpoint: ${endpoint}`);
+    console.log(`Fetching query data from endpoint: ${endpoint}`); // Log will show adjusted date if applicable
 
     // Use the api helper which handles base URL and auth
     const data = await api.get<any>(endpoint); // Define a proper type for the response later

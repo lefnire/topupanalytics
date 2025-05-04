@@ -141,13 +141,17 @@ const initialSqlState: Pick<AnalyticsSqlState,
   eventsTab: 'events',
 };
 
-// Helper function to compare two DateRange objects (moved outside creator for subscriber access)
-const _isRangeChanged = (range1?: DateRange, range2?: DateRange): boolean => {
+// Helper function to compare two DateRange objects reliably (moved outside creator for subscriber access)
+const _isRangeChanged = (oldRange?: DateRange, newRange?: DateRange): boolean => {
   // Handle cases where one or both are undefined/null
-  if (!range1 && !range2) return false; // Both null/undefined, no change
-  if (!range1 || !range2) return true;  // One is null/undefined, the other isn't, change
-  // Compare stringified versions for simplicity (as done previously)
-  return JSON.stringify(range1) !== JSON.stringify(range2);
+  if (!oldRange && !newRange) return false; // Both null/undefined, no change
+  if (!oldRange || !newRange) return true;  // One is null/undefined, the other isn't, change
+
+  // Check if either the 'from' or 'to' date has changed by comparing their time values, handling undefined
+  const fromChanged = oldRange.from?.getTime() !== newRange.from?.getTime();
+  const toChanged = oldRange.to?.getTime() !== newRange.to?.getTime();
+
+  return fromChanged || toChanged;
 };
 
 
