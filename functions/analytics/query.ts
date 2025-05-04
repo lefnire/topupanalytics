@@ -21,6 +21,7 @@ import {
 } from './schema';
 import { log } from './utils';
 import { Resource } from 'sst'
+import * as zlib from 'zlib'; // Import for gzip compression
 
 // Initialize AWS Clients
 const athenaClient = new AthenaClient({});
@@ -229,8 +230,65 @@ async function executeAthenaQuery(
     }
 }
 
+
+/**
+ * Creates a standard API Gateway response object, applying gzip compression if supported by the client.
+ * @param statusCode The HTTP status code.
+ * @param data The data payload to be stringified.
+ * @param eventHeaders Headers from the incoming API Gateway event, used to check Accept-Encoding.
+ * @returns The formatted APIGatewayProxyResultV2 object.
+ */
+const createApiResponse = (
+    statusCode: number,
+    data: any,
+    eventHeaders: APIGatewayProxyEventV2WithJWTAuthorizer['headers']
+): APIGatewayProxyResultV2 => {
+  const responseBodyString = JSON.stringify(data);
+  // Explicitly type headers according to APIGatewayProxyResultV2['headers']
+  const headers: { [header: string]: string | number | boolean } = {
+    "Content-Type": "application/json",
+    // Add any other default headers here if needed
+  };
+  let body = responseBodyString;
+  let isBase64Encoded = false;
+
+  // Check for gzip support (case-insensitive header check)
+  const acceptEncoding = eventHeaders?.['accept-encoding'] || eventHeaders?.['Accept-Encoding'] || '';
+  if (/\bgzip\b/.test(acceptEncoding)) { // Use regex for more robust check
+    try {
+      log('Client accepts gzip, attempting compression...');
+      const compressed = zlib.gzipSync(responseBodyString);
+      body = compressed.toString('base64');
+      headers['Content-Encoding'] = 'gzip'; // Set header
+      isBase64Encoded = true;
+      log(`Response compressed with gzip. Original size: ${responseBodyString.length}, Compressed size: ${body.length}`);
+    } catch (compressionError) {
+        console.error("Failed to compress response:", compressionError);
+        // Fallback to uncompressed if compression fails
+        body = responseBodyString;
+        isBase64Encoded = false;
+        delete headers['Content-Encoding']; // Ensure header is not set if compression failed
+    }
+  } else {
+    log('Client does not accept gzip or header not present, sending uncompressed.');
+  }
+
+  return {
+    statusCode,
+    headers,
+    body,
+    isBase64Encoded,
+  };
+};
+
+
 // GET /api/query
-// Use more specific types for event and result
+/**
+ * Handles requests to /api/query.
+ * Validates user authentication and site ownership.
+ * Executes Athena queries based on provided parameters.
+ * Returns analytics data, compressed if client supports gzip.
+ */
 export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     event: APIGatewayProxyEventV2WithJWTAuthorizer
 ): Promise<APIGatewayProxyResultV2> => { // Explicit return type
@@ -242,7 +300,8 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     const userSub = event.requestContext.authorizer?.jwt.claims.sub;
     if (!userSub) {
         log("Unauthorized: Missing user sub in JWT claims.");
-        return { statusCode: 401, body: JSON.stringify({ message: "Unauthorized" }) };
+        // Use helper function for response
+        return createApiResponse(401, { message: "Unauthorized" }, event.headers);
     }
     log(`Authenticated user sub: ${userSub}`);
 
@@ -261,17 +320,15 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
 
         if (ownedSiteIds.length === 0) {
             log(`No sites found for user sub: ${userSub}`);
-            return {
-                statusCode: 200,
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ initialEvents: [], events: [], commonSchema: [], initialOnlySchema: [], nextToken: null }),
-            };
+            // Use helper function for response
+            return createApiResponse(200, { initialEvents: [], events: [], commonSchema: [], initialOnlySchema: [], nextToken: null }, event.headers);
         }
         log(`User ${userSub} owns sites: ${ownedSiteIds.join(', ')}`);
 
     } catch (error: any) {
         console.error(`Error querying SitesTable for user ${userSub}:`, error);
-        return { statusCode: 500, body: JSON.stringify({ message: "Error fetching user sites.", details: error.message }) };
+        // Use helper function for response
+        return createApiResponse(500, { message: "Error fetching user sites.", details: error.message }, event.headers);
     }
 
     // --- Get Query Parameters ---
@@ -295,29 +352,23 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
 
         if (finalSiteIds.length === 0 && requestedSiteIds.length > 0) { // Only return error if specific sites were requested but none were valid/owned
             log(`User ${userSub} requested specific sites they do not own or requested list is empty after filtering.`);
-             return {
-                statusCode: 403, // Use 403 Forbidden as it's an authorization issue
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    message: "You do not have permission to access the requested site IDs.",
-                    initialEvents: [],
-                    events: [],
-                    commonSchema: [],
-                    initialOnlySchema: [],
-                    nextToken: null
-                }),
-             };
+             // Use helper function for response
+             return createApiResponse(403, {
+                 message: "You do not have permission to access the requested site IDs.",
+                 initialEvents: [],
+                 events: [],
+                 commonSchema: [],
+                 initialOnlySchema: [],
+                 nextToken: null
+             }, event.headers);
         }
     }
 
     // If after filtering (or if no filter was applied) there are no sites, return empty
     if (finalSiteIds.length === 0) {
          log(`No accessible sites to query for user ${userSub} after applying filters.`);
-         return {
-             statusCode: 200,
-             headers: { "Content-Type": "application/json" },
-             body: JSON.stringify({ initialEvents: [], events: [], commonSchema: [], initialOnlySchema: [], nextToken: null }),
-         };
+         // Use helper function for response
+         return createApiResponse(200, { initialEvents: [], events: [], commonSchema: [], initialOnlySchema: [], nextToken: null }, event.headers);
     }
 
 
@@ -408,25 +459,18 @@ ORDER BY "timestamp" DESC
 
         log(`Finished executing queries. Initial: ${initialEventsResult.results.length}, Events: ${eventsResult.results.length}`);
 
-        // Return results separately along with the schemas and nextToken
-        return {
-            statusCode: 200,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                initialEvents: initialEventsResult.results,
-                events: eventsResult.results,
-                commonSchema: commonSchemaFields.map(({ name, type }) => ({ name, type })),
-                initialOnlySchema: initialOnlySchemaFields.map(({ name, type }) => ({ name, type })),
-                nextToken: null // Always null as we return all results
-            }),
-        };
+        // Use helper function for response
+        return createApiResponse(200, {
+            initialEvents: initialEventsResult.results,
+            events: eventsResult.results,
+            commonSchema: commonSchemaFields.map(({ name, type }) => ({ name, type })),
+            initialOnlySchema: initialOnlySchemaFields.map(({ name, type }) => ({ name, type })),
+            nextToken: null // Always null as we return all results
+        }, event.headers);
 
     } catch (error: any) {
         console.error('Error in analytics query handler:', error);
-        return {
-            statusCode: 500,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message: "Internal server error during query execution.", details: error.message }),
-        };
+        // Use helper function for response
+        return createApiResponse(500, { message: "Internal server error during query execution.", details: error.message }, event.headers);
     }
 };
