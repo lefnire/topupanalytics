@@ -80,9 +80,8 @@ export interface AnalyticsSqlState extends Pick<AnalyticsStateBase,
   db: duckdb.AsyncDuckDB | null;
   connection: duckdb.AsyncDuckDBConnection | null;
 
-  // Internal state to track last processed values
-  lastProcessedSiteId: string | null;
-  lastProcessedRange: DateRange | undefined;
+  // Internal state to track last fetch trigger
+  lastFetchHash: string | null; // Hash of siteId + range for the last successful fetch
 
   // Actions
   initialize: () => Promise<void>; // Renamed for clarity
@@ -95,9 +94,9 @@ export interface AnalyticsSqlState extends Pick<AnalyticsStateBase,
   removeSegment: (segmentToRemove: Segment) => void;
   clearSegments: () => void;
   cleanup: () => Promise<void>;
-  resetSqlState: () => Partial<AnalyticsSqlState>; // Renamed for clarity
+  resetSqlState: () => Partial<AnalyticsSqlState>;
   // Tab Setters
-  setSourcesTab: (tab: string) => Promise<void>; // Now async due to calling runSpecificAggregation
+  setSourcesTab: (tab: string) => Promise<void>;
   setPagesTab: (tab: string) => Promise<void>;
   setRegionsTab: (tab: string) => Promise<void>;
   setDevicesTab: (tab: string) => Promise<void>;
@@ -116,8 +115,8 @@ export interface AnalyticsSqlState extends Pick<AnalyticsStateBase,
 const initialSqlState: Pick<AnalyticsSqlState,
   'status' | 'error' | 'aggregatedData' | 'selectedPropertyKey' |
   'sankeyData' | 'segments' | 'db' | 'connection' | // Removed isRefreshing
-  'lastProcessedSiteId' | 'lastProcessedRange' |
-  'sourcesTab' | 'pagesTab' | 'regionsTab' | 'devicesTab' | 'eventsTab' // Added Tab State
+  'lastFetchHash' | // Replaced lastProcessed*
+  'sourcesTab' | 'pagesTab' | 'regionsTab' | 'devicesTab' | 'eventsTab'
 > = {
   status: 'idle',
   error: null,
@@ -131,8 +130,7 @@ const initialSqlState: Pick<AnalyticsSqlState,
   // isRefreshing: false, // Removed
   db: null,
   connection: null,
-  lastProcessedSiteId: null, // Initialize new state
-  lastProcessedRange: undefined, // Initialize new state
+  lastFetchHash: null, // Initialize new state
   // Default Tab Values
   sourcesTab: 'channels',
   pagesTab: 'pages',
@@ -141,22 +139,8 @@ const initialSqlState: Pick<AnalyticsSqlState,
   eventsTab: 'events',
 };
 
-// Helper function to compare two DateRange objects reliably (moved outside creator for subscriber access)
-const _isRangeChanged = (oldRange?: DateRange, newRange?: DateRange): boolean => {
-  // Handle cases where one or both are undefined/null
-  if (!oldRange && !newRange) return false; // Both null/undefined, no change
-  if (!oldRange || !newRange) return true;  // One is null/undefined, the other isn't, change
-
-  // Check if either the 'from' or 'to' date has changed by comparing their time values, handling undefined
-  const fromChanged = oldRange.from?.getTime() !== newRange.from?.getTime();
-  const toChanged = oldRange.to?.getTime() !== newRange.to?.getTime();
-
-  return fromChanged || toChanged;
-};
-
-
 // --- Zustand Store ---
-// Use StateCreator for better typing with internal helpers
+// Use StateCreator for better typing
 const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", unknown]]> = (set, get) => {
   // --- Internal State Transition Helpers ---
   const _setIdle = (partialState: Partial<AnalyticsSqlState> = {}) => {
@@ -235,8 +219,8 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
         connection: null,
         aggregatedData: initialSqlState.aggregatedData, // Reset data
         sankeyData: initialSqlState.sankeyData,
-        // Keep persisted state: tabs, selectedPropertyKey, segments? (Decide if segments should reset)
-        // lastProcessedSiteId and lastProcessedRange are handled by the subscriber logic
+        // Keep persisted state: tabs, selectedPropertyKey, segments
+        lastFetchHash: null, // Reset fetch hash
       });
       // Trigger DB initialization after resetting state
       // Use setTimeout to ensure state update completes before initialize potentially updates state again
@@ -248,9 +232,9 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
       // It doesn't fit neatly into the simple helpers. Keep as is.
       const currentStatus = get().status;
       const currentAggData = get().aggregatedData;
-      // Reset data/segments/error etc., but keep DB/connection and last processed info
+      // Reset data/segments/error etc., but keep DB/connection
       return {
-        status: _isBusy(currentStatus) ? currentStatus : 'idle', // Use helper
+        status: _isBusy(currentStatus) ? currentStatus : 'idle',
         error: null,
         aggregatedData: { // Reset aggregated data
           stats: null, chartData: null, eventsData: null, sources: null, pages: null, regions: null, devices: null,
@@ -263,10 +247,9 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
         segments: [], // Clear segments on reset
         selectedPropertyKey: null, // Reset key, runAggregations will handle selection
         // isRefreshing: false, // Removed
-        // db: get().db, // Keep DB
-        // connection: get().connection, // Keep Connection
+        // db and connection are implicitly kept as they are not part of the returned partial state
       };
-    },
+      },
 
     initialize: async () => {
       if (get().db) {
@@ -343,10 +326,9 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
         _setError(err.message || 'An unknown error occurred during data processing');
         // Note: _runInitialAggregations handles its own errors internally and sets status appropriately.
       }
-      // Note: lastProcessedSiteId/Range update is handled by the subscriber
-    },
-
-    runAggregations: async () => {
+      },
+      
+      runAggregations: async () => {
       const { connection, status, segments, sourcesTab, pagesTab, regionsTab, devicesTab, eventsTab } = get();
       const selectedRange = useHttpStore.getState().selectedRange; // Get range from HTTP store
 
@@ -687,99 +669,127 @@ export const useSqlStore = create<AnalyticsSqlState>()(
 const initialState = useSqlStore.getState();
 initialState.initialize(); // Attempt to initialize DB on load
 
-useHttpStore.subscribe(
-  // Listener reacts to changes in the HTTP store
-  (httpState: AnalyticsHttpState /*, prevHttpState: AnalyticsHttpState */) => {
-    const { selectedSiteId: currentSiteId, selectedRange: currentRange } = httpState;
-    const sqlState = useSqlStore.getState();
-    const {
-      db, connection, status: sqlStatus,
-      lastProcessedSiteId, lastProcessedRange
-    } = sqlState;
+// Define the type for the state slice we are selecting in the subscriber
+type HttpSubscriptionState = Pick<AnalyticsHttpState, 'selectedSiteId' | 'selectedRange'>;
 
-    console.log("SQL Store: Subscriber notified by HTTP store change.", { currentSiteId, currentRange, sqlStatus });
+// Helper to generate a consistent hash for fetch triggers
+const generateFetchHash = (siteId: string | null, range: DateRange | undefined): string | null => {
+  if (!siteId || !range?.from || !range?.to) {
+    return null; // Cannot fetch without site and full range
+  }
+  // Use ISO strings for dates to ensure consistency
+  return `${siteId}|${range.from.toISOString()}|${range.to.toISOString()}`;
+};
+
+// Variable to hold the last known state relevant to the subscription logic
+let lastKnownHttpState: HttpSubscriptionState | null = null;
+
+useHttpStore.subscribe(
+  // Listener reacts to *any* change in the HTTP store
+  (currentHttpState: AnalyticsHttpState) => {
+    const { selectedSiteId: currentSiteId, selectedRange: currentRange } = currentHttpState;
+    const currentStateSlice: HttpSubscriptionState = { selectedSiteId: currentSiteId, selectedRange: currentRange };
+
+    // Compare current relevant slice with the last known relevant slice
+    const rangeA = lastKnownHttpState?.selectedRange;
+    const rangeB = currentStateSlice.selectedRange;
+    const rangeChanged = (rangeA?.from?.getTime() !== rangeB?.from?.getTime()) || (rangeA?.to?.getTime() !== rangeB?.to?.getTime());
+    const siteChanged = lastKnownHttpState?.selectedSiteId !== currentStateSlice.selectedSiteId;
+
+    // If the relevant parts haven't changed, update lastKnownHttpState and exit
+    if (!siteChanged && !rangeChanged) {
+      lastKnownHttpState = currentStateSlice; // Update state for the next comparison
+      return;
+    }
+
+    // Update last known state *before* proceeding with logic that might return early
+    lastKnownHttpState = currentStateSlice;
+
+    // --- Proceed with fetch logic using currentSiteId and currentRange ---
+    const sqlState = useSqlStore.getState();
+    const { db, connection, status: sqlStatus, lastFetchHash } = sqlState;
+
+    console.log("SQL Store: Subscriber notified by HTTP store change.", { currentSiteId, currentRange, sqlStatus, lastFetchHash });
 
     // --- Condition Checks ---
 
-    // 1. Is DB ready?
+    // A. Is DB ready?
     if (!db || !connection) {
       if (sqlStatus !== 'initializing' && sqlStatus !== 'error') {
         console.warn("SQL Store: Subscriber triggered but DB not ready and not initializing/error. State:", sqlStatus);
-        // Optionally trigger initialize again if needed, but the initial call should handle it.
-        // sqlState.initialize();
       } else {
         console.log("SQL Store: Subscriber waiting, DB status:", sqlStatus);
       }
       return; // Wait for DB initialization or error resolution
     }
 
-    // 2. Is site selected?
-    if (!currentSiteId) {
-      console.log("SQL Store: No site selected in HTTP store. Clearing data.");
-      // Clear data if site is deselected and wasn't already cleared
-      if (lastProcessedSiteId !== null) {
+    // B. Generate the hash for the *current* desired state
+    const currentFetchHash = generateFetchHash(currentSiteId, currentRange);
+
+    // C. Is site/range valid for fetching? (Handled by generateFetchHash returning null)
+    if (!currentFetchHash) {
+      console.log("SQL Store: No site selected or range is invalid in HTTP store. Clearing data or waiting.");
+      // Clear data if site/range becomes invalid and wasn't already cleared (based on hash)
+      if (lastFetchHash !== null) {
         useSqlStore.setState({
           ...initialSqlState, // Reset most state
           db: sqlState.db, // Keep DB
           connection: sqlState.connection, // Keep Connection
           status: 'idle',
-          error: 'No site selected.',
-          lastProcessedSiteId: null, // Mark as processed null site
-          lastProcessedRange: undefined, // Mark as processed null range
+          error: currentSiteId ? 'Date range is incomplete.' : 'No site selected.',
+          lastFetchHash: null, // Mark as processed null state
         });
       }
       return;
     }
 
-    // 3. Is range valid?
-    if (!currentRange?.from || !currentRange?.to) {
-      console.log("SQL Store: Range is invalid in HTTP store. Waiting.");
-      return; // Wait for a valid range
-    }
-
-    // 4. Has site or range actually changed from the last processed values?
-    const siteChanged = currentSiteId !== lastProcessedSiteId;
-    const rangeChanged = _isRangeChanged(currentRange, lastProcessedRange); // Use helper
-
-    if (!siteChanged && !rangeChanged) {
-      console.log("SQL Store: No change in site or range since last processing. Skipping.");
+    // D. Has this specific site/range combination already been successfully processed?
+    if (currentFetchHash === lastFetchHash) {
+      console.log("SQL Store: Current site/range hash matches last fetch hash. Skipping fetch.", { currentFetchHash });
       return;
     }
 
-    // 5. Is the SQL store busy?
-    // Use _isBusy helper, but exclude 'aggregating_tab' as fetching should still proceed if only a tab is aggregating
-    const isBusyForFetch = sqlStatus === 'loading_data' || sqlStatus === 'aggregating' || sqlStatus === 'initializing';
+    // E. Is the SQL store busy with a critical operation?
+    // Allow fetch even if 'aggregating_tab' is active, but not during init/load/full-aggregate
+    const isBusyForFetch = ['loading_data', 'aggregating', 'initializing'].includes(sqlStatus);
     if (isBusyForFetch) {
-      console.log(`SQL Store: Store is busy (${sqlStatus}). Deferring fetch.`);
-      // Optionally, could set a flag to re-check later, but usually the next state change will trigger this again.
+      console.log(`SQL Store: Store is busy (${sqlStatus}). Deferring fetch for hash: ${currentFetchHash}`);
       return;
     }
 
     // --- Trigger Data Load ---
-    console.log("SQL Store: Conditions met. Triggering fetchAndLoadData.", { currentSiteId, currentRange, siteChanged, rangeChanged });
+    console.log("SQL Store: Conditions met. Triggering fetchAndLoadData.", { currentSiteId, currentRange, currentFetchHash, lastFetchHash });
 
-    // Use async immediately to handle the promise from fetchAndLoadData
+    // Use async immediately to handle the promise
     (async () => {
-       try {
-           await sqlState.fetchAndLoadData(currentSiteId, currentRange);
-           // If fetchAndLoadData completes without throwing, update last processed values
-           // Check status again in case of errors within fetchAndLoadData that didn't throw but set status='error'
-           const finalSqlState = useSqlStore.getState();
-           if (finalSqlState.status !== 'error') {
-               console.log("SQL Store: fetchAndLoadData completed successfully. Updating last processed values.");
-               useSqlStore.setState({
-                   lastProcessedSiteId: currentSiteId,
-                   lastProcessedRange: currentRange,
-               });
-           } else {
-                console.warn("SQL Store: fetchAndLoadData finished but ended in error state. Not updating last processed values.");
-           }
-       } catch (error) {
-           // Error should have been handled and state set within fetchAndLoadData,
-           // but log here just in case.
-           console.error("SQL Store: Uncaught error during fetchAndLoadData triggered by subscriber:", error);
-       }
+      try {
+        // Pass currentSiteId and currentRange directly (already validated by hash check)
+        await sqlState.fetchAndLoadData(currentSiteId!, currentRange!); // Non-null assertion safe here
+
+        // If fetchAndLoadData completes without throwing, update lastFetchHash
+        // Check status again in case of errors within fetchAndLoadData that set status='error'
+        const finalSqlState = useSqlStore.getState();
+        if (finalSqlState.status !== 'error') {
+          console.log("SQL Store: fetchAndLoadData completed successfully. Updating lastFetchHash.", { newHash: currentFetchHash });
+          useSqlStore.setState({ lastFetchHash: currentFetchHash });
+        } else {
+          console.warn("SQL Store: fetchAndLoadData finished but ended in error state. Not updating lastFetchHash.");
+          // Optionally reset lastFetchHash to null if the fetch failed?
+          // useSqlStore.setState({ lastFetchHash: null });
+        }
+      } catch (error) {
+        // Error should have been handled and state set within fetchAndLoadData,
+        // but log here just in case. Resetting hash might be appropriate here too.
+        console.error("SQL Store: Uncaught error during fetchAndLoadData triggered by subscriber:", error);
+        // useSqlStore.setState({ lastFetchHash: null }); // Consider resetting hash on unexpected error
+      }
     })();
   }
-  // No selector argument provided
+  // No selector or options object used with the basic subscribe signature
 );
+
+// Initialize lastKnownHttpState after store creation
+lastKnownHttpState = {
+  selectedSiteId: useHttpStore.getState().selectedSiteId,
+  selectedRange: useHttpStore.getState().selectedRange,
+};
