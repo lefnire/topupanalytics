@@ -19,10 +19,21 @@ The s3tablescatalog automatically populates any new S3 Table buckets you create 
 https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-integrating-firehose.html
 */
 
+/**
+ * Pulumi stack (TypeScript, us-east-1) that delivers Kinesis->Firehose
+ * records into an Amazon S3 Table (Iceberg) AFTER you’ve already clicked
+ * “Enable Integration with AWS Analytics Services” in the console.
+ *
+ * Assumptions: The console click created
+ * – IAM role `S3TablesRoleForLakeFormation`
+ * – Glue federated catalog `s3tablescatalog`
+ * – Lake Formation registration for all S3-table buckets
+ */
+
 export default $config({
   app(input) {
     return {
-      name: "topupanalytics",
+      name: "s3tablestest",
       removal: input?.stage === "production" ? "retain" : "remove",
       protect: ["production"].includes(input?.stage),
       home: "aws",
@@ -30,61 +41,145 @@ export default $config({
     };
   },
   async run() {
+
+    // ============== AWS Account and Region Information ==============
     const isProd = $app.stage === "production";
-    const accountId = aws.getCallerIdentityOutput({}).accountId;
+    const callerIdentity = aws.getCallerIdentityOutput({})
+    const accountId = callerIdentity.accountId;
     const region = aws.getRegionOutput({}).name;
     const partition = aws.getPartitionOutput({}).partition; // Needed for ARN construction
     // Define basename early and use consistently for resource naming
     const basename = `${$app.name}${$app.stage}`;
 
-    const s3TableBucket = new aws.s3tables.TableBucket("S3TableBucket", {
-      name: "s3table-bucket"
+    /* ---------------------------------------------------------
+     * 1. S3 Table bucket (+ namespace + table)
+     * ------------------------------------------------------- */
+    const tableBucket = new aws.s3tables.TableBucket("tblBucket", {
+      name: "my-analytics-tbl-bucket",
     });
-    const s3TableNamespace = new aws.s3tables.Namespace("S3TableNamespace", {
-      namespace: "s3table_namespace",
-      tableBucketArn: s3TableBucket.arn,
+
+    const namespace = new aws.s3tables.Namespace("salesNs", {
+      tableBucketArn: tableBucket.arn,
+      namespace: "sales_data_ns",
     });
-    const s3Table = new aws.s3tables.Table("S3Table", {
-      name: "s3table",
-      namespace: s3TableNamespace.namespace,
-      tableBucketArn: s3TableNamespace.tableBucketArn,
+    
+    const table = new aws.s3tables.Table("txnTbl", {
+      tableBucketArn: tableBucket.arn,
+      namespace: namespace.namespace,
+      name: "transactions",
       format: "ICEBERG",
     });
-    const s3TableGlue = new aws.glue.CatalogDatabase(`S3TableCatalogDb`, {
-      name: `s3table_catalog_db`, // Use explicit name
-      // catalogId: "what_goes_here",
+    
+    /* ---------------------------------------------------------
+     * 2. Resource-link DB in the *default* Glue catalog
+     * ------------------------------------------------------- */
+    const nsLink = new aws.glue.CatalogDatabase("salesNsLink", {
+      catalogId: accountId,
+      name: "sales_data_ns_link",
       targetDatabase: {
-        catalogId: $interpolate`${accountId}:s3tablescatalog/${s3TableBucket.name}`,
-        databaseName: s3Table.name
-      }
-    })
-
-    // The firehoseDeliveryRole likely needs to have LakeFormation permissions
-    const s3TableFirehose = new aws.kinesis.FirehoseDeliveryStream("S3TableFirehose", {
-      name: "s3-table-firehose",
-      destination: "iceberg",
-      tags: {
-        Environment: $app.stage,
-        Project: $app.name,
-        Table: 's3table',
+        catalogId: $interpolate`${accountId}:s3tablescatalog/${tableBucket.name}`,
+        databaseName: namespace.namespace,
       },
+      createTableDefaultPermissions: [],
+    });
 
+    /* ---------------------------------------------------------
+     * 3. Firehose service role
+     * ------------------------------------------------------- */
+    const firehoseRole = new aws.iam.Role("firehoseRole", {
+      assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({
+        Service: "firehose.amazonaws.com",
+      }),
+    });
+    
+
+    new aws.iam.RolePolicy("firehoseRolePolicy", {
+      role: firehoseRole.id,
+      policy: $jsonStringify({
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Sid: "GlueCatalogAccess",
+            Effect: "Allow",
+            Action: [
+              "glue:GetDatabase",
+              "glue:GetTable",
+              "glue:GetTableVersion",
+              "glue:UpdateTable"
+            ],
+            Resource: [
+              // Catalog
+              `arn:aws:glue:${region}:${accountId}:catalog`,
+              // Linked database
+              `arn:aws:glue:${region}:${accountId}:database/sales_data_ns_link`,
+              // Linked table
+              `arn:aws:glue:${region}:${accountId}:table/sales_data_ns_link/transactions`
+            ]
+          },
+          {
+            Sid: "LakeFormationAccess",
+            Effect: "Allow",
+            Action: ["lakeformation:GetDataAccess"],
+            Resource: "*",
+          },
+          {
+            Sid: "S3PutForErrors",
+            Effect: "Allow",
+            Action: ["s3:PutObject", "s3:AbortMultipartUpload", "s3:ListBucket"],
+            Resource: [
+              "arn:aws:s3:::my-firehose-error-bucket",
+              "arn:aws:s3:::my-firehose-error-bucket/*",
+            ],
+          },
+        ],
+      })
+    });
+    
+    /* ---------------------------------------------------------
+     * 4. Lake Formation grants to Firehose role
+     * ------------------------------------------------------- */
+    // DESCRIBE on the linked database
+    new aws.lakeformation.Permissions("fhLinkDescribe", {
+      principal: firehoseRole.arn,
+      permissions: ["DESCRIBE"],
+      database: { name: nsLink.name, catalogId: accountId },
+    });
+
+    /* ---------------------------------------------------------
+     * 5. Firehose delivery stream → Iceberg
+     * ------------------------------------------------------- */
+    const stagingBucket = new aws.s3.Bucket("firehoseStaging", {
+      bucket: "my-analytics-firehose-staging",
+      forceDestroy: true,
+    });
+    const fh = new aws.kinesis.FirehoseDeliveryStream("icebergStream", {
+      destination: "iceberg",
       icebergConfiguration: {
-        roleArn: firehoseDeliveryRole.arn, // Role Firehose assumes for access
-        // catalogArn: $interpolate`arn:${partition}:glue:${region}:${accountId}:s3tablescatalog`,
-        catalogArn: $interpolate`arn:${partition}:glue:${region}:${accountId}:catalog`,
-        bufferingInterval: 60, // Seconds (e.g., 60-900)
-        bufferingSize: 64, // MBs (e.g., 64-128)
+        roleArn:    firehoseRole.arn,
+        catalogArn: $interpolate`arn:aws:glue:${region}:${accountId}:catalog`,
         s3Configuration: {
-          roleArn: firehoseDeliveryRole.arn,
-          bucketArn: s3Table.arn, // Bucket where Iceberg data/metadata resides
-          // errorOutputPrefix: $interpolate`iceberg-errors/${tableName}/result=!{firehose:error-output-type}/!{timestamp:yyyy/MM/dd}/!{firehose:random-string}/`,
+          roleArn:   firehoseRole.arn,
+          bucketArn: stagingBucket.arn,   // ← must be a real S3 bucket ARN :contentReference[oaicite:2]{index=2}
+          bufferingInterval: 300,
+          bufferingSize:     64,
         },
         destinationTableConfigurations: [{
-          databaseName: s3TableGlue.name,
-          tableName: s3Table.name, // glueTable.name,
+          databaseName: nsLink.name,
+          tableName:    table.name,
         }],
       },
-    })
+    }, { dependsOn: [nsLink, table] });
+
+    const grantTable = new command.local.Command("grantIcebergTable", {
+      create: $interpolate`aws lakeformation grant-permissions \
+          --principal DataLakePrincipalIdentifier=${firehoseRole.arn} \
+          --permissions INSERT,DELETE \
+          --resource '{"Table":{"CatalogId":"${accountId}:s3tablescatalog/${tableBucket.name}","DatabaseName":"${namespace.namespace}","Name":"${table.name}"}}'`,
+      delete: $interpolate`aws lakeformation revoke-permissions \
+          --principal DataLakePrincipalIdentifier=${firehoseRole.arn} \
+          --permissions INSERT,DELETE \
+          --resource '{"Table":{"CatalogId":"${accountId}:s3tablescatalog/${tableBucket.name}","DatabaseName":"${namespace.namespace}","Name":"${table.name}"}}'`,
+    }, { dependsOn: [fh] });
+
   }
 });
