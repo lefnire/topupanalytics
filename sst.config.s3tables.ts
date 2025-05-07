@@ -1,44 +1,42 @@
 /// <reference path="./.sst/platform/config.d.ts" />
 
-// Prerequisite: Manually enable S3 Tables integration with AWS Analytics Services in the AWS console for the target region.
-// This creates the 's3tablescatalog' in AWS Glue.
+// Prerequisite: Manually enable S3 Tables integration with AWS Analytics Services
+// in the AWS console for the target region *before running this stack*.
+// This action creates the 's3tablescatalog' in AWS Glue and the necessary
+// 'S3TablesRoleForLakeFormation' IAM role and 'S3TablesPolicyForLakeFormation' policy.
 
 export default $config({
   app(input) {
     return {
       name: "s3tablestest",
       removal: input?.stage === "production" ? "retain" : "remove",
-      protect: ["production"].includes(input?.stage),
+      protect: ["production"].includes(input?.stage ?? ''),
       home: "aws",
-      providers: {command: "1.0.2"},
+      providers: { aws: true }, // Assuming SST handles provider configuration
     };
   },
   async run() {
-
-    // ============== AWS Account and Region Information ==============
-    const isProd = $app.stage === "production";
-    const callerIdentity = aws.getCallerIdentityOutput({})
+    const callerIdentity = await aws.getCallerIdentity({});
     const accountId = callerIdentity.accountId;
-    const region = aws.getRegionOutput({}).name;
-    const partition = aws.getPartitionOutput({}).partition; // Needed for ARN construction
-    // Define basename early and use consistently for resource naming
-    const baseName = `${$app.name}${$app.stage}`;
+    const region = await aws.getRegion({});
+    const partition = await aws.getPartition({});
 
-    const s3TableBucketName = `${baseName}-s3table-bucket`;
-    const s3TableNamespaceName = "firehose_data_ns";
-    const s3TableName = "streamed_events";
-    const firehoseBackupBucketName = `${baseName}-firehose-backup`;
+    const baseName = `${$app.name}-${$app.stage}`; // SST uses '-' as default stage separator
+
+    const s3TableBucketName = `${baseName}-s3table-bucket`.toLowerCase(); // Bucket names are lowercase
+    const s3TableNamespaceName = "firehose_data_ns"; // Keep underscores, good for Glue
+    const s3TableName = "streamed_events"; // Keep underscores
+    const firehoseBackupBucketName = `${baseName}-firehose-backup`.toLowerCase();
     const firehoseStreamName = `${baseName}-s3tables-delivery-stream`;
-    const firehoseResourceLinkName = `${baseName}-s3table-ns-link`;
+
+    // Resource link names for Firehose can only contain letters, numbers, and underscores.
+    const firehoseResourceLinkName = `${baseName.replace(/-/g, "_")}_s3table_ns_link`;
 
     // 1. Foundational S3 Table Resources
     const s3TableBucket = new aws.s3tables.TableBucket("s3TableBucket", {
-      // The 'name' property for aws.s3tables.TableBucket is the actual bucket name.
-      // Per AWS S3 Table Bucket naming rules, it must be globally unique if not scoped by account for certain APIs,
-      // but for s3tables API, it's scoped. Pulumi resource name is logical.
-      // Let's use the user-provided or generated name directly.
       name: s3TableBucketName,
-      // Other properties like encryptionConfiguration or unreferencedFileRemoval can be added here.
+      // Ensure this name is unique if not automatically scoped by AWS for s3tables API.
+      // Pulumi will make it unique in terms of logical resource name.
     });
 
     const s3TableNamespace = new aws.s3tables.Namespace("s3TableNamespace", {
@@ -51,78 +49,96 @@ export default $config({
       namespace: s3TableNamespace.namespace,
       tableBucketArn: s3TableBucket.arn,
       format: "ICEBERG",
-      // Schema for S3 Tables (Iceberg) is managed via AWS Glue Data Catalog.
-      // Firehose uses the Glue table definition (accessed via the resource link).
+      // Schema is managed in Glue. Column definitions can be added here if supported,
+      // or managed via Glue/Athena DDL after creation if Firehose doesn't create it.
+      // For Firehose to create/manage, ensure it has schema inference or a schema is provided
+      // via processing configuration, and appropriate Glue permissions.
     });
 
     // 2. Standard S3 Bucket for Firehose Backups
     const backupS3Bucket = new aws.s3.BucketV2("firehoseBackupBucket", {
       bucket: firehoseBackupBucketName,
-      forceDestroy: true, // For easy cleanup in dev/test; remove for production
+      forceDestroy: $app.stage !== "production",
     });
+    new aws.s3.BucketPublicAccessBlock("firehoseBackupBucketPab", {
+        bucket: backupS3Bucket.id,
+        blockPublicAcls: true,
+        blockPublicPolicy: true,
+        ignorePublicAcls: true,
+        restrictPublicBuckets: true,
+    });
+
 
     // 3. IAM Role and Policy for Kinesis Firehose
     const firehoseRole = new aws.iam.Role("firehoseRole", {
+      name: `${baseName}-FirehoseS3TablesRole`,
       assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({
         Service: "firehose.amazonaws.com",
       }),
     });
 
-    const firehosePolicy = new aws.iam.Policy("firehosePolicy", {
-      description: "Policy for Firehose to access S3 Tables via Glue/Lake Formation and S3 for backups.",
-      policy: $jsonStringify({
-        Version: "2012-10-17",
-        Statement: [
+    const firehosePolicyDocument = aws.iam.getPolicyDocumentOutput({
+        statements: [
           {
-            Sid: "GlueAccessForS3Tables",
-            Effect: "Allow",
-            Action: [
+            sid: "GlueAccessForS3TablesAndResourceLink",
+            effect: "Allow",
+            actions: [
               "glue:GetTable",
+              "glue:GetTables",
               "glue:GetDatabase",
-              "glue:UpdateTable"
+              "glue:GetDatabases",
+              "glue:CreateTable",
+              "glue:UpdateTable",
+              // Potentially "glue:DeleteTable" if Firehose needs to manage table lifecycle
             ],
-            Resource: [
-              // Default catalog for resource link operations
-              $interpolate`arn:${partition}:glue:${region}:${accountId}:catalog`,
-              $interpolate`arn:${partition}:glue:${region}:${accountId}:database/*`, // For the resource link itself
-              // s3tablescatalog and its contents
-              $interpolate`arn:${partition}:glue:${region}:${accountId}:catalog/s3tablescatalog`,
-              $interpolate`arn:${partition}:glue:${region}:${accountId}:catalog/s3tablescatalog/*`,
-              $interpolate`arn:${partition}:glue:${region}:${accountId}:database/s3tablescatalog:*`, // Covers namespaces
-              $interpolate`arn:${partition}:glue:${region}:${accountId}:table/s3tablescatalog:*/*`   // Covers tables
+            resources: [
+              // Default catalog (for the resource link)
+              $interpolate`arn:${partition.partition}:glue:${region.name}:${accountId}:catalog`,
+              // Resource Link (as a database in the default catalog)
+              $interpolate`arn:${partition.partition}:glue:${region.name}:${accountId}:database/${firehoseResourceLinkName}`,
+              // s3tablescatalog itself and its structure
+              $interpolate`arn:${partition.partition}:glue:${region.name}:${accountId}:catalog/s3tablescatalog`,
+              $interpolate`arn:${partition.partition}:glue:${region.name}:${accountId}:catalog/s3tablescatalog/${s3TableBucket.name}`,
+              $interpolate`arn:${partition.partition}:glue:${region.name}:${accountId}:database/s3tablescatalog/${s3TableBucket.name}/${s3TableNamespace.namespace}`,
+              $interpolate`arn:${partition.partition}:glue:${region.name}:${accountId}:table/s3tablescatalog/${s3TableBucket.name}/${s3TableNamespace.namespace}/*`, // All tables in the target namespace
             ],
           },
           {
-            Sid: "S3DeliveryErrorBucketPermission",
-            Effect: "Allow",
-            Action: [
+            sid: "S3DeliveryErrorBucketPermission",
+            effect: "Allow",
+            actions: [
               "s3:AbortMultipartUpload",
               "s3:GetBucketLocation",
               "s3:GetObject",
               "s3:ListBucket",
               "s3:ListBucketMultipartUploads",
-              "s3:PutObject"
+              "s3:PutObject",
             ],
-            Resource: [
+            resources: [
               backupS3Bucket.arn,
-              $interpolate`${backupS3Bucket.arn}/*`
+              $interpolate`${backupS3Bucket.arn}/*`,
             ],
           },
           {
-            Sid: "RequiredWhenDoingMetadataReadsANDDataAndMetadataWriteViaLakeformation",
-            Effect: "Allow",
-            Action: ["lakeformation:GetDataAccess"],
-            Resource: "*",
+            sid: "RequiredWhenDoingMetadataReadsANDDataAndMetadataWriteViaLakeformation",
+            effect: "Allow",
+            actions: ["lakeformation:GetDataAccess"],
+            resources: ["*"], // As per AWS documentation for Firehose to S3 Tables
           },
-          // Optional: Add CloudWatch Logs permissions if logging is enabled for Firehose
-          // {
-          //     Sid: "LoggingInCloudWatch",
-          //     Effect: "Allow",
-          //     Action: ["logs:PutLogEvents"],
-          //     Resource: [ $interpolate`arn:${partition.partition}:logs:${region}:${accountId}:log-group:/aws/kinesisfirehose/${firehoseStreamName}:*` ]
-          // }
+          // Optional: CloudWatch Logs permissions
+           {
+             sid: "LoggingInCloudWatch",
+             effect: "Allow",
+             actions: ["logs:PutLogEvents"],
+             resources: [$interpolate`arn:${partition.partition}:logs:${region.name}:${accountId}:log-group:/aws/kinesisfirehose/${firehoseStreamName}:*`],
+           },
         ],
-      }),
+    });
+
+    const firehosePolicy = new aws.iam.Policy("firehosePolicy", {
+      name: `${baseName}-FirehoseS3TablesPolicy`,
+      description: "Policy for Firehose to access S3 Tables via Glue/Lake Formation and S3 for backups.",
+      policy: firehosePolicyDocument.json,
     });
 
     new aws.iam.RolePolicyAttachment("firehoseRolePolicyAttachment", {
@@ -131,51 +147,54 @@ export default $config({
     });
 
     // 4. Glue Resource Link to the S3 Table Namespace
-    // The resource link is created in the default catalog and points to the namespace
-    // within the s3tablescatalog structure for the specific S3 Table Bucket.
     const s3TableNamespaceLink = new aws.glue.CatalogDatabase("s3TableNamespaceLink", {
-      name: firehoseResourceLinkName, // This name is used as databaseName by Firehose
-      catalogId: accountId, // Create the link in the default account catalog
-      // For a resource link, targetDatabase specifies the target
+      name: firehoseResourceLinkName,
+      catalogId: accountId, // Link created in the default account catalog
       targetDatabase: {
-        catalogId: $interpolate`${accountId}:s3tablescatalog/${s3TableBucket.name}`, // Points to the S3 Table Bucket's scope
-        databaseName: s3TableNamespace.namespace, // Points to the Namespace within that bucket scope
-        // region: region, // Optional if target is in a different region
+        catalogId: $interpolate`${accountId}:s3tablescatalog/${s3TableBucket.name}`, // Target is namespace in s3tables sub-catalog for the bucket
+        databaseName: s3TableNamespace.namespace,
+        // region: region.name, // Only specify if target is in different region
       },
-      // createTableDefaultPermissions is not a direct property here, managed by Lake Formation.
-    });
+      // createTableDefaultPermissions: [] // Not directly applicable here, manage via LF
+    }, { dependsOn: [s3TableBucket, s3TableNamespace] });
 
     // 5. Lake Formation Permissions
-    // Grant Firehose role DESCRIBE on the resource link
+
+    // 5. Lake Formation Permissions
+
+     // 5.1. Grant Firehose role DESCRIBE on the resource link itself
     const lfPermOnResourceLink = new aws.lakeformation.Permissions("lfPermOnResourceLink", {
       principal: firehoseRole.arn,
       permissions: ["DESCRIBE"],
       database: {
-        catalogId: accountId, // Catalog where the link resides
-        name: s3TableNamespaceLink.name,
+        catalogId: accountId, // Link resides in the default account catalog
+        name: s3TableNamespaceLink.name, // Name of the resource link
       },
-    });
+    }, { dependsOn: [firehoseRole, s3TableNamespaceLink] });
 
-    // Grant Firehose role permissions on the target S3 Table Namespace (database in s3tablescatalog)
-    const lfPermOnS3TableNamespace = new aws.lakeformation.Permissions("lfPermOnS3TableNamespace", {
+    // Construct the "fully qualified" name for the S3 Table Namespace as it might be known in the account-level catalog
+    const s3TableNamespaceFullyQualifiedName = $interpolate`s3tablescatalog/${s3TableBucket.name}/${s3TableNamespace.namespace}`;
+
+    // 5.2. Grant Firehose role permissions on the *target* S3 Table Namespace
+    const lfPermOnTargetNamespace = new aws.lakeformation.Permissions("lfPermOnTargetNamespace", {
       principal: firehoseRole.arn,
-      permissions: ["DESCRIBE", "ALTER", "CREATE_TABLE"], // Permissions needed for Iceberg operations
+      permissions: ["DESCRIBE", "ALTER", "CREATE_TABLE", "DROP"],
       database: {
-        catalogId: $interpolate`${accountId}:s3tablescatalog/${s3TableBucket.name}`,
-        name: s3TableNamespace.namespace,
+        catalogId: accountId,                             // Plain AWS Account ID
+        name: s3TableNamespaceFullyQualifiedName,         // "Path" to the namespace
       },
-    }, {dependsOn: [s3TableNamespace]}); // Ensure namespace exists
+    }, { dependsOn: [firehoseRole, s3TableNamespace, s3TableBucket, s3TableNamespaceLink] });
 
-    // Grant Firehose role permissions on the target S3 Table
-    const lfPermOnS3Table = new aws.lakeformation.Permissions("lfPermOnS3Table", {
+    // 5.3. Grant Firehose role permissions on the *target* S3 Table
+    const lfPermOnTargetTable = new aws.lakeformation.Permissions("lfPermOnTargetTable", {
       principal: firehoseRole.arn,
-      permissions: ["SELECT", "INSERT", "DELETE", "DESCRIBE", "ALTER"], // Comprehensive permissions for Iceberg table
+      permissions: ["SELECT", "INSERT", "DELETE", "DESCRIBE", "ALTER"],
       table: {
-        catalogId: $interpolate`${accountId}:s3tablescatalog/${s3TableBucket.name}`,
-        databaseName: s3TableNamespace.namespace,
-        name: s3Table.name,
+        catalogId: accountId,                             // Plain AWS Account ID
+        databaseName: s3TableNamespaceFullyQualifiedName, // "Path" to the parent namespace
+        name: s3Table.name,                               // The S3 Table name
       },
-    }, {dependsOn: [s3Table]}); // Ensure table exists
+    }, { dependsOn: [firehoseRole, s3Table, lfPermOnTargetNamespace] });
 
     // 6. Kinesis Firehose Delivery Stream
     const firehoseDeliveryStream = new aws.kinesis.FirehoseDeliveryStream("firehoseDeliveryStream", {
@@ -183,40 +202,43 @@ export default $config({
       destination: "iceberg",
       icebergConfiguration: {
         roleArn: firehoseRole.arn,
-        catalogArn: $interpolate`arn:${partition}:glue:${region}:${accountId}:catalog`, // Default Glue catalog
+        catalogArn: $interpolate`arn:${partition.partition}:glue:${region.name}:${accountId}:catalog`, // Firehose uses the default Glue catalog where the link is
         s3Configuration: {
           roleArn: firehoseRole.arn,
           bucketArn: backupS3Bucket.arn,
-          bufferingInterval: 300, // Default 300s
-          bufferingSize: 5,       // Default 5MB
-          // compressionFormat: "GZIP", // Optional
+          bufferingInterval: 300,
+          bufferingSize: 5, // MB
+          // compressionFormat: "GZIP", // Optional backup compression
+          cloudwatchLoggingOptions: { // Logging for S3 backup part
+            enabled: true,
+            logGroupName: $interpolate`/aws/kinesisfirehose/${firehoseStreamName}-backupS3`,
+            logStreamName: "S3Delivery",
+          }
         },
         destinationTableConfigurations: [{
-          databaseName: s3TableNamespaceLink.name,
-          tableName: s3Table.name,
+          databaseName: s3TableNamespaceLink.name, // Firehose targets the *resource link name* as the database
+          tableName: s3Table.name, // And the S3 table name within that logical DB (link)
         }],
         // Optional: processingConfiguration for Lambda transformations or JQ parsing
         // processingConfiguration: {
         //     enabled: true,
-        //     processors:
-        //     }]
+        //     processors: [{...}]
         // }
       },
-      // Optional: Enable CloudWatch logging
-      // cloudwatchLoggingOptions: {
+      // cloudwatchLoggingOptions: { // Logging for the main Firehose stream
       //     enabled: true,
       //     logGroupName: $interpolate`/aws/kinesisfirehose/${firehoseStreamName}`,
-      //     logStreamName: "DestinationDelivery"
+      //     logStreamName: "DestinationDelivery",
       // },
     }, {
       dependsOn: [
         lfPermOnResourceLink,
-        lfPermOnS3TableNamespace,
-        lfPermOnS3Table,
-        firehoseRole, // Relies on role and policy attachment (implicitly via firehoseRole.arn usage)
+        lfPermOnTargetNamespace,
+        lfPermOnTargetTable,
+        firehoseRole, // Role and policy attachment implicitly handled by using firehoseRole.arn
         backupS3Bucket,
         s3TableNamespaceLink,
-      ]
+      ],
     });
 
     return {
@@ -230,5 +252,5 @@ export default $config({
       firehoseDeliveryStreamName: firehoseDeliveryStream.name,
       firehoseDeliveryStreamArn: firehoseDeliveryStream.arn,
     };
-  }
+  },
 });
