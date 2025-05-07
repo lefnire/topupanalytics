@@ -667,6 +667,88 @@ export default $config({
     });
     // router.route("/api/event", ingestFn.url);
 
+// === IAM Role for Glue Iceberg Optimization ===
+    const glueIcebergOptimizerRole = new aws.iam.Role(`GlueIcebergOptimizerRole`, {
+      name: $interpolate`${basename}-glue-iceberg-optimizer-role`,
+      assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({
+        Service: "glue.amazonaws.com",
+      }),
+    });
+
+    new aws.iam.RolePolicy(`GlueIcebergOptimizerMainPolicy`, {
+      role: glueIcebergOptimizerRole.id,
+      policy: $interpolate`{
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "s3:PutObject",
+              "s3:GetObject",
+              "s3:DeleteObject"
+            ],
+            "Resource": [
+              "${analyticsDataBucket.arn}/*"
+            ]
+          },
+          {
+            "Effect": "Allow",
+            "Action": [
+              "s3:ListBucket"
+            ],
+            "Resource": [
+              "${analyticsDataBucket.arn}"
+            ]
+          },
+          {
+            "Effect": "Allow",
+            "Action": [
+              "glue:UpdateTable",
+              "glue:GetTable"
+            ],
+            "Resource": [
+              "arn:${partition}:glue:${region}:${accountId}:table/*/*",
+              "arn:${partition}:glue:${region}:${accountId}:database/*",
+              "arn:${partition}:glue:${region}:${accountId}:catalog"
+            ]
+          },
+          {
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogGroup",
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": [
+              "arn:${partition}:logs:${region}:${accountId}:log-group:/aws-glue/iceberg-compaction/logs:*",
+              "arn:${partition}:logs:${region}:${accountId}:log-group:/aws-glue/iceberg-retention/logs:*",
+              "arn:${partition}:logs:${region}:${accountId}:log-group:/aws-glue/iceberg-orphan-file-deletion/logs:*"
+            ]
+          },
+          {
+            "Effect": "Allow",
+            "Action": [
+                "lakeformation:GetDataAccess"
+            ],
+            "Resource": "*"
+          }
+        ]
+      }`,
+    });
+
+    new aws.iam.RolePolicy(`GlueIcebergOptimizerPassRolePolicy`, {
+      role: glueIcebergOptimizerRole.id,
+      policy: $interpolate`{
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": "${glueIcebergOptimizerRole.arn}"
+          }
+        ]
+      }`,
+    });
     // === Outputs ===
     return {
       appName: $app.name,
@@ -697,6 +779,7 @@ export default $config({
       sitesFunctionName: sitesFn?.name,
       preferencesFunctionName: preferencesFn?.name,
       stripeFunctionName: stripeFn?.name,
+      glueIcebergOptimizerRoleArn: glueIcebergOptimizerRole.arn,
       // tableBucketArn: s3Table.tableBucketArn,
       // warehouseLocation: s3Table.warehouseLocation,
     productionEnvValues: isProd ? {
