@@ -205,36 +205,40 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
       }
     }
 
-    // --- 2. Optimistic Allowance Check ---
-    // Note: Stripe payment status check is implicitly handled by the flush condition `request_allowance >= :cnt`.
-    // If payment is active, allowance might go negative in DB but the optimistic check here prevents requests if local shadow is <= 0.
-    // This differs slightly from the original logic but aligns with the batching goal.
-    if (cfg.request_allowance <= 0) {
-      log(`Optimistic check failed for site ${siteId}: Allowance exhausted (cached value: ${cfg.request_allowance}).`);
-      // Potentially call flush here if needed to sync near-zero allowance? For now, just block.
-      // await flush(); // Optional: Flush before returning to ensure DB is up-to-date
-      return {
-        statusCode: 402, // Payment Required
-        body: JSON.stringify({ message: 'Payment Required: Request allowance likely exceeded.' }),
-      };
-    }
-
-    // --- 3. Update Delta & Local Shadow ---
-    allowanceDelta[siteId] = (allowanceDelta[siteId] ?? 0) + 1;
-    cfg.request_allowance--; // Decrement local shadow copy
-    log(`Allowance check passed for site ${siteId}. New local allowance: ${cfg.request_allowance}. Delta incremented to: ${allowanceDelta[siteId]}`);
-
-    // --- 4. Flush Logic ---
-    if (!FLUSH) {
-      log("FLUSH is false, flushing immediately.");
-      await flush();
-    } else {
-      const remainingTime = context.getRemainingTimeInMillis();
-      log(`FLUSH is true. Remaining time: ${remainingTime}ms`);
-      if (remainingTime < 1000) { // Using 1000ms threshold
-        log("Remaining time low, flushing allowance updates.");
-        await flush();
+    if (process.env.USE_STRIPE === "true") {
+      // --- 2. Optimistic Allowance Check ---
+      // Note: Stripe payment status check is implicitly handled by the flush condition `request_allowance >= :cnt`.
+      // If payment is active, allowance might go negative in DB but the optimistic check here prevents requests if local shadow is <= 0.
+      // This differs slightly from the original logic but aligns with the batching goal.
+      if (cfg.request_allowance <= 0) {
+        log(`Optimistic check failed for site ${siteId}: Allowance exhausted (cached value: ${cfg.request_allowance}).`);
+        // Potentially call flush here if needed to sync near-zero allowance? For now, just block.
+        // await flush(); // Optional: Flush before returning to ensure DB is up-to-date
+        return {
+          statusCode: 402, // Payment Required
+          body: JSON.stringify({ message: 'Payment Required: Request allowance likely exceeded.' }),
+        };
       }
+
+      // --- 3. Update Delta & Local Shadow ---
+      allowanceDelta[siteId] = (allowanceDelta[siteId] ?? 0) + 1;
+      cfg.request_allowance--; // Decrement local shadow copy
+      log(`Allowance check passed for site ${siteId}. New local allowance: ${cfg.request_allowance}. Delta incremented to: ${allowanceDelta[siteId]}`);
+
+      // --- 4. Flush Logic ---
+      if (!FLUSH) {
+        log("FLUSH is false, flushing immediately.");
+        await flush();
+      } else {
+        const remainingTime = context.getRemainingTimeInMillis();
+        log(`FLUSH is true. Remaining time: ${remainingTime}ms`);
+        if (remainingTime < 1000) { // Using 1000ms threshold
+          log("Remaining time low, flushing allowance updates.");
+          await flush();
+        }
+      }
+    } else {
+      log("USE_STRIPE is not true, skipping allowance check.");
     }
 
     // --- Event Body Processing ---
