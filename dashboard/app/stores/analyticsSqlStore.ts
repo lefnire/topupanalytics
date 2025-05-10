@@ -305,6 +305,17 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
         // Step 1: Fetch data from API
         const { initialEvents, events, commonSchema, initialOnlySchema } = await _fetchApiData(siteId, range);
 
+        // This code goes into fetchAndLoadData in analyticsSqlStore.ts
+        // Ensure 'initialEvents' is the correct variable name for the array of initial event objects.
+    
+        // Remove any prior modifications to event.source or event.referrer here.
+    
+        for (const event of initialEvents) { // Assuming 'initialEvents' is the array from _fetchApiData
+          if (event.utm_source && typeof event.utm_source === 'string' && event.utm_source.trim() !== '') {
+            event.referer_domain = event.utm_source; // This assigns utm_source to the field that becomes the SQL referer_domain
+          }
+        }
+
         // Step 2: Load data into tables
         const tablesLoaded = await _loadTables(db, connection, initialEvents, events, commonSchema, initialOnlySchema);
 
