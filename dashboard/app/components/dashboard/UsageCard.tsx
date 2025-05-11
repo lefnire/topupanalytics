@@ -1,4 +1,7 @@
-import React from 'react';
+import React, { useMemo } from 'react';
+import { useHttpStore, type AnalyticsHttpState } from '../../stores/analyticsHttpStore'; // Import HttpStore and its type
+import { useShallow } from 'zustand/shallow'; // Import useShallow
+import type { Site } from '../../lib/api'; // Import Site type
 
 const useStripe = import.meta.env.VITE_USE_STRIPE === 'true';
 
@@ -12,26 +15,46 @@ const formatNumber = (num: number | undefined | null): string => {
 };
 
 interface UsageCardProps {
-  requests_used: number; // New: Number of requests used
-  initial_allowance: number; // New: Initial allowance for the plan
-  request_allowance: number; // Remaining allowance (used for depletion logic)
-  plan: string; // Assuming plan is a string like 'free', 'paid', etc. - adjust if needed
-  is_payment_active: boolean;
-  stripe_last4?: string | null; // Optional, only present if payment is active
+  // Props to remove: requests_used, initial_allowance, request_allowance, plan, is_payment_active, stripe_last4
   onSetupAutoPay: () => void; // Callback to trigger Stripe Setup Intent flow
   onManagePayment: () => void; // Callback to link to Stripe Customer Portal (implement later)
 }
 
 export const UsageCard: React.FC<UsageCardProps> = ({
-  requests_used,
-  initial_allowance,
-  request_allowance, // Keep for depletion logic
-  plan, // plan might be used for future display logic, keeping it for now
-  is_payment_active,
-  stripe_last4,
   onSetupAutoPay,
   onManagePayment,
 }) => {
+  // Subscribe to HttpStore
+  const { sites, selectedSiteId, userPreferences } = useHttpStore(
+    useShallow((state: AnalyticsHttpState) => ({
+      sites: state.sites,
+      selectedSiteId: state.selectedSiteId,
+      userPreferences: state.userPreferences,
+    }))
+  );
+
+  // Internalize derivation of selectedSite and related values
+  const selectedSite = useMemo(() => sites.find((site: Site) => site.site_id === selectedSiteId), [sites, selectedSiteId]);
+
+  const requests_used = useMemo(() => {
+    if (!selectedSite) return 0;
+    // TODO: Make initial allowance dynamic based on plan
+    const initial_allowance = selectedSite.plan === 'free_tier' ? 10000 : 0; // Hardcoded for now
+    return Math.max(0, initial_allowance - (selectedSite.request_allowance ?? 0));
+  }, [selectedSite]);
+
+  const initial_allowance = useMemo(() => {
+    if (!selectedSite) return 0;
+    // TODO: Make initial allowance dynamic based on plan
+    return selectedSite.plan === 'free_tier' ? 10000 : 0; // Hardcoded for now
+  }, [selectedSite]);
+
+  const request_allowance = useMemo(() => selectedSite?.request_allowance ?? 0, [selectedSite]);
+  const plan = useMemo(() => selectedSite?.plan ?? '', [selectedSite]);
+  const is_payment_active = useMemo(() => userPreferences?.is_payment_active ?? false, [userPreferences]);
+  const stripe_last4 = useMemo(() => userPreferences?.stripe_last4, [userPreferences]);
+
+
   // Depletion logic still uses the remaining request_allowance
   const allowanceDepleted = request_allowance <= 0;
   const showSetupPrompt = !is_payment_active;

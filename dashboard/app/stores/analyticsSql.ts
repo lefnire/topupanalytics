@@ -635,18 +635,19 @@ const sourcesAggregationMap = new Map<string, (conn: duckdb.AsyncDuckDBConnectio
 export const runSourcesAggregationSql = async (
     conn: duckdb.AsyncDuckDBConnection,
     segments: Segment[],
-    viewType: string
+    viewType: string // viewType is still passed but initial load will fetch all
 ): Promise<AggregatedData['sources']> => {
-    console.log(`Running sources aggregation for view: ${viewType}`);
-    const executor = sourcesAggregationMap.get(viewType);
-    if (executor) {
-        return executor(conn, segments);
-    } else {
-        console.warn(`Unknown sources viewType: ${viewType}, defaulting to channels.`);
-        // Default to channels if viewType is unknown
-        const defaultExecutor = sourcesAggregationMap.get('channels');
-        return defaultExecutor!(conn, segments); // Non-null assertion ok as 'channels' is guaranteed key
-    }
+    console.log(`Running sources aggregation for view: ${viewType} (will fetch all sub-tabs)`);
+    const [channelsData, sourcesData, campaignsData] = await Promise.all([
+        runSourcesChannelsSql(conn, segments),
+        runSourcesSourcesSql(conn, segments),
+        runSourcesCampaignsSql(conn, segments)
+    ]);
+    return {
+      channels: channelsData,
+      sources: sourcesData,
+      campaigns: campaignsData,
+    };
 };
 
 // --- Pages Aggregation Map ---
@@ -659,17 +660,19 @@ const pagesAggregationMap = new Map<string, (conn: duckdb.AsyncDuckDBConnection,
 export const runPagesAggregationSql = async (
     conn: duckdb.AsyncDuckDBConnection,
     segments: Segment[],
-    viewType: string
+    viewType: string // viewType is still passed but initial load will fetch all
 ): Promise<AggregatedData['pages']> => {
-    console.log(`Running pages aggregation for view: ${viewType}`);
-    const executor = pagesAggregationMap.get(viewType);
-    if (executor) {
-        return executor(conn, segments);
-    } else {
-        console.warn(`Unknown pages viewType: ${viewType}, defaulting to topPages.`);
-        const defaultExecutor = pagesAggregationMap.get('topPages');
-        return defaultExecutor!(conn, segments); // Non-null assertion ok
-    }
+    console.log(`Running pages aggregation for view: ${viewType} (will fetch all sub-tabs)`);
+    const [topPagesData, entryPagesData, exitPagesData] = await Promise.all([
+        runPagesTopPagesSql(conn, segments),
+        runPagesEntryPagesSql(conn, segments),
+        runPagesExitPagesSql(conn, segments)
+    ]);
+    return {
+      topPages: topPagesData,
+      entryPages: entryPagesData,
+      exitPages: exitPagesData,
+    };
 };
 
 // --- Regions Aggregation Map ---
@@ -681,17 +684,17 @@ const regionsAggregationMap = new Map<string, (conn: duckdb.AsyncDuckDBConnectio
 export const runRegionsAggregationSql = async (
     conn: duckdb.AsyncDuckDBConnection,
     segments: Segment[],
-    viewType: string
+    viewType: string // viewType is still passed for specific tab clicks
 ): Promise<AggregatedData['regions']> => {
-    console.log(`Running regions aggregation for view: ${viewType}`);
-    const executor = regionsAggregationMap.get(viewType);
-    if (executor) {
-        return executor(conn, segments);
-    } else {
-        console.warn(`Unknown regions viewType: ${viewType}, defaulting to countries.`);
-        const defaultExecutor = regionsAggregationMap.get('countries');
-        return defaultExecutor!(conn, segments); // Non-null assertion ok
-    }
+    console.log(`Running regions aggregation for view: ${viewType} (initial load will fetch all)`);
+    const [countriesData, regionsData] = await Promise.all([
+        runRegionsCountriesSql(conn, segments),
+        runRegionsRegionsSql(conn, segments)
+    ]);
+    return {
+      countries: countriesData,
+      regions: regionsData,
+    };
 };
 
 // --- Devices Aggregation Map ---
@@ -704,17 +707,19 @@ const devicesAggregationMap = new Map<string, (conn: duckdb.AsyncDuckDBConnectio
 export const runDevicesAggregationSql = async (
     conn: duckdb.AsyncDuckDBConnection,
     segments: Segment[],
-    viewType: string
+    viewType: string // viewType is still passed for specific tab clicks, but initial load will ignore it for comprehensiveness
 ): Promise<AggregatedData['devices']> => {
-    console.log(`Running devices aggregation for view: ${viewType}`);
-    const executor = devicesAggregationMap.get(viewType);
-    if (executor) {
-        return executor(conn, segments);
-    } else {
-        console.warn(`Unknown devices viewType: ${viewType}, defaulting to browsers.`);
-        const defaultExecutor = devicesAggregationMap.get('browsers');
-        return defaultExecutor!(conn, segments); // Non-null assertion ok
-    }
+    console.log(`Running devices aggregation for view: ${viewType} (initial load will fetch all)`);
+    const [browsersData, osData, screenSizesData] = await Promise.all([
+        runDevicesBrowsersSql(conn, segments),
+        runDevicesOsSql(conn, segments),
+        runDevicesScreenSizesSql(conn, segments)
+    ]);
+    return {
+      browsers: browsersData,
+      os: osData,
+      screenSizes: screenSizesData,
+    };
 };
 
 // Assuming only 'events' view type for now

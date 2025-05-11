@@ -51,12 +51,14 @@ const DashboardContent = () => {
     selectedSiteId,
     sites,
     userPreferences,
-    selectedRange,
+    // selectedRange, // No longer directly used for chartTitleSuffix logic here
+    getSelectedDateRangeObject, // Get the getter for date range object
   } = useHttpStore(useShallow((state: AnalyticsHttpState) => ({
     selectedSiteId: state.selectedSiteId,
     sites: state.sites,
     userPreferences: state.userPreferences,
-    selectedRange: state.selectedRange,
+    // selectedRange: state.selectedRange, // Removed
+    getSelectedDateRangeObject: state.getSelectedDateRangeObject,
   })));
 
   // Derive states locally (logic remains the same, uses state from new stores)
@@ -84,12 +86,13 @@ const DashboardContent = () => {
       addSegment(segment);
   }, [addSegment]);
 
-  // Calculate chart title suffix locally
+  // Calculate chart title suffix locally using the getter from httpStore
   const chartTitleSuffix = useMemo(() => {
-      if (!selectedRange?.from || !selectedRange?.to) return '';
-      const diff = differenceInDays(selectedRange.to, selectedRange.from);
+      const currentRangeObject = getSelectedDateRangeObject();
+      if (!currentRangeObject?.from || !currentRangeObject?.to) return '';
+      const diff = differenceInDays(currentRangeObject.to, currentRangeObject.from);
       return diff <= 1 ? 'per Hour' : 'per Day';
-  }, [selectedRange]);
+  }, [getSelectedDateRangeObject]); // Dependency is the getter function itself
 
 
   // Stripe Integration Logic (Remains the same)
@@ -251,22 +254,16 @@ const DashboardContent = () => {
                <CardContainer
                  key={meta.id}
                  meta={meta}
-                 loading={isLoading} // Pass loading state
-                 aggregatedData={aggregatedData}
-                 onItemClick={handleItemClick} // Pass locally defined handler
+                 // loading prop removed
+                 // aggregatedData prop removed
+                 onItemClick={handleItemClick}
                />
             ))}
             {/* Rename and pass handler to the new EventsCard */}
-            <EventsCard onItemClick={handleItemClick} /> {/* Pass locally defined handler */}
+            <EventsCard />
             {/* Add the new Usage Card with updated props */}
             {selectedSite && userPreferences && ( // Only render if site and prefs are loaded
                <UsageCard
-                 requests_used={requestsUsed} // Pass calculated used requests
-                 initial_allowance={initialAllowance} // Pass initial allowance
-                 request_allowance={selectedSite.request_allowance} // Still pass remaining for warning logic
-                 plan={selectedSite.plan}
-                 is_payment_active={userPreferences.is_payment_active}
-                 stripe_last4={userPreferences.stripe_last4}
                  onSetupAutoPay={handleSetupAutoPay} // Pass callback
                  onManagePayment={handleManagePayment} // Pass callback
                />

@@ -1,33 +1,35 @@
 import React, { useCallback } from 'react';
 import { useShallow } from 'zustand/shallow';
-import { useSqlStore } from '../../stores/analyticsSqlStore'; // Import SQL store
-import type { CardDataItem, Segment } from '../../stores/analyticsTypes'; // Keep type imports
+import { useSqlStore } from '../../stores/analyticsSqlStore';
+import { useHttpStore, type AnalyticsHttpState } from '../../stores/analyticsHttpStore'; // Import HTTP store
+import type { CardDataItem, Segment } from '../../stores/analyticsTypes';
 
 // Helper function (defined locally as per instructions)
 const formatNumber = (num: number) => num.toLocaleString();
 
 // Rename: CustomPropertiesCard -> EventsCard
-export const EventsCard: React.FC<{
-    // Changed: onItemClick now takes a Segment object directly
-    onItemClick: (segment: Segment) => void;
-}> = ({ onItemClick }) => {
+export const EventsCard: React.FC<{/* onItemClick prop removed */}> = (/* { onItemClick } removed */) => {
   // Select state from SQL store
   const {
-    eventsData, availableKeys, aggregatedValues, selectedKey, status, error, activeTab, // Added activeTab
+    eventsData, availableKeys, aggregatedValues, selectedKey, status, error,
     runCustomPropertyAggregation,
+    addSegment, // Add addSegment from useSqlStore
   } = useSqlStore(useShallow(state => ({
     eventsData: state.aggregatedData?.eventsData ?? [],
     availableKeys: state.aggregatedData?.customProperties?.availableKeys ?? [],
     aggregatedValues: state.aggregatedData?.customProperties?.aggregatedValues ?? null,
     selectedKey: state.selectedPropertyKey,
-    activeTab: state.eventsTab, // Get eventsTab from SQL store
     status: state.status,
     error: state.error,
     runCustomPropertyAggregation: state.runCustomPropertyAggregation,
+    addSegment: state.addSegment, // Get addSegment
   })));
- 
-  // Get setter directly from the store instance
-  const setActiveTab = useSqlStore.getState().setEventsTab;
+
+  // Get activeTab and setActiveTab from HTTP store
+  const { activeTab, setActiveTab } = useHttpStore(useShallow((state: AnalyticsHttpState) => ({
+    activeTab: state.eventsCardTab,
+    setActiveTab: state.setEventsCardTab,
+  })));
 
   const handlePropertyKeyChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
     runCustomPropertyAggregation(event.target.value);
@@ -59,7 +61,8 @@ export const EventsCard: React.FC<{
   const handleItemClickInternal = (item: CardDataItem) => {
     const segment = generateSegmentForItem(item);
     if (segment) {
-      onItemClick(segment);
+      // onItemClick(segment); // Removed prop call
+      addSegment(segment); // Call addSegment directly
     }
   };
 

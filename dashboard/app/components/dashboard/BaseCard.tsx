@@ -102,7 +102,7 @@ export const BaseCard: React.FC<CardProps> = ({ // Added export
           ))}
         </nav>
       </div>
-      <div className="flex-grow overflow-y-auto max-h-96">
+      <div className="flex-grow overflow-y-auto max-h-96 min-h-[300px]">
         {loading && <div className="text-sm text-gray-500 py-4 text-center">Loading...</div>}
         {error && <div className="text-sm text-red-600 bg-red-50 p-2 rounded text-center">Error: {error}</div>}
         {!loading && !error && currentData.length === 0 && <div

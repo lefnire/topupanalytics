@@ -1,8 +1,8 @@
 import React, { memo, useCallback } from 'react';
-import { useSqlStore, type AnalyticsSqlState } from '../../stores/analyticsSqlStore'; // Import SQL store and state
+import { useSqlStore, type AnalyticsSqlState } from '../../stores/analyticsSqlStore';
+import { useHttpStore, type AnalyticsHttpState } from '../../stores/analyticsHttpStore'; // Import HTTP store
 import { useShallow } from 'zustand/shallow';
-// Remove AnalyticsState import from old store
-import type { AggregatedData, CardDataItem, Segment } from '../../stores/analyticsTypes'; // Keep type imports
+import type { AggregatedData, CardDataItem, Segment } from '../../stores/analyticsTypes';
 import { BaseCard } from './BaseCard';
 
 // ===================== Generic Card machinery =====================
@@ -10,9 +10,9 @@ export type CardMeta = { // Added export
   id: string;
   title: string;
   tabs: { key: string; label: string }[];
-  dataSelector: (agg: AggregatedData | null) => Record<string, CardDataItem[]>;
-  tabGet: (s: AnalyticsSqlState) => string; // Use SQL state for tabs
-  tabSet: (s: AnalyticsSqlState) => (key: string) => void; // Use SQL state for tabs
+  dataSelector: (agg: AggregatedData | null) => Record<string, CardDataItem[]>; // This will select from the full aggData object
+  tabGet: (s: AnalyticsHttpState) => string; // Tab state now comes from HTTP store
+  tabSet: (s: AnalyticsHttpState) => (key: string) => void; // Tab setter now in HTTP store
   renderHeader?: (active: string) => React.ReactNode;
   renderItem?: (item: CardDataItem, idx: number, active: string) => React.ReactNode;
   // Updated: getSegment now returns the full Segment object or null
@@ -29,8 +29,8 @@ export const CARD_META: CardMeta[] = [ // Added export
       { key: 'campaigns', label: 'Campaigns' },
     ],
     dataSelector: agg => agg?.sources ?? { channels: [], sources: [], campaigns: [] },
-    tabGet: s => s.sourcesTab,
-    tabSet: s => s.setSourcesTab,
+    tabGet: s => s.sourcesCardTab, // HTTP store state
+    tabSet: s => s.setSourcesCardTab, // HTTP store action
     renderHeader: () => (
       <div className="flex justify-between items-center text-xs text-gray-500 font-medium mb-1 px-1">
         <span>Name</span>
@@ -58,8 +58,8 @@ export const CARD_META: CardMeta[] = [ // Added export
       { key: 'exitPages', label: 'Exit Pages' },
     ],
     dataSelector: agg => agg?.pages ?? { topPages: [], entryPages: [], exitPages: [] },
-    tabGet: s => s.pagesTab,
-    tabSet: s => s.setPagesTab,
+    tabGet: s => s.pagesCardTab, // HTTP store state
+    tabSet: s => s.setPagesCardTab, // HTTP store action
     renderHeader: active => (
       <div className="flex justify-between items-center text-xs text-gray-500 font-medium mb-1 px-1">
         <span>{active === 'topPages' ? 'Pathname' : 'Page'}</span>
@@ -81,8 +81,8 @@ export const CARD_META: CardMeta[] = [ // Added export
       { key: 'regions', label: 'Regions' },
     ],
     dataSelector: agg => agg?.regions ?? { countries: [], regions: [] },
-    tabGet: s => s.regionsTab,
-    tabSet: s => s.setRegionsTab,
+    tabGet: s => s.regionsCardTab, // Corrected to use new state name
+    tabSet: s => s.setRegionsCardTab, // Corrected to use new setter name
     renderHeader: () => (
       <div className="flex justify-between items-center text-xs text-gray-500 font-medium mb-1 px-1">
         <span>Name</span>
@@ -109,8 +109,8 @@ export const CARD_META: CardMeta[] = [ // Added export
       { key: 'screenSizes', label: 'Size' },
     ],
     dataSelector: agg => agg?.devices ?? { browsers: [], os: [], screenSizes: [] },
-    tabGet: s => s.devicesTab,
-    tabSet: s => s.setDevicesTab,
+    tabGet: s => s.devicesCardTab, // Corrected to use new state name
+    tabSet: s => s.setDevicesCardTab, // Corrected to use new setter name
     renderHeader: () => (
       <div className="flex justify-between items-center text-xs text-gray-500 font-medium mb-1 px-1">
         <span>Name</span>
@@ -136,15 +136,24 @@ export const CARD_META: CardMeta[] = [ // Added export
 
 export const CardContainer: React.FC<{ // Added export
     meta: CardMeta;
-    loading: boolean;
-    aggregatedData: AggregatedData | null;
-    onItemClick: (segment: Segment) => void; // Pass handler down
-}> = memo(({ meta, loading, aggregatedData, onItemClick }) => {
-  // Select tab state and setter from SQL store
-  const { activeTab, setActiveTab } = useSqlStore(useShallow((state: AnalyticsSqlState) => ({ // Use SQL state
-    activeTab: meta.tabGet(state), // tabGet now expects AnalyticsSqlState
-    setActiveTab: meta.tabSet(state), // tabSet now expects AnalyticsSqlState
+    // loading: boolean; // Loading state will be derived from sqlStatus
+    // aggregatedData: AggregatedData | null; // CardContainer will select its own data
+    onItemClick: (segment: Segment) => void;
+}> = memo(({ meta, onItemClick }) => {
+  // Select tab state and setter from HTTP store
+  const { activeTab, setActiveTab } = useHttpStore(useShallow((state: AnalyticsHttpState) => ({
+    activeTab: meta.tabGet(state),
+    setActiveTab: meta.tabSet(state),
   })));
+
+  // Select specific data slice and loading status from SQL store
+  const { cardData, sqlStatus } = useSqlStore(useShallow((state: AnalyticsSqlState) => ({
+    // Use meta.dataSelector to get the specific slice for this card
+    cardData: meta.dataSelector(state.aggregatedData),
+    sqlStatus: state.status,
+  })));
+
+  const loading = sqlStatus === 'loading_data' || sqlStatus === 'aggregating' || sqlStatus === 'aggregating_tab' || sqlStatus === 'initializing';
 
   // Use the meta.getSegment function defined in CARD_META
   const generateSegmentForItem = useCallback((item: CardDataItem, currentActiveTab: string) => {
@@ -159,7 +168,7 @@ export const CardContainer: React.FC<{ // Added export
       tabs={meta.tabs}
       activeTab={activeTab}
       setActiveTab={setActiveTab}
-      data={meta.dataSelector(aggregatedData)}
+      data={cardData} // Use the selected cardData slice
       renderHeader={meta.renderHeader}
       renderItem={meta.renderItem}
       onItemClick={onItemClick} // Pass handler down

@@ -132,8 +132,8 @@ const initialSqlState: Pick<AnalyticsSqlState,
   // Default Tab Values
   sourcesTab: 'channels',
   pagesTab: 'pages',
-  regionsTab: 'countries',
-  devicesTab: 'devices',
+  regionsTab: 'countries', // Stays the same, matches httpStore
+  devicesTab: 'browsers', // Change from 'devices' to 'browsers'
   eventsTab: 'events',
 };
 
@@ -164,10 +164,15 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
   // --- End Helpers ---
 
   // --- Internal Data Loading Helpers ---
-  const _fetchApiData = async (siteId: string, range: DateRange) => {
-    console.log("SQL Store: Fetching data from API...");
+  const _fetchApiData = async (siteId: string, rangeKey: string) => {
+    console.log("SQL Store: Fetching data from API for rangeKey:", rangeKey);
+    const rangeObject = useHttpStore.getState().getSelectedDateRangeObject();
+    if (!rangeObject) {
+      console.error("SQL Store: _fetchApiData could not get DateRange object for key:", rangeKey);
+      throw new Error("Could not determine date range for fetching data.");
+    }
     // This helper focuses solely on the API call. Error handling is done by the caller.
-    return await fetchData(siteId, range);
+    return await fetchData(siteId, rangeObject);
   };
 
   const _loadTables = async (
@@ -282,16 +287,18 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
         console.log(`SQL Store: Skipping fetchAndLoadData, current status: ${status}`);
         return;
       }
-      const { selectedSiteId: siteId, selectedRange: range } = useHttpStore.getState();
-      if (!siteId || !range?.from || !range?.to) {
-          console.log("SQL Store: fetchAndLoadData skipped (missing siteId or valid range).", { siteId, range });
+      const { selectedSiteId: siteId, selectedRangeKey, getSelectedDateRangeObject } = useHttpStore.getState();
+      const rangeObject = getSelectedDateRangeObject();
+
+      if (!siteId || !selectedRangeKey || !rangeObject?.from || !rangeObject?.to) {
+          console.log("SQL Store: fetchAndLoadData skipped (missing siteId, rangeKey or valid rangeObject).", { siteId, selectedRangeKey, rangeObject });
           return;
       }
-      // skip if the same siteId & range are selected as last time
-      console.log(`SQL Store: fetchAndLoadData called for site ${siteId}, range: ${range?.from ? format(range.from, 'P') : 'N/A'} - ${range?.to ? format(range.to, 'P') : 'N/A'}`);
-      const currFetchHash = `${siteId}|${range.from?.toISOString()}|${range.to?.toISOString()}`
+      // skip if the same siteId & rangeKey are selected as last time
+      console.log(`SQL Store: fetchAndLoadData called for site ${siteId}, rangeKey: ${selectedRangeKey}, range: ${rangeObject.from ? format(rangeObject.from, 'P') : 'N/A'} - ${rangeObject.to ? format(rangeObject.to, 'P') : 'N/A'}`);
+      const currFetchHash = `${siteId}|${selectedRangeKey}` // Use rangeKey for hash
       if (currFetchHash === lastFetchHash) {
-        return console.log("SQL Store: fetchAndLoadData already called for this siteId & range combo")
+        return console.log("SQL Store: fetchAndLoadData already called for this siteId & rangeKey combo")
       }
       set({lastFetchHash: currFetchHash})
 
@@ -303,7 +310,7 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
 
       try {
         // Step 1: Fetch data from API
-        const { initialEvents, events, commonSchema, initialOnlySchema } = await _fetchApiData(siteId, range);
+        const { initialEvents, events, commonSchema, initialOnlySchema } = await _fetchApiData(siteId, selectedRangeKey);
 
         // This code goes into fetchAndLoadData in analyticsSqlStore.ts
         // Ensure 'initialEvents' is the correct variable name for the array of initial event objects.
@@ -343,14 +350,18 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
       },
       
       runAggregations: async () => {
-      const { connection, status, segments, sourcesTab, pagesTab, regionsTab, devicesTab, eventsTab } = get();
-      const selectedRange = useHttpStore.getState().selectedRange; // Get range from HTTP store
+      const { connection, status, segments } = get();
+      // Get tab states from HTTP store for runAggregationsSql
+      // At the top of runAggregations, get all relevant tabs from HttpStore
+      const { sourcesCardTab, pagesCardTab, eventsCardTab, regionsCardTab, devicesCardTab, getSelectedDateRangeObject } = useHttpStore.getState();
+
+      const rangeObject = getSelectedDateRangeObject();
 
       // Allow running when status is 'aggregating', but guard against other busy/error states
       // Use _isBusy helper, but exclude 'aggregating' itself from the check here
       const isBusyForInitialAgg = status === 'loading_data' || status === 'initializing' || status === 'aggregating_tab';
-      if (!connection || !selectedRange?.from || !selectedRange?.to || status === 'error' || isBusyForInitialAgg) {
-        console.log("SQL Store: Skipping initial aggregations - invalid state or range", { status, hasConnection: !!connection, selectedRange: !!selectedRange });
+      if (!connection || !rangeObject?.from || !rangeObject?.to || status === 'error' || isBusyForInitialAgg) {
+        console.log("SQL Store: Skipping initial aggregations - invalid state or range", { status, hasConnection: !!connection, rangeObject });
         // If called while aggregating_tab, it might mean a race condition, let the tab finish.
         return;
       }
@@ -363,15 +374,15 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
       try {
         // Define the views based on current tab state
         const initialViews = {
-          sourcesView: sourcesTab,
-          pagesView: pagesTab,
-          regionsView: regionsTab,
-          devicesView: devicesTab,
-          eventsView: eventsTab, // Assuming 'events' is the only view for now
+          sourcesView: sourcesCardTab,
+          pagesView: pagesCardTab,
+          regionsView: regionsCardTab, // Use from HttpStore
+          devicesView: devicesCardTab, // Use from HttpStore
+          eventsView: eventsCardTab,
         };
 
-        // Call the refactored aggregation runner with initial views
-        const initialAggregatedData = await runAggregationsSql(connection, selectedRange, segments, initialViews);
+        // Call the refactored aggregation runner with initial views and rangeObject
+        const initialAggregatedData = await runAggregationsSql(connection, rangeObject, segments, initialViews);
 
         // Update state with the partial data (base + initial tabs)
         // Use functional set to merge safely, ensuring undefined from partial becomes null
@@ -611,24 +622,62 @@ const sqlStoreCreator: StateCreator<AnalyticsSqlState, [], [["zustand/persist", 
     // --- Tab Setters (Now trigger specific aggregation) ---
     // These now just set the tab state and call runSpecificAggregation, which handles status
     setSourcesTab: async (tab: string) => {
-      set({ sourcesTab: tab });
-      await get().runSpecificAggregation('sources', tab);
+      const currentAggData = get().aggregatedData;
+      set({ sourcesTab: tab }); // Set the tab state first
+
+      // Only run aggregation if comprehensive data for 'sources' isn't already loaded
+      if (!currentAggData?.sources) {
+        console.log("SQL Store: setSourcesTab - Sources data not yet loaded, running specific aggregation.");
+        await get().runSpecificAggregation('sources', tab);
+      } else {
+        console.log("SQL Store: setSourcesTab - Sources data already present, only updating tab state.");
+      }
     },
     setPagesTab: async (tab: string) => {
-      set({ pagesTab: tab });
-      await get().runSpecificAggregation('pages', tab);
+      const currentAggData = get().aggregatedData;
+      set({ pagesTab: tab }); // Set the tab state first
+
+      // Only run aggregation if comprehensive data for 'pages' isn't already loaded
+      if (!currentAggData?.pages) {
+        console.log("SQL Store: setPagesTab - Pages data not yet loaded, running specific aggregation.");
+        await get().runSpecificAggregation('pages', tab);
+      } else {
+        console.log("SQL Store: setPagesTab - Pages data already present, only updating tab state.");
+      }
     },
     setRegionsTab: async (tab: string) => {
+      // For Regions and Devices, the original fix in analyticsSql.ts already made them fetch all data.
+      // We apply the same optimization here to prevent re-aggregation if data is present.
+      const currentAggData = get().aggregatedData;
       set({ regionsTab: tab });
-      await get().runSpecificAggregation('regions', tab);
+      if (!currentAggData?.regions) {
+        console.log("SQL Store: setRegionsTab - Regions data not yet loaded, running specific aggregation.");
+        await get().runSpecificAggregation('regions', tab);
+      } else {
+        console.log("SQL Store: setRegionsTab - Regions data already present, only updating tab state.");
+      }
     },
     setDevicesTab: async (tab: string) => {
+      const currentAggData = get().aggregatedData;
       set({ devicesTab: tab });
-      await get().runSpecificAggregation('devices', tab);
+      if (!currentAggData?.devices) {
+        console.log("SQL Store: setDevicesTab - Devices data not yet loaded, running specific aggregation.");
+        await get().runSpecificAggregation('devices', tab);
+      } else {
+        console.log("SQL Store: setDevicesTab - Devices data already present, only updating tab state.");
+      }
     },
     setEventsTab: async (tab: string) => {
-      set({ eventsTab: tab });
-      await get().runSpecificAggregation('events', tab);
+      const currentAggData = get().aggregatedData;
+      set({ eventsTab: tab }); // Set the tab state first
+
+      // Only run aggregation if eventsData isn't already loaded
+      if (!currentAggData?.eventsData) {
+        console.log("SQL Store: setEventsTab - Events data not yet loaded, running specific aggregation.");
+        await get().runSpecificAggregation('events', tab);
+      } else {
+        console.log("SQL Store: setEventsTab - Events data already present, only updating tab state.");
+      }
     },
 
   }; // End of return object
@@ -642,51 +691,110 @@ export const useSqlStore = create<AnalyticsSqlState>()(
       name: 'analytics-sql-preferences', // Unique name for this store's persistence
       storage: createJSONStorage(() => localStorage),
       partialize: (state): Partial<AnalyticsSqlState> => ({
-        // Persist only the tab selections and the selected custom property key
-        sourcesTab: state.sourcesTab,
-        pagesTab: state.pagesTab,
-        regionsTab: state.regionsTab,
-        devicesTab: state.devicesTab,
-        eventsTab: state.eventsTab,
+        // Persist only the selected custom property key
+        // Tab states are now persisted in analyticsHttpStore
         selectedPropertyKey: state.selectedPropertyKey,
-        // Do not persist: status, error, db, connection, aggregatedData, sankeyData, segments, lastProcessed*
+        // Do not persist: status, error, db, connection, aggregatedData, sankeyData, segments, lastProcessed*, tab states
       }),
       onRehydrateStorage: () => (state, error) => {
-        console.log("SQL Store: Rehydrating state...");
+        console.log("SQL Store: Rehydrating state (selectedPropertyKey only)...");
         if (error) {
           console.error("SQL Store: Failed to rehydrate state:", error);
-          // Attempt to initialize non-persisted state even on error? Or rely on manual init?
-          state?._initializeNonPersistedState(); // Call helper if state exists
+          state?._initializeNonPersistedState();
           return;
         }
         if (!state) {
           console.warn("SQL Store: State is undefined during rehydration.");
-          // Initialize non-persisted state if rehydration provides no state object
           useSqlStore.getState()._initializeNonPersistedState();
           return;
         }
 
+        // Only selectedPropertyKey is rehydrated here.
+        // Tab defaults are set in initialSqlState and will be overridden by httpStore subscription.
         console.log("SQL Store: Rehydration complete. Initializing non-persisted state.");
-        // Initialize non-persisted state after successful rehydration
         state._initializeNonPersistedState();
-
-        // Note: The HTTP store subscriber will handle fetching data based on
-        // the rehydrated selectedSiteId from the HTTP store's persistence.
-        // We don't need to trigger fetch here directly.
       }
     }
   ) // End persist wrapper
 );
 
+// Subscribe to selectedSiteId and selectedRangeKey from HttpStore for data fetching
 useHttpStore.subscribe(
-  (state) => [
-    state.selectedSiteId,
-    state.selectedRange
-  ],
-  () => {
-    const {status, fetchAndLoadData} = useSqlStore.getState();
-    if (status !== "idle") { return; }
-    fetchAndLoadData();
+  (state) => ({ siteId: state.selectedSiteId, rangeKey: state.selectedRangeKey }),
+  (currentHttpSelection, previousHttpSelection) => {
+    console.log("SQL Store: HttpStore siteId/rangeKey subscriber triggered.", currentHttpSelection);
+    const { status, fetchAndLoadData, resetSqlState } = useSqlStore.getState();
+    const { selectedSiteId } = useHttpStore.getState(); // Get current siteId
+
+    if (!selectedSiteId) {
+      console.log("SQL Store: No site selected in HttpStore, resetting SQL state.");
+      resetSqlState(); // Reset data if no site is selected
+      // Potentially clear DB connection as well if desired, or keep it for faster next load
+      return;
+    }
+
+    // Fetch data if siteId or rangeKey has actually changed and store is idle
+    // This check prevents fetching if only other httpStore state changed
+    if (
+      (currentHttpSelection.siteId !== previousHttpSelection.siteId ||
+       currentHttpSelection.rangeKey !== previousHttpSelection.rangeKey) &&
+      status !== "loading_data" && status !== "initializing" // Allow fetch if idle or error
+    ) {
+      console.log("SQL Store: SiteId or RangeKey changed, calling fetchAndLoadData.");
+      fetchAndLoadData();
+    } else if (status !== "idle" && status !== "error" && status !== "loading_data" && status !== "initializing") {
+      console.log(`SQL Store: HttpStore change detected but SQL store is busy (${status}) or no relevant change.`);
+    } else if (!currentHttpSelection.siteId && (previousHttpSelection.siteId)) {
+        // If siteId became null (e.g. user logs out or all sites deleted)
+        console.log("SQL Store: SiteId became null, resetting SQL store.");
+        resetSqlState();
+    }
   },
-  { fireImmediately: true }
+  { equalityFn: (a, b) => a.siteId === b.siteId && a.rangeKey === b.rangeKey, fireImmediately: true }
 );
+
+
+// Subscribe to individual tab changes in HttpStore
+const httpStoreUnsubscribers = [
+  useHttpStore.subscribe(
+    state => state.sourcesCardTab,
+    newHttpSourcesCardTab => {
+      console.log("SQL Store: sourcesCardTab changed in HttpStore:", newHttpSourcesCardTab);
+      const { sourcesTab, setSourcesTab } = useSqlStore.getState();
+      if (newHttpSourcesCardTab !== sourcesTab) {
+        setSqlStore(state => ({ ...state, sourcesTab: newHttpSourcesCardTab })); // Update internal tab
+        useSqlStore.getState().runSpecificAggregation('sources', newHttpSourcesCardTab);
+      }
+    }
+  ),
+  useHttpStore.subscribe(
+    state => state.pagesCardTab,
+    newHttpPagesCardTab => {
+      console.log("SQL Store: pagesCardTab changed in HttpStore:", newHttpPagesCardTab);
+      const { pagesTab, setPagesTab } = useSqlStore.getState();
+      if (newHttpPagesCardTab !== pagesTab) {
+        setSqlStore(state => ({ ...state, pagesTab: newHttpPagesCardTab })); // Update internal tab
+        useSqlStore.getState().runSpecificAggregation('pages', newHttpPagesCardTab);
+      }
+    }
+  ),
+  useHttpStore.subscribe(
+    state => state.eventsCardTab,
+    newHttpEventsCardTab => {
+      console.log("SQL Store: eventsCardTab changed in HttpStore:", newHttpEventsCardTab);
+      const { eventsTab, setEventsTab } = useSqlStore.getState();
+      if (newHttpEventsCardTab !== eventsTab) {
+        setSqlStore(state => ({ ...state, eventsTab: newHttpEventsCardTab })); // Update internal tab
+        useSqlStore.getState().runSpecificAggregation('events', newHttpEventsCardTab);
+      }
+    }
+  )
+];
+
+// Helper to set state in sqlStore, as `set` is not directly available outside creator
+const setSqlStore = (fn: (state: AnalyticsSqlState) => Partial<AnalyticsSqlState>) => {
+  useSqlStore.setState(fn);
+};
+
+// TODO: Consider unsubscribing when the store is destroyed if that's a pattern used elsewhere.
+// For now, these subscriptions will live as long as the app.

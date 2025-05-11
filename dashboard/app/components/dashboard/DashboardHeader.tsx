@@ -8,7 +8,7 @@ import { useHttpStore, type AnalyticsHttpState } from '../../stores/analyticsHtt
 import { useSqlStore, type AnalyticsSqlState } from '../../stores/analyticsSqlStore';
 import type { Segment, Site } from '../../stores/analyticsTypes';
 import { useShallow } from 'zustand/shallow';
-import { type DateRange } from 'react-day-picker';
+// import { type DateRange } from 'react-day-picker'; // No longer directly used here
 import { useAuth } from '../../contexts/AuthContext';
 import {
   DropdownMenu,
@@ -36,47 +36,38 @@ import { SiteSettingsModal } from '../sites/SiteSettingsModal'; // Added SiteSet
 import { AddSiteModal } from '../sites/AddSiteModal'; // Added AddSiteModal
 import { AccountModal } from '../account/AccountModal'; // Added AccountModal
 
-// Helper function to calculate DateRange
-const calculateDateRange = (period: string): DateRange => {
-  const now = new Date();
-  let fromDate = new Date();
+// calculateDateRange function is removed as it's no longer used here.
+// The analyticsHttpStore.getSelectedDateRangeObject() is the source of truth for DateRange objects.
 
-  switch (period) {
-    case '24 hours':
-      fromDate.setDate(now.getDate() - 1);
-      break;
-    case '7 days':
-      fromDate.setDate(now.getDate() - 7);
-      break;
-    case '30 days':
-      fromDate.setDate(now.getDate() - 30);
-      break;
-    case '90 days':
-      fromDate.setDate(now.getDate() - 90);
-      break;
-    default: // Default to 24 hours
-      fromDate.setDate(now.getDate() - 1);
-  }
-  // Ensure 'from' is not after 'to' (can happen with clock changes near midnight)
-  if (fromDate > now) {
-    fromDate = new Date(now.getTime() - 24 * 60 * 60 * 1000); // Set to exactly 24h ago if needed
-  }
-  return { from: fromDate, to: now };
-};
-
+const timePeriodOptions = [
+  { key: "today", display: "Today" },
+  { key: "7days", display: "Last 7 days" },
+  { key: "30days", display: "Last 30 days" },
+  { key: "90days", display: "Last 90 days" },
+  // Add other options if DashboardHeader should support them, e.g.:
+  // { key: "yesterday", display: "Yesterday" },
+  // { key: "6months", display: "Last 6 months" },
+  // { key: "12months", display: "Last 12 months" },
+];
+const defaultHeaderRangeKey = "7days"; // Default for this component if store is invalid/empty
 
 export const DashboardHeader = () => {
-  const timePeriods = ["24 hours", "7 days", "30 days", "90 days"];
-  const [selectedPeriod, setSelectedPeriod] = useState<string>(timePeriods[0]); // Default to "24 hours"
+  // Local state for the dropdown, initialized from store or a default valid for this header
+  const [currentSelectedKey, setCurrentSelectedKey] = useState<string>(() => {
+    const initialStoreKey = useHttpStore.getState().selectedRangeKey;
+    return timePeriodOptions.some(opt => opt.key === initialStoreKey) ? initialStoreKey : defaultHeaderRangeKey;
+  });
 
   // Select state from HTTP store
   const {
     selectedSiteId,
     sites,
     httpStatus, // Renamed to avoid clash
-    selectedRange,
+    // selectedRange, // No longer needed
+    selectedRangeKeyFromStore,
     setSelectedSiteId,
-    setSelectedRange,
+    // setSelectedRange, // No longer needed
+    setSelectedRangeKeyAction,
     isAddSiteModalOpen,
     setAddSiteModalOpen,
     fetchSites,
@@ -84,9 +75,11 @@ export const DashboardHeader = () => {
     selectedSiteId: state.selectedSiteId,
     sites: state.sites,
     httpStatus: state.status,
-    selectedRange: state.selectedRange,
+    // selectedRange: state.selectedRange, // Removed
+    selectedRangeKeyFromStore: state.selectedRangeKey,
     setSelectedSiteId: state.setSelectedSiteId,
-    setSelectedRange: state.setSelectedRange,
+    // setSelectedRange: state.setSelectedRange, // Removed
+    setSelectedRangeKeyAction: state.setSelectedRangeKey,
     isAddSiteModalOpen: state.isAddSiteModalOpen,
     setAddSiteModalOpen: state.setAddSiteModalOpen,
     fetchSites: state.fetchSites,
@@ -126,16 +119,34 @@ export const DashboardHeader = () => {
   const isLoading = isLoadingHttp || isLoadingSql;
   const isError = httpStatus === 'error' || sqlStatus === 'error';
 
-  // Effect to select first site AND set initial date range
+  // Effect to select first site if none selected
   useEffect(() => {
-    // Select first site if none selected
     if (!selectedSiteId && sites.length > 0) {
       setSelectedSiteId(sites[0].site_id);
     }
-    // Set initial date range on mount
-    setSelectedRange(calculateDateRange(selectedPeriod));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sites, selectedSiteId, setSelectedSiteId]); // Keep original dependencies for site selection logic
+  }, [sites, selectedSiteId, setSelectedSiteId]);
+
+  // Effect to synchronize local currentSelectedKey with store's selectedRangeKey
+  // and ensure store has a valid key for this header's options
+  useEffect(() => {
+    const storeKey = selectedRangeKeyFromStore;
+    const isValidStoreKeyForHeader = timePeriodOptions.some(opt => opt.key === storeKey);
+
+    if (isValidStoreKeyForHeader) {
+      // Store key is valid for this header's dropdown, ensure local state matches
+      if (currentSelectedKey !== storeKey) {
+        setCurrentSelectedKey(storeKey);
+      }
+    } else {
+      // Store key is NOT valid for this header (e.g., "6months", "allTime") or is undefined.
+      // The header should set the store to its current local key (which is guaranteed to be valid for the header).
+      // This also handles the initial mount case if the store's key was not one of the header's options.
+      if (storeKey !== currentSelectedKey) {
+        setSelectedRangeKeyAction(currentSelectedKey);
+      }
+    }
+    // Adding timePeriodOptions to dependencies, though it's stable, to be explicit.
+  }, [selectedRangeKeyFromStore, setSelectedRangeKeyAction, currentSelectedKey, sites]); // Added sites to re-evaluate if httpStore.selectedRangeKey was default and sites load
 
   // Derive selectedSite for display purposes
   const selectedSite = useMemo(() => sites.find((site: Site) => site.site_id === selectedSiteId), [sites, selectedSiteId]); // Added Site type
@@ -162,10 +173,13 @@ export const DashboardHeader = () => {
     setIsSiteSettingsModalOpen(true);
   };
 
-  const handleTimePeriodChange = (value: string) => {
-    if (timePeriods.includes(value)) { // Ensure value is one of the allowed periods
-      setSelectedPeriod(value);
-      setSelectedRange(calculateDateRange(value));
+  const handleTimePeriodChange = (newKey: string) => {
+    // Ensure the newKey is one of the valid options defined in timePeriodOptions
+    if (timePeriodOptions.some(option => option.key === newKey)) {
+      setCurrentSelectedKey(newKey); // Update local UI state immediately
+      setSelectedRangeKeyAction(newKey); // Update the central store
+    } else {
+      console.warn(`DashboardHeader: Attempted to set invalid time period key: ${newKey}`);
     }
   };
 
@@ -243,14 +257,14 @@ export const DashboardHeader = () => {
              )}
 
              {/* Time Period Select Dropdown */}
-             <Select value={selectedPeriod} onValueChange={handleTimePeriodChange} disabled={isLoading || !selectedSiteId}>
+             <Select value={currentSelectedKey} onValueChange={handleTimePeriodChange} disabled={isLoading || !selectedSiteId}>
                <SelectTrigger className="w-[180px]">
                  <SelectValue placeholder="Select time period" />
                </SelectTrigger>
                <SelectContent>
-                 {timePeriods.map((period) => (
-                   <SelectItem key={period} value={period}>
-                     {period}
+                 {timePeriodOptions.map((option) => (
+                   <SelectItem key={option.key} value={option.key}>
+                     {option.display}
                    </SelectItem>
                  ))}
                </SelectContent>

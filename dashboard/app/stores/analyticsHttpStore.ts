@@ -21,32 +21,52 @@ export interface AnalyticsHttpState {
   sites: Site[];
   selectedSiteId: string | null;
   userPreferences: UserPreferences | null;
-  selectedRange: DateRange | undefined;
+  selectedRangeKey: string; // Changed from selectedRange: DateRange | undefined
   isAddSiteModalOpen: boolean;
+
+  // Card Tab States
+  sourcesCardTab: string;
+  pagesCardTab: string;
+  eventsCardTab: string;
+  regionsCardTab: string;
+  devicesCardTab: string;
 
   // Actions
   fetchSites: () => Promise<void>;
   setSelectedSiteId: (siteId: string | null) => void;
-  setSelectedRange: (range: DateRange | undefined) => void;
+  setSelectedRangeKey: (rangeKey: string) => void; // Renamed from setSelectedRange
   setAddSiteModalOpen: (isOpen: boolean) => void;
   resetHttpState: () => Partial<AnalyticsHttpState>; // Renamed for clarity
+
+  // Card Tab Setters
+  setSourcesCardTab: (tab: string) => void;
+  setPagesCardTab: (tab: string) => void;
+  setEventsCardTab: (tab: string) => void;
+  setRegionsCardTab: (tab: string) => void;
+  setDevicesCardTab: (tab: string) => void;
+
+  // Getter
+  getSelectedDateRangeObject: () => DateRange | undefined;
 }
 
 // Define the initial state for the HTTP store
 const initialHttpState: Pick<AnalyticsHttpState,
   'status' | 'error' | 'sites' | 'selectedSiteId' | 'userPreferences' |
-  'selectedRange' | 'isAddSiteModalOpen'
+  'selectedRangeKey' | 'isAddSiteModalOpen' | 'sourcesCardTab' | 'pagesCardTab' | 'eventsCardTab' |
+  'regionsCardTab' | 'devicesCardTab'
 > = {
   status: 'idle',
   error: null,
   sites: [],
   selectedSiteId: null,
   userPreferences: null,
-  selectedRange: { // Default to last 7 days
-    from: subDays(startOfDay(new Date()), 6),
-    to: endOfDay(new Date()),
-  },
+  selectedRangeKey: '7days', // Default to "7days"
   isAddSiteModalOpen: false,
+  sourcesCardTab: 'channels', // Default tab
+  pagesCardTab: 'pages', // Default tab
+  eventsCardTab: 'events', // Default tab
+  regionsCardTab: 'countries', // Default tab
+  devicesCardTab: 'browsers', // Default tab
 };
 
 // --- Zustand Store ---
@@ -63,11 +83,11 @@ export const useHttpStore = create<AnalyticsHttpState>()(
         status: 'idle', // Reset status unless fetching
       }),
 
-      setSelectedRange: (range: DateRange | undefined) => {
-        if (JSON.stringify(range) === JSON.stringify(get().selectedRange)) return;
-        console.log("HTTP Store: Setting selected range", range);
+      setSelectedRangeKey: (rangeKey: string) => {
+        if (rangeKey === get().selectedRangeKey) return;
+        console.log("HTTP Store: Setting selected range key", rangeKey);
         set({
-          selectedRange: range,
+          selectedRangeKey: rangeKey,
           error: null, // Clear potential previous errors
           status: 'idle',
         });
@@ -135,6 +155,72 @@ export const useHttpStore = create<AnalyticsHttpState>()(
         set({ isAddSiteModalOpen: isOpen });
       },
 
+      // --- Card Tab Setters ---
+      setSourcesCardTab: (tab: string) => {
+        if (tab === get().sourcesCardTab) return;
+        console.log("HTTP Store: Setting sourcesCardTab", tab);
+        set({ sourcesCardTab: tab });
+      },
+      setPagesCardTab: (tab: string) => {
+        if (tab === get().pagesCardTab) return;
+        console.log("HTTP Store: Setting pagesCardTab", tab);
+        set({ pagesCardTab: tab });
+      },
+      setEventsCardTab: (tab: string) => {
+        if (tab === get().eventsCardTab) return;
+        console.log("HTTP Store: Setting eventsCardTab", tab);
+        set({ eventsCardTab: tab });
+      },
+      setRegionsCardTab: (tab: string) => {
+        if (tab === get().regionsCardTab) return;
+        console.log("HTTP Store: Setting regionsCardTab", tab);
+        set({ regionsCardTab: tab });
+      },
+      setDevicesCardTab: (tab: string) => {
+        if (tab === get().devicesCardTab) return;
+        console.log("HTTP Store: Setting devicesCardTab", tab);
+        set({ devicesCardTab: tab });
+      },
+
+      // --- Getter for DateRange object ---
+      getSelectedDateRangeObject: (): DateRange | undefined => {
+        const key = get().selectedRangeKey;
+        const now = new Date();
+        const todayStart = startOfDay(now);
+        const todayEnd = endOfDay(now);
+
+        switch (key) {
+          case 'today':
+            return { from: todayStart, to: todayEnd };
+          case 'yesterday':
+            const yesterdayStart = startOfDay(subDays(now, 1));
+            const yesterdayEnd = endOfDay(subDays(now, 1));
+            return { from: yesterdayStart, to: yesterdayEnd };
+          case '7days':
+            return { from: subDays(todayStart, 6), to: todayEnd };
+          case '30days':
+            return { from: subDays(todayStart, 29), to: todayEnd };
+          case '90days':
+            return { from: subDays(todayStart, 89), to: todayEnd };
+          case '6months':
+            return { from: subDays(todayStart, 182), to: todayEnd }; // Approx 6 months
+          case '12months':
+            return { from: subDays(todayStart, 364), to: todayEnd }; // Approx 12 months
+          default:
+            // Attempt to parse custom range if key is like "YYYY-MM-DD_YYYY-MM-DD"
+            if (typeof key === 'string' && key.includes('_')) {
+              const [fromStr, toStr] = key.split('_');
+              const fromDate = parseISO(fromStr);
+              const toDate = parseISO(toStr);
+              if (isValid(fromDate) && isValid(toDate)) {
+                return { from: startOfDay(fromDate), to: endOfDay(toDate) };
+              }
+            }
+            // Fallback to default (7 days) if key is unrecognized or custom parse fails
+            console.warn(`HTTP Store: Unrecognized selectedRangeKey "${key}", defaulting to 7 days.`);
+            return { from: subDays(todayStart, 6), to: todayEnd };
+        }
+      },
     }),
     {
       name: 'analytics-http-preferences', // Unique name for this store's persistence
@@ -142,8 +228,13 @@ export const useHttpStore = create<AnalyticsHttpState>()(
       partialize: (state): Partial<AnalyticsHttpState> => ({
         // Persist only user preferences and selections
         selectedSiteId: state.selectedSiteId,
-        selectedRange: state.selectedRange, // Let middleware handle serialization
-        // Do not persist: status, error, sites, userPreferences, isAddSiteModalOpen, tabs
+        selectedRangeKey: state.selectedRangeKey, // Persist the key
+        sourcesCardTab: state.sourcesCardTab,
+        pagesCardTab: state.pagesCardTab,
+        eventsCardTab: state.eventsCardTab,
+        regionsCardTab: state.regionsCardTab,
+        devicesCardTab: state.devicesCardTab,
+        // Do not persist: status, error, sites, userPreferences, isAddSiteModalOpen
       }),
       onRehydrateStorage: () => (state, error) => {
         console.log("HTTP Store: Rehydrating state...");
@@ -156,30 +247,28 @@ export const useHttpStore = create<AnalyticsHttpState>()(
           return;
         }
 
-        // Rehydrate date range
-        if (state.selectedRange?.from && state.selectedRange.to) {
-          try {
-            // Zustand's persist middleware might automatically handle Date objects,
-            // but manual parsing provides robustness if they are stored as strings.
-            const fromDate = typeof state.selectedRange.from === 'string' ? parseISO(state.selectedRange.from) : state.selectedRange.from;
-            const toDate = typeof state.selectedRange.to === 'string' ? parseISO(state.selectedRange.to) : state.selectedRange.to;
-
-            if (isValid(fromDate) && isValid(toDate)) {
-              state.selectedRange = { from: fromDate, to: toDate };
-              console.log("HTTP Store: Rehydrated date range:", state.selectedRange);
-            } else {
-              throw new Error("Invalid date string parsed during rehydration");
-            }
-          } catch (dateError) {
-            console.error("HTTP Store: Error parsing persisted dates:", dateError);
-            // Fallback to default if parsing fails
-            state.selectedRange = initialHttpState.selectedRange;
-          }
+        // Rehydrate selectedRangeKey (string)
+        if (typeof state.selectedRangeKey !== 'string' || !state.selectedRangeKey) {
+          console.log("HTTP Store: selectedRangeKey not found or invalid in storage, setting default.");
+          state.selectedRangeKey = initialHttpState.selectedRangeKey;
         } else {
-          // Set default if persisted range is incomplete or missing
-          state.selectedRange = initialHttpState.selectedRange;
-          console.log("HTTP Store: Setting default date range during rehydration.");
+          console.log("HTTP Store: Rehydrated selectedRangeKey:", state.selectedRangeKey);
         }
+
+        // Rehydrate card tabs, falling back to defaults
+        state.sourcesCardTab = typeof state.sourcesCardTab === 'string' && state.sourcesCardTab ? state.sourcesCardTab : initialHttpState.sourcesCardTab;
+        state.pagesCardTab = typeof state.pagesCardTab === 'string' && state.pagesCardTab ? state.pagesCardTab : initialHttpState.pagesCardTab;
+        state.eventsCardTab = typeof state.eventsCardTab === 'string' && state.eventsCardTab ? state.eventsCardTab : initialHttpState.eventsCardTab;
+        state.regionsCardTab = typeof state.regionsCardTab === 'string' && state.regionsCardTab ? state.regionsCardTab : initialHttpState.regionsCardTab;
+        state.devicesCardTab = typeof state.devicesCardTab === 'string' && state.devicesCardTab ? state.devicesCardTab : initialHttpState.devicesCardTab;
+        console.log("HTTP Store: Rehydrated card tabs:", {
+          sources: state.sourcesCardTab,
+          pages: state.pagesCardTab,
+          events: state.eventsCardTab,
+          regions: state.regionsCardTab,
+          devices: state.devicesCardTab,
+        });
+
 
         // Initialize non-persisted state
         state.status = 'idle';
