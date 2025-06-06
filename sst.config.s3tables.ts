@@ -199,12 +199,15 @@ export default $config({
     // This follows the pattern: <ACCOUNTID>_<S3_TABLE_BUCKET_NAME>/<NAMESPACE_NAME>
     const s3TableNamespaceDatabaseNameInS3TablesCatalog = $interpolate`${accountId}_${s3TableBucket.name}/${s3TableNamespace.namespace}`;
 
+    // This is the fully qualified name of the S3 Table namespace as it appears in the default Glue catalog for Lake Formation.
+    const lfS3TableDbName = $interpolate`s3tablescatalog/${s3TableNamespaceDatabaseNameInS3TablesCatalog}`;
+
     const s3TableNamespaceLink = new aws.glue.CatalogDatabase("s3TableNamespaceLink", {
       name: firehoseResourceLinkName,
       catalogId: accountId, // Link created in the default account catalog
       targetDatabase: {
         catalogId: "s3tablescatalog", // Target the top-level s3tablescatalog
-        databaseName: s3TableNamespaceDatabaseNameInS3TablesCatalog, // Full path to namespace within s3tablescatalog
+        databaseName: s3TableNamespaceDatabaseNameInS3TablesCatalog, // Path to namespace within s3tablescatalog
         // region: region.name, // Only specify if target is in different region
       },
       // createTableDefaultPermissions: [] // Not directly applicable here, manage via LF
@@ -229,8 +232,8 @@ export default $config({
       principal: firehoseRole.arn,
       permissions: ["DESCRIBE", "ALTER", "CREATE_TABLE", "DROP"],
       database: {
-        catalogId: "s3tablescatalog", // Target the top-level s3tablescatalog
-        name: s3TableNamespaceDatabaseNameInS3TablesCatalog, // Full path to namespace within s3tablescatalog
+        catalogId: accountId, // Lake Formation Permissions always use AWS Account ID as catalogId
+        name: lfS3TableDbName, // Fully qualified name of the S3 Table namespace in the default catalog
       },
     }, { dependsOn: [firehoseRole, s3TableNamespace, s3TableBucket, s3TableNamespaceLink] });
 
@@ -239,8 +242,8 @@ export default $config({
       principal: firehoseRole.arn,
       permissions: ["SELECT", "INSERT", "DELETE", "DESCRIBE", "ALTER"],
       table: {
-        catalogId: "s3tablescatalog", // Target the top-level s3tablescatalog
-        databaseName: s3TableNamespaceDatabaseNameInS3TablesCatalog, // Full path to namespace within s3tablescatalog
+        catalogId: accountId, // Lake Formation Permissions always use AWS Account ID as catalogId
+        databaseName: lfS3TableDbName, // Fully qualified name of the S3 Table namespace in the default catalog
         name: s3Table.name,                               // The S3 Table name
       },
     }, { dependsOn: [firehoseRole, s3Table, lfPermOnTargetNamespace] });
