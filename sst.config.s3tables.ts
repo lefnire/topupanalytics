@@ -228,22 +228,24 @@ export default $config({
     }, { dependsOn: [firehoseRole, s3TableNamespaceLink] });
 
     // 5.2. Grant Firehose role permissions on the *target* S3 Table Namespace
+    // These permissions are now granted on the Glue Resource Link, treating it as the database.
     const lfPermOnTargetNamespace = new aws.lakeformation.Permissions("lfPermOnTargetNamespace", {
       principal: firehoseRole.arn,
-      permissions: ["DESCRIBE", "ALTER", "CREATE_TABLE", "DROP"],
+      permissions: ["ALTER", "CREATE_TABLE", "DROP"], // DESCRIBE is on lfPermOnResourceLink
       database: {
-        catalogId: accountId, // Lake Formation Permissions always use AWS Account ID as catalogId
-        name: lfS3TableDbName, // Fully qualified name of the S3 Table namespace in the default catalog
+        catalogId: accountId, // The Resource Link is in the default account catalog
+        name: s3TableNamespaceLink.name, // Target the Glue Resource Link name
       },
-    }, { dependsOn: [firehoseRole, s3TableNamespace, s3TableBucket, s3TableNamespaceLink] });
+    }, { dependsOn: [firehoseRole, s3TableNamespace, s3TableBucket, s3TableNamespaceLink, lfPermOnResourceLink] });
 
     // 5.3. Grant Firehose role permissions on the *target* S3 Table
+    // The table is identified within the database represented by the Glue Resource Link.
     const lfPermOnTargetTable = new aws.lakeformation.Permissions("lfPermOnTargetTable", {
       principal: firehoseRole.arn,
       permissions: ["SELECT", "INSERT", "DELETE", "DESCRIBE", "ALTER"],
       table: {
-        catalogId: accountId, // Lake Formation Permissions always use AWS Account ID as catalogId
-        databaseName: lfS3TableDbName, // Fully qualified name of the S3 Table namespace in the default catalog
+        catalogId: accountId, // The Resource Link (acting as DB) is in the default account catalog
+        databaseName: s3TableNamespaceLink.name, // Target the Glue Resource Link name as the database
         name: s3Table.name,                               // The S3 Table name
       },
     }, { dependsOn: [firehoseRole, s3Table, lfPermOnTargetNamespace] });
