@@ -206,8 +206,8 @@ export default $config({
       name: firehoseResourceLinkName,
       catalogId: accountId, // Link created in the default account catalog
       targetDatabase: {
-        catalogId: "s3tablescatalog", // Target the top-level s3tablescatalog
-        databaseName: s3TableNamespaceDatabaseNameInS3TablesCatalog, // Path to namespace within s3tablescatalog
+        catalogId: accountId, // Target catalog is the default account catalog
+        databaseName: lfS3TableDbName, // Fully qualified name of the S3 Table namespace in the default catalog
         // region: region.name, // Only specify if target is in different region
       },
       // createTableDefaultPermissions: [] // Not directly applicable here, manage via LF
