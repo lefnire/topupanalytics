@@ -227,28 +227,24 @@ export default $config({
       },
     }, { dependsOn: [firehoseRole, s3TableNamespaceLink] });
 
-    // 5.2. Grant Firehose role permissions on the *target* S3 Table Namespace
-    // These permissions are granted directly on the S3 Table namespace within the "s3tablescatalog".
-    const lfPermOnTargetNamespace = new aws.lakeformation.Permissions("lfPermOnTargetNamespace", {
-      principal: firehoseRole.arn,
-      permissions: ["DESCRIBE", "ALTER", "CREATE_TABLE"], // Added DESCRIBE, removed DROP as per typical Firehose needs
-      database: {
-        catalogId: "s3tablescatalog",
-        name: s3TableNamespaceDatabaseNameInS3TablesCatalog,
-      },
-    }, { dependsOn: [firehoseRole, s3TableNamespace, s3TableBucket] }); // Removed link dependencies as we target the actual DB in s3tablescatalog
+    // lfPermOnTargetNamespace has been removed as per simplification strategy.
+    // Database DDL-like permissions (ALTER, CREATE_TABLE, DROP) if needed by Firehose for the
+    // S3 Table (which is rare, as Firehose primarily appends/updates data and schema based on data)
+    // would typically be granted on the resource link itself or its target,
+    // but often Firehose only needs describe on link and then table permissions.
+    // For now, we assume DESCRIBE on link (lfPermOnResourceLink) + table permissions (lfPermOnTargetTable) are sufficient.
 
     // 5.3. Grant Firehose role permissions on the *target* S3 Table
-    // The table is identified within the "s3tablescatalog".
+    // The table is identified within the database represented by the Glue Resource Link.
     const lfPermOnTargetTable = new aws.lakeformation.Permissions("lfPermOnTargetTable", {
       principal: firehoseRole.arn,
-      permissions: ["SELECT", "INSERT", "DELETE", "DESCRIBE", "ALTER"],
+      permissions: ["SELECT", "INSERT", "ALTER", "DESCRIBE"], // DELETE removed, less common for Firehose
       table: {
-        catalogId: "s3tablescatalog",
-        databaseName: s3TableNamespaceDatabaseNameInS3TablesCatalog,
+        catalogId: accountId, // The Resource Link (acting as DB) is in the default account catalog
+        databaseName: s3TableNamespaceLink.name, // Target the Glue Resource Link name as the database
         name: s3Table.name,                               // The S3 Table name
       },
-    }, { dependsOn: [firehoseRole, s3Table, lfPermOnTargetNamespace] });
+    }, { dependsOn: [firehoseRole, s3Table, lfPermOnResourceLink, s3TableNamespaceLink] }); // Depends on the link and the resource link permission
 
     // 6. Kinesis Firehose Delivery Stream
     const firehoseDeliveryStream = new aws.kinesis.FirehoseDeliveryStream("firehoseDeliveryStream", {
@@ -287,7 +283,7 @@ export default $config({
     }, {
       dependsOn: [
         lfPermOnResourceLink,
-        lfPermOnTargetNamespace,
+        // lfPermOnTargetNamespace, // Removed
         lfPermOnTargetTable,
         firehoseRole, // Role and policy attachment implicitly handled by using firehoseRole.arn
         backupS3Bucket,
