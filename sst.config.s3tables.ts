@@ -1,3 +1,35 @@
+/*
+====================================================================================================
+IMPORTANT PREREQUISITE FOR AWS S3 TABLES:
+====================================================================================================
+
+This stack utilizes AWS S3 Tables. Before deploying this stack (e.g., via `pulumi up` or `sst deploy`),
+you MUST perform a one-time manual setup in the AWS Management Console for the specific AWS region
+where this stack will be deployed.
+
+Action Needed:
+1. Navigate to the AWS Lake Formation console or the Amazon S3 console settings.
+2. Look for an option related to "S3 Tables," "AWS analytics services integration," or "Application
+   integration settings" (the exact phrasing may vary by region or console updates).
+   In the S3 console, this might be under an "Application integration" tab when viewing S3 features.
+3. Enable this integration.
+
+What this manual action does:
+This step provisions necessary background resources required by S3 Tables, which typically include:
+  - A Glue Data Catalog database (which acts as a catalog) named `s3tablescatalog`.
+  - An IAM Role, often named `S3TablesRoleForLakeFormation` (or similar).
+  - An IAM Policy, often named `S3TablesPolicyForLakeFormation` (or similar).
+
+CRITICAL WARNING:
+Failure to complete this manual setup BEFORE deploying the stack will likely result in deployment
+errors. These errors may occur when Pulumi attempts to create S3 Tables resources, Glue Resource
+Links to S3 Table namespaces, or related Lake Formation permissions. Common errors include
+"Catalog not found" (referring to `s3tablescatalog`) or permission issues related to accessing
+or configuring resources within `s3tablescatalog`.
+
+Please ensure this prerequisite is met to avoid deployment failures.
+====================================================================================================
+*/
 /// <reference path="./.sst/platform/config.d.ts" />
 
 // Prerequisite: Manually enable S3 Tables integration with AWS Analytics Services
@@ -163,12 +195,16 @@ export default $config({
     });
 
     // 4. Glue Resource Link to the S3 Table Namespace
+    // Construct the database name for the S3 Table Namespace within the s3tablescatalog.
+    // This follows the pattern: <ACCOUNTID>_<S3_TABLE_BUCKET_NAME>/<NAMESPACE_NAME>
+    const s3TableNamespaceDatabaseNameInS3TablesCatalog = $interpolate`${accountId}_${s3TableBucket.name}/${s3TableNamespace.namespace}`;
+
     const s3TableNamespaceLink = new aws.glue.CatalogDatabase("s3TableNamespaceLink", {
       name: firehoseResourceLinkName,
       catalogId: accountId, // Link created in the default account catalog
       targetDatabase: {
-        catalogId: $interpolate`${accountId}:s3tablescatalog/${accountId}_${s3TableBucket.name}`, // Corrected target catalog ID for S3 Tables
-        databaseName: s3TableNamespace.namespace,
+        catalogId: "s3tablescatalog", // Target the top-level s3tablescatalog
+        databaseName: s3TableNamespaceDatabaseNameInS3TablesCatalog, // Full path to namespace within s3tablescatalog
         // region: region.name, // Only specify if target is in different region
       },
       // createTableDefaultPermissions: [] // Not directly applicable here, manage via LF
@@ -188,18 +224,13 @@ export default $config({
       },
     }, { dependsOn: [firehoseRole, s3TableNamespaceLink] });
 
-    // Construct the Lake Formation database name for the S3 Table Namespace.
-    // This follows the pattern: s3tablescatalog/<ACCOUNTID>_<S3_TABLE_BUCKET_NAME>/<NAMESPACE_NAME>
-    // and is referenced within the default account catalog.
-    const s3TableNamespaceLfDatabaseName = $interpolate`s3tablescatalog/${accountId}_${s3TableBucket.name}/${s3TableNamespace.namespace}`;
-
     // 5.2. Grant Firehose role permissions on the *target* S3 Table Namespace
     const lfPermOnTargetNamespace = new aws.lakeformation.Permissions("lfPermOnTargetNamespace", {
       principal: firehoseRole.arn,
       permissions: ["DESCRIBE", "ALTER", "CREATE_TABLE", "DROP"],
       database: {
-        catalogId: accountId, // S3 Table namespaces are databases in the default account catalog for LF
-        name: s3TableNamespaceLfDatabaseName,
+        catalogId: "s3tablescatalog", // Target the top-level s3tablescatalog
+        name: s3TableNamespaceDatabaseNameInS3TablesCatalog, // Full path to namespace within s3tablescatalog
       },
     }, { dependsOn: [firehoseRole, s3TableNamespace, s3TableBucket, s3TableNamespaceLink] });
 
@@ -208,8 +239,8 @@ export default $config({
       principal: firehoseRole.arn,
       permissions: ["SELECT", "INSERT", "DELETE", "DESCRIBE", "ALTER"],
       table: {
-        catalogId: accountId, // S3 Tables are in the default account catalog for LF
-        databaseName: s3TableNamespaceLfDatabaseName, // Parent "database" for the S3 table
+        catalogId: "s3tablescatalog", // Target the top-level s3tablescatalog
+        databaseName: s3TableNamespaceDatabaseNameInS3TablesCatalog, // Full path to namespace within s3tablescatalog
         name: s3Table.name,                               // The S3 Table name
       },
     }, { dependsOn: [firehoseRole, s3Table, lfPermOnTargetNamespace] });
