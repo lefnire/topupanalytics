@@ -215,8 +215,63 @@ export default $config({
 
     // 5. Lake Formation Permissions (New Strategy)
 
+    /*
+    ====================================================================================================
+    MANUAL LAKE FORMATION PERMISSIONS REQUIRED FOR FIREHOSE ROLE:
+    ====================================================================================================
+
+    Purpose:
+    Due to the complexity of managing cross-catalog Lake Formation grants for S3 Tables via Pulumi,
+    and to ensure precise control, the core operational permissions for the Kinesis Firehose role
+    on the target S3 Table Namespace and Table MUST BE CONFIGURED MANUALLY in the AWS Lake Formation
+    console. This Pulumi script only provisions the minimal `DESCRIBE` permission on the Glue Resource
+    Link (`LfPermDescribeLink`) to allow Firehose to recognize the link.
+
+    Instructions for Manual Configuration:
+
+    1.  Principal (Grantee):
+        The Firehose IAM Role ARN. After deployment, get this value from Pulumi outputs or AWS console.
+        It will be the ARN of the role: `${firehoseRole.name}` (Pulumi variable: `firehoseRole.arn`).
+
+    2.  Navigate to AWS Lake Formation Console:
+        Go to: Data catalog -> Databases (or Tables).
+        Ensure you are operating within the correct AWS region.
+
+    3.  Grant Permissions on the S3 Table Namespace (Database in `s3tablescatalog`):
+        -   Data Catalog: Select the `s3tablescatalog` from the dropdown (if available, otherwise it's implied
+            when you search for the database by name).
+        -   Database Name: The value of `s3TableNamespaceDatabaseNameInS3TablesCatalog`
+            (e.g., `${s3TableNamespaceDatabaseNameInS3TablesCatalog}`).
+        -   Required Database Permissions for the Firehose Role:
+            -   `DESCRIBE` (or "Describe" in console UI)
+            -   `ALTER` (or "Alter" in console UI)
+            -   `CREATE_TABLE` (or "Create table" in console UI)
+
+    4.  Grant Permissions on the S3 Table (within the above Database in `s3tablescatalog`):
+        -   Data Catalog: `s3tablescatalog`
+        -   Database Name: As above (`s3TableNamespaceDatabaseNameInS3TablesCatalog`).
+        -   Table Name: The value of `s3Table.name` (e.g., `${s3TableName}`).
+        -   Required Table Permissions for the Firehose Role:
+            -   `SELECT`
+            -   `INSERT`
+            -   `DELETE`
+            -   `DESCRIBE` (or "Describe" in console UI)
+            -   `ALTER` (or "Alter" in console UI)
+
+    Reason for these permissions:
+    These permissions are essential for Kinesis Firehose to:
+    - Deliver data to the S3 Table.
+    - Manage the table's schema if schema evolution or inference is configured in Firehose.
+    - Perform other necessary operations as part of the data delivery process under
+      Lake Formation governance.
+
+    CRITICAL: Failure to set these manual permissions correctly will likely result in
+    Firehose delivery failures, even if the Pulumi stack deploys successfully.
+    ====================================================================================================
+    */
+
     // 5.1. LfPermDescribeLink: Grants DESCRIBE permission on the Glue Resource Link.
-    // This allows Firehose to "see" the link.
+    // This allows Firehose to "see" the link. This permission is managed by Pulumi.
     const LfPermDescribeLink = new aws.lakeformation.Permissions("LfPermDescribeLink", {
       principal: firehoseRole.arn,
       permissions: ["DESCRIBE"],
@@ -226,29 +281,9 @@ export default $config({
       },
     }, { dependsOn: [firehoseRole, s3TableNamespaceLink] });
 
-    // 5.2. LfPermDb: Grants DESCRIBE permission on the target S3 Table's actual database path in Glue.
-    // This is needed so Lake Formation can find the database when granting table permissions.
-    // lfS3TableDbName is like "s3tablescatalog/ACCOUNTID_BUCKET/NAMESPACE"
-    const LfPermDb = new aws.lakeformation.Permissions("LfPermDb", {
-      principal: firehoseRole.arn,
-      permissions: ["DESCRIBE"],
-      database: {
-        catalogId: accountId, // S3 Table's database is registered in the default account catalog
-        name: lfS3TableDbName,  // The fully qualified path to the S3 Table's database/namespace
-      },
-    }, { dependsOn: [firehoseRole, s3TableNamespace, s3TableBucket, s3TableNamespaceLink] }); // Depends on resources forming lfS3TableDbName
-
-    // 5.3. LfPermTable: Grants table-level permissions (SELECT, INSERT, ALTER, DESCRIBE) on the S3 Table.
-    // This refers to the table within its actual database path.
-    const LfPermTable = new aws.lakeformation.Permissions("LfPermTable", {
-      principal: firehoseRole.arn,
-      permissions: ["SELECT", "INSERT", "ALTER", "DESCRIBE"],
-      table: {
-        catalogId: accountId, // S3 Table is registered in the default account catalog
-        databaseName: lfS3TableDbName, // The fully qualified path to the S3 Table's database/namespace
-        name: s3Table.name, // The actual name of the S3 Table
-      },
-    }, { dependsOn: [firehoseRole, s3Table, LfPermDb] }); // Depends on LfPermDb for database existence
+    // LfPermDb and LfPermTable have been removed as per the hybrid/minimal LF strategy.
+    // It's assumed that necessary table/data permissions beyond describing the link
+    // (as detailed in the comment block above) will be managed manually or by the S3 Tables service role capabilities.
 
     // 6. Kinesis Firehose Delivery Stream
     const firehoseDeliveryStream = new aws.kinesis.FirehoseDeliveryStream("firehoseDeliveryStream", {
@@ -287,7 +322,7 @@ export default $config({
     }, {
       dependsOn: [
         LfPermDescribeLink, // Depends on DESCRIBE permission for the link
-        LfPermTable,        // Depends on Table permissions (which includes DB DESCRIBE via LfPermDb)
+        // LfPermTable,     // Removed
         firehoseRole,
         backupS3Bucket,
         s3TableNamespaceLink,
