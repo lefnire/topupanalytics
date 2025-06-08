@@ -74,7 +74,7 @@ export default $config({
       removal: input?.stage === "production" ? "retain" : "remove",
       protect: ["production"].includes(input?.stage ?? ''),
       home: "aws",
-      providers: { aws: true }, // Assuming SST handles provider configuration
+      providers: { aws: true, command: "1.0.2" }, // Assuming SST handles provider configuration
     };
   },
   async run() {
@@ -236,52 +236,50 @@ export default $config({
     // Corrected path for direct use with s3tablescatalog as catalogId
     const s3TableDbPathInS3TablesCatalog = $interpolate`${s3TableBucket.name}/${s3TableNamespace.namespace}`;
 
-    const s3TableNamespaceLink = new aws.glue.CatalogDatabase("s3TableNamespaceLink", {
-      name: firehoseResourceLinkName,
-      catalogId: accountId, // Link created in the default account catalog
-      targetDatabase: {
-        catalogId: "s3tablescatalog", // Target the top-level s3tablescatalog
-        databaseName: s3TableNamespaceDatabaseNameInS3TablesCatalog, // Path to namespace within s3tablescatalog
-        // region: region.name, // Only specify if target is in different region
-      },
-      // createTableDefaultPermissions: [] // Not directly applicable here, manage via LF
+    // 4. Glue Resource Link to the S3 Table Namespace (via AWS CLI)
+    const s3TableNamespaceLink = new command.local.Command("s3TableNamespaceLink", {
+      create: $interpolate`aws glue create-database --database-input '{
+        "Name": "${firehoseResourceLinkName}",
+        "TargetDatabase": {
+          "CatalogId": "s3tablescatalog",
+          "DatabaseName": "${s3TableNamespaceDatabaseNameInS3TablesCatalog}"
+        }
+      }'`,
+      delete: $interpolate`aws glue delete-database --name ${firehoseResourceLinkName}`,
     }, { dependsOn: [s3TableBucket, s3TableNamespace] });
 
-    // 5. Lake Formation Permissions (New Strategy)
-
-    // 5.1. LfPermDescribeLink: Grants DESCRIBE permission on the Glue Resource Link.
-    // This allows Firehose to "see" the link.
-    const LfPermDescribeLink = new aws.lakeformation.Permissions("LfPermDescribeLink", {
-      principal: firehoseRole.arn,
-      permissions: ["DESCRIBE"],
-      database: { // Referring to the Glue Resource Link as a database object
-        catalogId: accountId, // The link itself is in the default account catalog
-        name: s3TableNamespaceLink.name, // The name of the Glue Resource Link
-      },
-    }, { dependsOn: [firehoseRole, s3TableNamespaceLink] });
-
-    // 5.2. LfPermDb: Grants DESCRIBE permission on the target S3 Table's actual database path in Glue.
-    // This is needed so Lake Formation can find the database when granting table permissions.
-    const LfPermDb = new aws.lakeformation.Permissions("LfPermDb", {
-      principal: firehoseRole.arn,
-      permissions: ["DESCRIBE"],
-      database: {
-        catalogId: "s3tablescatalog", // Changed
-        name: s3TableDbPathInS3TablesCatalog,  // Changed
-      },
+    // 5. Lake Formation Permissions (via AWS CLI)
+    const lfPermDb = new command.local.Command("LfPermDb", {
+        create: $interpolate`aws lakeformation grant-permissions --principal ${firehoseRole.arn} --permissions '["DESCRIBE"]' --resource '{
+        "Database": {
+          "CatalogId": "s3tablescatalog",
+          "Name": "${s3TableDbPathInS3TablesCatalog}"
+        }
+      }'`,
+        delete: $interpolate`aws lakeformation revoke-permissions --principal ${firehoseRole.arn} --permissions '["DESCRIBE"]' --resource '{
+        "Database": {
+          "CatalogId": "s3tablescatalog",
+          "Name": "${s3TableDbPathInS3TablesCatalog}"
+        }
+      }'`,
     }, { dependsOn: [firehoseRole, s3TableNamespace, s3TableBucket] });
 
-    // 5.3. LfPermTable: Grants table-level permissions (SELECT, INSERT, ALTER, DESCRIBE) on the S3 Table.
-    // This refers to the table within its actual database path.
-    const LfPermTable = new aws.lakeformation.Permissions("LfPermTable", {
-      principal: firehoseRole.arn,
-      permissions: ["SELECT", "INSERT", "ALTER", "DESCRIBE"],
-      table: {
-        catalogId: "s3tablescatalog", // Changed
-        databaseName: s3TableDbPathInS3TablesCatalog, // Changed
-        name: s3Table.name, // The actual name of the S3 Table
-      },
-    }, { dependsOn: [firehoseRole, s3Table, LfPermDb] }); // Depends on LfPermDb for database existence
+    const lfPermTable = new command.local.Command("LfPermTable", {
+        create: $interpolate`aws lakeformation grant-permissions --principal ${firehoseRole.arn} --permissions '["SELECT", "INSERT", "ALTER", "DESCRIBE"]' --resource '{
+        "Table": {
+          "CatalogId": "s3tablescatalog",
+          "DatabaseName": "${s3TableDbPathInS3TablesCatalog}",
+          "Name": "${s3Table.name}"
+        }
+      }'`,
+        delete: $interpolate`aws lakeformation revoke-permissions --principal ${firehoseRole.arn} --permissions '["SELECT", "INSERT", "ALTER", "DESCRIBE"]' --resource '{
+        "Table": {
+          "CatalogId": "s3tablescatalog",
+          "DatabaseName": "${s3TableDbPathInS3TablesCatalog}",
+          "Name": "${s3Table.name}"
+        }
+      }'`,
+    }, { dependsOn: [firehoseRole, s3Table, lfPermDb] });
 
     // 6. Kinesis Firehose Delivery Stream
     const firehoseDeliveryStream = new aws.kinesis.FirehoseDeliveryStream("firehoseDeliveryStream", {
@@ -303,7 +301,7 @@ export default $config({
           }
         },
         destinationTableConfigurations: [{
-          databaseName: s3TableNamespaceLink.name, // Firehose targets the *resource link name* as the database
+          databaseName: firehoseResourceLinkName, // Firehose targets the *resource link name* as the database
           tableName: s3Table.name, // And the S3 table name within that logical DB (link)
         }],
         // Optional: processingConfiguration for Lambda transformations or JQ parsing
@@ -319,8 +317,7 @@ export default $config({
       // },
     }, {
       dependsOn: [
-        LfPermDescribeLink, // Depends on DESCRIBE permission for the link
-        LfPermTable,        // Depends on Table permissions (which includes DB DESCRIBE via LfPermDb)
+        lfPermTable,
         firehoseRole,
         backupS3Bucket,
         s3TableNamespaceLink,
@@ -333,7 +330,7 @@ export default $config({
       s3TableNamespaceName: s3TableNamespace.namespace,
       s3TableName: s3Table.name,
       firehoseRoleArn: firehoseRole.arn,
-      glueResourceLinkName: s3TableNamespaceLink.name,
+      glueResourceLinkName: firehoseResourceLinkName,
       firehoseBackupS3BucketName: backupS3Bucket.bucket,
       firehoseDeliveryStreamName: firehoseDeliveryStream.name,
       firehoseDeliveryStreamArn: firehoseDeliveryStream.arn,
