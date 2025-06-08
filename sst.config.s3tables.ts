@@ -1,71 +1,43 @@
 /*
 ====================================================================================================
-MANDATORY PREREQUISITE: MANUAL AWS S3 TABLES INTEGRATION SETUP
+MANDATORY PREREQUISITE: Enable S3 Tables Integration in AWS
 ====================================================================================================
 
-**CRITICAL: A one-time manual setup in the AWS Management Console is REQUIRED before running `pulumi up` or `sst deploy` for this stack.**
+**CRITICAL: Before deploying this stack, you must perform a one-time manual setup in the AWS
+Management Console for the target AWS Region.**
 
-This setup integrates S3 Tables with AWS analytics services (Glue, Lake Formation) for the AWS Region where you intend to deploy S3 Tables.
+This stack provisions an AWS Kinesis Firehose stream to deliver data into an S3 Table (Iceberg
+format). This requires a foundational integration between Amazon S3, AWS Glue, and AWS Lake
+Formation, which must be enabled manually.
 
 ----------------------------------------------------------------------------------------------------
-Step-by-Step Instructions for AWS Console Setup (Perform ONCE PER AWS REGION):
+Instructions (Perform ONCE PER AWS REGION):
 ----------------------------------------------------------------------------------------------------
 1.  Navigate to the Amazon S3 console.
-2.  In the left-hand navigation pane, find and click on "S3 Tables".
-    *   Alternatively, look for "Application integration" settings within S3 if "S3 Tables" isn't directly visible.
-3.  Click the button to enable or create the integration. This button might be labeled:
-    *   "Enable analytics"
-    *   "Enable integration with AWS analytics services"
-    *   "Create integration"
-    *   (The exact wording may vary based on AWS console updates).
-4.  Confirm the action if prompted. This process needs to be done only once per AWS Region.
+2.  In the left navigation, click on "S3 Tables".
+3.  Click the button to "Enable integration with AWS analytics services" (or similar wording).
 
-----------------------------------------------------------------------------------------------------
-What This Manual Action Accomplishes:
-----------------------------------------------------------------------------------------------------
-This manual step provisions the foundational AWS resources required for S3 Tables to function with other AWS services:
-*   **AWS Glue Data Catalog Creation:** Creates a specific AWS Glue Data Catalog named `s3tablescatalog`.
-    This catalog will store metadata for your S3 tables.
-*   **IAM Service Role Creation:** Creates an IAM service-linked role for AWS Lake Formation.
-    The role name is typically `AWSServiceRoleForS3Table` or similar (e.g., `S3TablesRoleForLakeFormation`).
-    This role grants Lake Formation necessary permissions to manage data in your S3 table buckets.
-*   **Lake Formation Registration:** Registers your S3 table buckets with Lake Formation using the created service role,
-    allowing Lake Formation to govern access to the data.
+This manual step creates the `s3tablescatalog` in AWS Glue and the necessary service-linked IAM
+role for Lake Formation. This stack depends on these resources. Failure to complete this step will
+result in deployment errors, typically "Catalog not found" or Lake Formation permission issues.
 
-----------------------------------------------------------------------------------------------------
-How to Verify Successful Completion:
-----------------------------------------------------------------------------------------------------
-1.  **Verify Glue Catalog `s3tablescatalog`:**
-    *   Go to the AWS Glue console.
-    *   In the navigation pane, under "Data Catalog," click on "Catalogs" (or "Databases" then check if `s3tablescatalog` can be selected or viewed as a top-level catalog).
-    *   Confirm that `s3tablescatalog` is listed.
-2.  **Verify IAM Role for Lake Formation:**
-    *   Go to the IAM console.
-    *   In the navigation pane, click on "Roles."
-    *   Search for a role named `AWSServiceRoleForS3Table` or `S3TablesRoleForLakeFormation`.
-    *   Note: Service-linked roles might have different visibility/management options. The key is that Lake Formation integration is functional, which is confirmed by the `s3tablescatalog` and successful S3 Table operations. The AWS documentation states: "Creates a new AWS Identity and Access Management (IAM) service role that gives Lake Formation access to all your table buckets."
-
-----------------------------------------------------------------------------------------------------
-Consequences of Not Performing This Step:
-----------------------------------------------------------------------------------------------------
-Failure to complete this manual setup BEFORE deploying the stack will result in deployment errors.
-Common errors include:
-*   "Catalog not found" (referring to `s3tablescatalog`).
-*   Permission errors related to Lake Formation or Glue when trying to create or access S3 Table resources.
-
-----------------------------------------------------------------------------------------------------
-Reference:
-----------------------------------------------------------------------------------------------------
-For more details, refer to the official AWS documentation:
+For more details, see the official AWS documentation:
 https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-integrating-aws.html
+
+----------------------------------------------------------------------------------------------------
+What this Stack Automates:
+----------------------------------------------------------------------------------------------------
+Once the prerequisite is met, this script automates the creation of:
+*   The S3 Table, Namespace, and underlying bucket.
+*   A Kinesis Firehose delivery stream targeting the S3 Table.
+*   A backup S3 bucket for Firehose.
+*   The necessary IAM Role and granular permissions for Firehose.
+*   A Glue Resource Link to bridge the default catalog with the `s3tablescatalog`.
+*   Specific Lake Formation permissions for the Firehose role to access the S3 Table.
 ====================================================================================================
 */
 /// <reference path="./.sst/platform/config.d.ts" />
 
-// Prerequisite: Manually enable S3 Tables integration with AWS Analytics Services
-// in the AWS console for the target region *before running this stack*.
-// This action creates the 's3tablescatalog' in AWS Glue and the necessary
-// 'S3TablesRoleForLakeFormation' IAM role and 'S3TablesPolicyForLakeFormation' policy.
 
 export default $config({
   app(input) {
@@ -241,8 +213,8 @@ export default $config({
       create: $interpolate`aws glue create-database --database-input '{
         "Name": "${firehoseResourceLinkName}",
         "TargetDatabase": {
-          "CatalogId": "s3tablescatalog",
-          "DatabaseName": "${s3TableNamespaceDatabaseNameInS3TablesCatalog}"
+          "CatalogId": "${accountId}:s3tablescatalog/${s3TableBucket.name}",
+          "DatabaseName": "${s3TableNamespace.namespace}"
         }
       }'`,
       delete: $interpolate`aws glue delete-database --name ${firehoseResourceLinkName}`,
@@ -250,32 +222,32 @@ export default $config({
 
     // 5. Lake Formation Permissions (via AWS CLI)
     const lfPermDb = new command.local.Command("LfPermDb", {
-        create: $interpolate`aws lakeformation grant-permissions --principal ${firehoseRole.arn} --permissions '["DESCRIBE"]' --resource '{
+        create: $interpolate`aws lakeformation grant-permissions --principal DataLakePrincipalIdentifier='${firehoseRole.arn}' --permissions '["DESCRIBE"]' --resource '{
         "Database": {
-          "CatalogId": "s3tablescatalog",
-          "Name": "${s3TableDbPathInS3TablesCatalog}"
+          "CatalogId": "${accountId}:s3tablescatalog/${s3TableBucket.name}",
+          "Name": "${s3TableNamespace.namespace}"
         }
       }'`,
-        delete: $interpolate`aws lakeformation revoke-permissions --principal ${firehoseRole.arn} --permissions '["DESCRIBE"]' --resource '{
+        delete: $interpolate`aws lakeformation revoke-permissions --principal DataLakePrincipalIdentifier='${firehoseRole.arn}' --permissions '["DESCRIBE"]' --resource '{
         "Database": {
-          "CatalogId": "s3tablescatalog",
-          "Name": "${s3TableDbPathInS3TablesCatalog}"
+          "CatalogId": "${accountId}:s3tablescatalog/${s3TableBucket.name}",
+          "Name": "${s3TableNamespace.namespace}"
         }
       }'`,
     }, { dependsOn: [firehoseRole, s3TableNamespace, s3TableBucket] });
 
     const lfPermTable = new command.local.Command("LfPermTable", {
-        create: $interpolate`aws lakeformation grant-permissions --principal ${firehoseRole.arn} --permissions '["SELECT", "INSERT", "ALTER", "DESCRIBE"]' --resource '{
+        create: $interpolate`aws lakeformation grant-permissions --principal DataLakePrincipalIdentifier='${firehoseRole.arn}' --permissions '["SELECT", "INSERT", "ALTER", "DESCRIBE"]' --resource '{
         "Table": {
-          "CatalogId": "s3tablescatalog",
-          "DatabaseName": "${s3TableDbPathInS3TablesCatalog}",
+          "CatalogId": "${accountId}:s3tablescatalog/${s3TableBucket.name}",
+          "DatabaseName": "${s3TableNamespace.namespace}",
           "Name": "${s3Table.name}"
         }
       }'`,
-        delete: $interpolate`aws lakeformation revoke-permissions --principal ${firehoseRole.arn} --permissions '["SELECT", "INSERT", "ALTER", "DESCRIBE"]' --resource '{
+        delete: $interpolate`aws lakeformation revoke-permissions --principal DataLakePrincipalIdentifier='${firehoseRole.arn}' --permissions '["SELECT", "INSERT", "ALTER", "DESCRIBE"]' --resource '{
         "Table": {
-          "CatalogId": "s3tablescatalog",
-          "DatabaseName": "${s3TableDbPathInS3TablesCatalog}",
+          "CatalogId": "${accountId}:s3tablescatalog/${s3TableBucket.name}",
+          "DatabaseName": "${s3TableNamespace.namespace}",
           "Name": "${s3Table.name}"
         }
       }'`,
