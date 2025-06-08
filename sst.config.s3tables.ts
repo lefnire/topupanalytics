@@ -1,33 +1,63 @@
 /*
 ====================================================================================================
-IMPORTANT PREREQUISITE FOR AWS S3 TABLES:
+MANDATORY PREREQUISITE: MANUAL AWS S3 TABLES INTEGRATION SETUP
 ====================================================================================================
 
-This stack utilizes AWS S3 Tables. Before deploying this stack (e.g., via `pulumi up` or `sst deploy`),
-you MUST perform a one-time manual setup in the AWS Management Console for the specific AWS region
-where this stack will be deployed.
+**CRITICAL: A one-time manual setup in the AWS Management Console is REQUIRED before running `pulumi up` or `sst deploy` for this stack.**
 
-Action Needed:
-1. Navigate to the AWS Lake Formation console or the Amazon S3 console settings.
-2. Look for an option related to "S3 Tables," "AWS analytics services integration," or "Application
-   integration settings" (the exact phrasing may vary by region or console updates).
-   In the S3 console, this might be under an "Application integration" tab when viewing S3 features.
-3. Enable this integration.
+This setup integrates S3 Tables with AWS analytics services (Glue, Lake Formation) for the AWS Region where you intend to deploy S3 Tables.
 
-What this manual action does:
-This step provisions necessary background resources required by S3 Tables, which typically include:
-  - A Glue Data Catalog database (which acts as a catalog) named `s3tablescatalog`.
-  - An IAM Role, often named `S3TablesRoleForLakeFormation` (or similar).
-  - An IAM Policy, often named `S3TablesPolicyForLakeFormation` (or similar).
+----------------------------------------------------------------------------------------------------
+Step-by-Step Instructions for AWS Console Setup (Perform ONCE PER AWS REGION):
+----------------------------------------------------------------------------------------------------
+1.  Navigate to the Amazon S3 console.
+2.  In the left-hand navigation pane, find and click on "S3 Tables".
+    *   Alternatively, look for "Application integration" settings within S3 if "S3 Tables" isn't directly visible.
+3.  Click the button to enable or create the integration. This button might be labeled:
+    *   "Enable analytics"
+    *   "Enable integration with AWS analytics services"
+    *   "Create integration"
+    *   (The exact wording may vary based on AWS console updates).
+4.  Confirm the action if prompted. This process needs to be done only once per AWS Region.
 
-CRITICAL WARNING:
-Failure to complete this manual setup BEFORE deploying the stack will likely result in deployment
-errors. These errors may occur when Pulumi attempts to create S3 Tables resources, Glue Resource
-Links to S3 Table namespaces, or related Lake Formation permissions. Common errors include
-"Catalog not found" (referring to `s3tablescatalog`) or permission issues related to accessing
-or configuring resources within `s3tablescatalog`.
+----------------------------------------------------------------------------------------------------
+What This Manual Action Accomplishes:
+----------------------------------------------------------------------------------------------------
+This manual step provisions the foundational AWS resources required for S3 Tables to function with other AWS services:
+*   **AWS Glue Data Catalog Creation:** Creates a specific AWS Glue Data Catalog named `s3tablescatalog`.
+    This catalog will store metadata for your S3 tables.
+*   **IAM Service Role Creation:** Creates an IAM service-linked role for AWS Lake Formation.
+    The role name is typically `AWSServiceRoleForS3Table` or similar (e.g., `S3TablesRoleForLakeFormation`).
+    This role grants Lake Formation necessary permissions to manage data in your S3 table buckets.
+*   **Lake Formation Registration:** Registers your S3 table buckets with Lake Formation using the created service role,
+    allowing Lake Formation to govern access to the data.
 
-Please ensure this prerequisite is met to avoid deployment failures.
+----------------------------------------------------------------------------------------------------
+How to Verify Successful Completion:
+----------------------------------------------------------------------------------------------------
+1.  **Verify Glue Catalog `s3tablescatalog`:**
+    *   Go to the AWS Glue console.
+    *   In the navigation pane, under "Data Catalog," click on "Catalogs" (or "Databases" then check if `s3tablescatalog` can be selected or viewed as a top-level catalog).
+    *   Confirm that `s3tablescatalog` is listed.
+2.  **Verify IAM Role for Lake Formation:**
+    *   Go to the IAM console.
+    *   In the navigation pane, click on "Roles."
+    *   Search for a role named `AWSServiceRoleForS3Table` or `S3TablesRoleForLakeFormation`.
+    *   Note: Service-linked roles might have different visibility/management options. The key is that Lake Formation integration is functional, which is confirmed by the `s3tablescatalog` and successful S3 Table operations. The AWS documentation states: "Creates a new AWS Identity and Access Management (IAM) service role that gives Lake Formation access to all your table buckets."
+
+----------------------------------------------------------------------------------------------------
+Consequences of Not Performing This Step:
+----------------------------------------------------------------------------------------------------
+Failure to complete this manual setup BEFORE deploying the stack will result in deployment errors.
+Common errors include:
+*   "Catalog not found" (referring to `s3tablescatalog`).
+*   Permission errors related to Lake Formation or Glue when trying to create or access S3 Table resources.
+
+----------------------------------------------------------------------------------------------------
+Reference:
+----------------------------------------------------------------------------------------------------
+For more details, refer to the official AWS documentation:
+https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-integrating-aws.html
 ====================================================================================================
 */
 /// <reference path="./.sst/platform/config.d.ts" />
@@ -196,10 +226,11 @@ export default $config({
 
     // 4. Glue Resource Link to the S3 Table Namespace
     // Construct the database name for the S3 Table Namespace within the s3tablescatalog.
-    // This follows the pattern: <ACCOUNTID>_<S3_TABLE_BUCKET_NAME>/<NAMESPACE_NAME>
-    const s3TableNamespaceDatabaseNameInS3TablesCatalog = $interpolate`${accountId}_${s3TableBucket.name}/${s3TableNamespace.namespace}`;
+    // This follows the pattern: <S3_TABLE_BUCKET_NAME>/<NAMESPACE_NAME>
+    const s3TableNamespaceDatabaseNameInS3TablesCatalog = $interpolate`${s3TableBucket.name}/${s3TableNamespace.namespace}`;
 
     // This is the fully qualified name of the S3 Table namespace as it appears in the default Glue catalog for Lake Formation.
+    // It refers to the path within s3tablescatalog, which itself is specified as the target catalog in s3TableNamespaceLink.
     const lfS3TableDbName = $interpolate`s3tablescatalog/${s3TableNamespaceDatabaseNameInS3TablesCatalog}`;
 
     const s3TableNamespaceLink = new aws.glue.CatalogDatabase("s3TableNamespaceLink", {
