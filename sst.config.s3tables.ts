@@ -231,7 +231,10 @@ export default $config({
 
     // This is the fully qualified name of the S3 Table namespace as it appears in the default Glue catalog for Lake Formation.
     // It refers to the path within s3tablescatalog, which itself is specified as the target catalog in s3TableNamespaceLink.
-    const lfS3TableDbName = $interpolate`s3tablescatalog/${s3TableNamespaceDatabaseNameInS3TablesCatalog}`;
+    // const lfS3TableDbName_OLD = $interpolate`s3tablescatalog/${s3TableNamespaceDatabaseNameInS3TablesCatalog}`;
+
+    // Corrected path for direct use with s3tablescatalog as catalogId
+    const s3TableDbPathInS3TablesCatalog = $interpolate`${s3TableBucket.name}/${s3TableNamespace.namespace}`;
 
     const s3TableNamespaceLink = new aws.glue.CatalogDatabase("s3TableNamespaceLink", {
       name: firehoseResourceLinkName,
@@ -259,15 +262,14 @@ export default $config({
 
     // 5.2. LfPermDb: Grants DESCRIBE permission on the target S3 Table's actual database path in Glue.
     // This is needed so Lake Formation can find the database when granting table permissions.
-    // lfS3TableDbName is like "s3tablescatalog/ACCOUNTID_BUCKET/NAMESPACE"
     const LfPermDb = new aws.lakeformation.Permissions("LfPermDb", {
       principal: firehoseRole.arn,
       permissions: ["DESCRIBE"],
       database: {
-        catalogId: accountId, // S3 Table's database is registered in the default account catalog
-        name: lfS3TableDbName,  // The fully qualified path to the S3 Table's database/namespace
+        catalogId: "s3tablescatalog", // Changed
+        name: s3TableDbPathInS3TablesCatalog,  // Changed
       },
-    }, { dependsOn: [firehoseRole, s3TableNamespace, s3TableBucket, s3TableNamespaceLink] }); // Depends on resources forming lfS3TableDbName
+    }, { dependsOn: [firehoseRole, s3TableNamespace, s3TableBucket] });
 
     // 5.3. LfPermTable: Grants table-level permissions (SELECT, INSERT, ALTER, DESCRIBE) on the S3 Table.
     // This refers to the table within its actual database path.
@@ -275,8 +277,8 @@ export default $config({
       principal: firehoseRole.arn,
       permissions: ["SELECT", "INSERT", "ALTER", "DESCRIBE"],
       table: {
-        catalogId: accountId, // S3 Table is registered in the default account catalog
-        databaseName: lfS3TableDbName, // The fully qualified path to the S3 Table's database/namespace
+        catalogId: "s3tablescatalog", // Changed
+        databaseName: s3TableDbPathInS3TablesCatalog, // Changed
         name: s3Table.name, // The actual name of the S3 Table
       },
     }, { dependsOn: [firehoseRole, s3Table, LfPermDb] }); // Depends on LfPermDb for database existence
