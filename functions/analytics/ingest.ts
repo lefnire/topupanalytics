@@ -41,7 +41,7 @@ const FLUSH = false; // Set to true to enable time-based flushing
 
 async function loadFromDynamo(siteId: string): Promise<SiteConfig> {
   const getParams = {
-    TableName: Resource.SitesTable.name,
+    TableName: process.env.SITES_TABLE_NAME,
     Key: { site_id: siteId },
   };
   const getSiteCommand = new GetCommand(getParams);
@@ -105,7 +105,7 @@ function getAllowedFieldsSet(complianceLevel: 'yes' | 'maybe' | 'no', isInitialE
 async function flush() {
   const updates = Object.entries(allowanceDelta).map(([site_id, cnt]) => ({
     Update: {
-      TableName: Resource.SitesTable.name,
+      TableName: process.env.SITES_TABLE_NAME,
       Key: { site_id },
       // Condition: Only decrement if current allowance is sufficient
       ConditionExpression: "attribute_exists(site_id) AND request_allowance >= :cnt",
@@ -267,7 +267,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 
     if (isInitialEvent) {
       // --- Initial Event: Collect all data ---
-      streamName = Resource.FirehoseStreaminitial_events.name;
+      streamName = process.env.INITIAL_EVENTS_FIREHOSE_NAME;
 
       // Extract geographic information from CloudFront headers
       /*
@@ -372,7 +372,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 
     } else {
       // --- Regular Event: Collect minimal data ---
-      streamName = Resource.FirehoseStreamevents.name;
+      streamName = process.env.EVENTS_FIREHOSE_NAME;
 
       dataToSend = {
         event: body.event,

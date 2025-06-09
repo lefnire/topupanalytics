@@ -1,53 +1,94 @@
-# S3 Tables Pulumi/SST Implementation Plan
+### Plan: Migrate to S3 Tables
 
-## 1. Analysis of the Problem
+The core of this plan is to replace the manually defined `sst.aws.Bucket`, `aws.glue.CatalogDatabase`, and `aws.glue.CatalogTable` resources with the integrated `aws.s3tables.*` resources. This will also involve updating the Kinesis Firehose streams and the associated IAM permissions.
 
-The core issue is that the native Pulumi AWS provider resources, specifically `aws.glue.CatalogDatabase` (for creating the resource link) and `aws.lakeformation.Permissions`, do not correctly handle the special `s3tablescatalog`.
+---
 
-- **Lake Formation Error**: The error `"database.0.catalog_id" doesn't look like AWS Account ID (exactly 12 digits): "s3tablescatalog"` confirms that the `aws.lakeformation.Permissions` resource expects the `catalogId` to be a standard 12-digit AWS Account ID, but for S3 Tables, we need to reference the special `s3tablescatalog`.
-- **Glue Error**: The `EntityNotFoundException: Catalog not found` error when creating the `s3TableNamespaceLink` strongly suggests the `aws.glue.CatalogDatabase` resource also fails to resolve `s3tablescatalog` as a valid target catalog.
+#### Architectural Overview
 
-The provided documentation shows that these operations are possible via the AWS CLI, which is often updated more quickly to support new service features.
+Here is a diagram illustrating the shift in architecture.
 
-## 2. The Plan
-
-The plan is to modify `sst.config.s3tables.ts` to use `local.Command` for the steps that are failing. This will work around the current limitations of the Pulumi AWS provider.
-
+**Before (Current Manual Setup):**
 ```mermaid
 graph TD
-    subgraph "Current (Failing) Implementation"
-        A[aws.glue.CatalogDatabase] --> B[aws.lakeformation.Permissions]
+    subgraph "sst.config.ts (Manual)"
+        A[ingestFn] --> B1[Firehose: events]
+        A --> B2[Firehose: initial_events]
+        B1 --> C1[Glue Table: events]
+        B2 --> C2[Glue Table: initial_events]
+        C1 & C2 --> D[Glue Database]
+        C1 & C2 --> E[S3 Bucket: analyticsDataBucket]
     end
-
-    subgraph "Proposed (Working) Implementation"
-        C[local.Command for Glue Link] --> D[local.Command for LF Perms]
-    end
-
-    subgraph "Shared Resources (Unchanged)"
-        E[aws.s3tables.*]
-        F[aws.iam.Role]
-        G[aws.kinesis.FirehoseDeliveryStream]
-    end
-
-    A -- Replaced by --> C
-    B -- Replaced by --> D
-    E --> C
-    E --> D
-    F --> D
-    C --> G
-    D --> G
 ```
 
-### Detailed Steps:
+**After (S3 Tables Integrated Setup):**
+```mermaid
+graph TD
+    subgraph "sst.config.ts (Refactored)"
+        A[ingestFn] --> F1[Firehose: events]
+        A --> F2[Firehose: initial_events]
+        
+        subgraph "S3 Table Abstraction"
+            G[S3 Table: events]
+            H[S3 Table: initial_events]
+            I[S3 Namespace]
+            J[S3 Table Bucket]
+        end
 
-1.  **Remove Failing Pulumi Resources**: Delete the `aws.glue.CatalogDatabase` resource named `s3TableNamespaceLink` and the three `aws.lakeformation.Permissions` resources (`LfPermDescribeLink`, `LfPermDb`, and `LfPermTable`).
+        subgraph "Glue / Lake Formation"
+            K[Glue Resource Link]
+            L[Lake Formation Permissions]
+        end
 
-2.  **Create Glue Resource Link via CLI**: Replace the `aws.glue.CatalogDatabase` resource with a `new local.Command`. This command will execute `aws glue create-database` to create the resource link that points to the S3 Table namespace. It will have a corresponding `delete` command for cleanup.
+        F1 --> G
+        F2 --> H
+        G & H --> I --> J
+        F1 & F2 -- targets --> K
+        K -- links to --> I
+        F1 & F2 -- authorized by --> L
+    end
+```
 
-3.  **Grant Lake Formation Permissions via CLI**: Replace the three `aws.lakeformation.Permissions` resources with three separate `local.Command` resources. These will use the `aws lakeformation grant-permissions` and `revoke-permissions` commands to manage access for the Firehose role, correctly targeting resources within the `s3tablescatalog`.
+---
 
-4.  **Update Resource Dependencies**: Update the `dependsOn` array of the `firehoseDeliveryStream` to reference the new `local.Command` resources, ensuring everything is created in the correct order.
+#### Step-by-Step Migration Plan
 
-5.  **Manual Steps**: The one-time manual setup to enable S3 Tables integration in your AWS Region remains a prerequisite. This plan automates all the subsequent steps.
+1.  **Remove Obsolete Resources:**
+    *   Delete the `analyticsDataBucket` (`sst.aws.Bucket`).
+    *   Delete the `glueCatalogDatabase` (`aws.glue.CatalogDatabase`).
+    *   Delete the `glueTables` resources and the logic that creates them.
+    *   Remove the `sst.Linkable.wrap` definitions for `aws.glue.CatalogDatabase` and `aws.glue.CatalogTable`.
+    *   Delete the old `firehoseDeliveryRole` and its associated `aws.iam.RolePolicy`.
+    *   Delete the `glueIcebergOptimizerRole` and its policies. The S3 Tables service, combined with Iceberg's capabilities, should manage table optimization. We can re-evaluate if manual compaction is needed later.
 
-This approach should resolve the deployment errors by using the AWS CLI's more robust support for S3 Tables, while keeping the rest of your infrastructure defined cleanly in Pulumi.
+2.  **Define S3 Table Foundation (for both `events` and `initial_events`):**
+    *   Create a single `aws.s3tables.TableBucket`. We'll give it a new logical name like `AnalyticsS3TableBucket` to ensure replacement.
+    *   Create a single `aws.s3tables.Namespace` within that bucket.
+    *   Create two `aws.s3tables.Table` resources: one for `events` and one for `initial_events`, both pointing to the same namespace and bucket.
+    *   Create a new `sst.aws.Bucket` to serve as the backup location for Firehose.
+
+3.  **Establish New IAM Role and Permissions:**
+    *   Create a new `aws.iam.Role` for Firehose, named something like `FirehoseS3TablesRole`.
+    *   Create a corresponding `aws.iam.Policy` that grants permissions for:
+        *   **Glue:** To interact with the default catalog and the resource link.
+        *   **Lake Formation:** `lakeformation:GetDataAccess`.
+        *   **S3:** Full access to the Firehose backup bucket.
+        *   **CloudWatch Logs:** For logging Firehose stream activity.
+
+4.  **Bridge Catalogs with Resource Link & Lake Formation:**
+    *   Using `command.local.Command`, create a **Glue Database Resource Link**. This is the key that allows Firehose (and other services) to see the S3 Table namespace within the standard AWS Glue Catalog.
+    *   Using `command.local.Command`, grant the necessary **Lake Formation permissions** to the new Firehose IAM role, allowing it to `DESCRIBE` the database (namespace) and `SELECT`, `INSERT`, `ALTER`, `DESCRIBE` both of the tables.
+
+5.  **Reconfigure Kinesis Firehose Streams:**
+    *   Create two new `aws.kinesis.FirehoseDeliveryStream` resources, one for each table.
+    *   Change the `destination` from `extended_s3` to `iceberg`.
+    *   In the `icebergConfiguration`:
+        *   Reference the new `FirehoseS3TablesRole`.
+        *   Point to the default Glue catalog ARN.
+        *   Set the `destinationTableConfigurations` to use the **Glue Resource Link name** as the `databaseName` and the S3 Table name (`events` or `initial_events`) as the `tableName`.
+        *   Configure the `s3Configuration` to point to the new backup bucket.
+
+6.  **Update Dependent Resources and Outputs:**
+    *   Update the `ingestFn` to link to the two new Firehose streams.
+    *   Update the `queryFn`'s links: remove the links to the old Glue tables and database, and instead link the new `AnalyticsS3TableBucket`. The function will still query through Athena, which will resolve the tables via the resource link.
+    *   Clean up the stack outputs, removing references to the old Glue resources and adding new ones for the S3 Table bucket ARN and table names.

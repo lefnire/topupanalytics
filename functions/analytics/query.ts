@@ -110,8 +110,13 @@ async function executeAthenaQuery(
 
     const startQueryCmd = new StartQueryExecutionCommand({
         QueryString: finalQuery,
+        // The Database is specified in the query itself, but the API requires a catalog.
         // @ts-ignore - Ignore SST Resource type error
-        QueryExecutionContext: { Database: Resource.GlueCatalogDatabase.name },
+        QueryExecutionContext: {
+          // Catalog: 's3tablescatalog',
+          Catalog: process.env.S3_TABLE_BUCKET_NAME,
+          Database: process.env.GLUE_RESOURCE_LINK_NAME
+        },
         ResultConfiguration: { OutputLocation: s3OutputLocation },
     });
 
@@ -479,7 +484,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
         const initialEventsQuery = `
 SELECT
   ${initialSelectCols}
-FROM "${Resource.GlueCatalogDatabase.name}"."${Resource.GlueCatalogTableinitial_events.name}"
+FROM "${process.env.INITIAL_EVENTS_TABLE_NAME}"
 WHERE ${dateFilterSql} AND ${siteIdFilterSql}
 ORDER BY "timestamp" DESC
         `;
@@ -487,7 +492,7 @@ ORDER BY "timestamp" DESC
         const eventsQuery = `
 SELECT
   ${eventsSelectCols}
-FROM "${Resource.GlueCatalogDatabase.name}"."${Resource.GlueCatalogTableevents.name}"
+FROM "${process.env.EVENTS_TABLE_NAME}"
 WHERE ${dateFilterSql} AND ${siteIdFilterSql}
 ORDER BY "timestamp" DESC
         `;
