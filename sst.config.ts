@@ -101,17 +101,83 @@ export default $config({
       tableBucketArn: analyticsS3TableBucket.arn,
     });
 
+    const s3TableSchemas = {
+      events: [
+        { name: "site_id", type: "string", required: true },
+        { name: "dt", type: "string", required: true },
+        { name: "event", type: "string", required: true },
+        { name: "pathname", type: "string" },
+        { name: "session_id", type: "string" },
+        { name: "timestamp", type: "timestamp", required: true },
+        { name: "properties", type: "string" },
+      ],
+      initial_events: [
+        // common
+        { name: "site_id", type: "string", required: true },
+        { name: "dt", type: "string", required: true },
+        { name: "event", type: "string", required: true },
+        { name: "pathname", type: "string" },
+        { name: "session_id", type: "string" },
+        { name: "timestamp", type: "timestamp", required: true },
+        { name: "properties", type: "string" },
+        // initial only
+        { name: "distinct_id", type: "string" },
+        { name: "model", type: "string" },
+        { name: "manufacturer", type: "string" },
+        { name: "city", type: "string" },
+        { name: "timezone", type: "string" },
+        { name: "browser_version", type: "string" },
+        { name: "os_version", type: "string" },
+        { name: "screen_height", type: "string" },
+        { name: "screen_width", type: "string" },
+        { name: "region", type: "string" },
+        { name: "country", type: "string" },
+        { name: "device", type: "string" },
+        { name: "browser", type: "string" },
+        { name: "os", type: "string" },
+        { name: "referer", type: "string" },
+        { name: "referer_domain", type: "string" },
+        { name: "utm_source", type: "string" },
+        { name: "utm_campaign", type: "string" },
+        { name: "utm_medium", type: "string" },
+        { name: "utm_content", type: "string" },
+        { name: "utm_term", type: "string" },
+      ],
+    };
+
+    const s3TableCommands = Object.fromEntries(
+      tableNames.map((tableName) => {
+        const schemaFields = s3TableSchemas[tableName as TableName];
+        const tableInput = {
+          tableBucketARN: analyticsS3TableBucket.arn,
+          namespace: analyticsS3TableNamespace.namespace,
+          name: tableName,
+          format: "ICEBERG",
+          metadata: {
+            iceberg: {
+              schema: {
+                fields: schemaFields,
+              },
+            },
+          },
+        };
+        const tableInputJson = $jsonStringify(tableInput);
+
+        const tableCommand = new command.local.Command(`AnalyticsS3Table_${tableName}`, {
+          create: $interpolate`aws s3tables create-table --cli-input-json '${tableInputJson}'`,
+          delete: $interpolate`aws s3tables delete-table --table-bucket-arn ${analyticsS3TableBucket.arn} --namespace ${analyticsS3TableNamespace.namespace} --table-name ${tableName}`,
+        }, { dependsOn: [analyticsS3TableBucket, analyticsS3TableNamespace] });
+
+        return [tableName, tableCommand];
+      })
+    ) as Record<TableName, command.local.Command>;
+
     const s3Tables = Object.fromEntries(
       tableNames.map((tableName) => [
         tableName,
-        new aws.s3tables.Table(`AnalyticsS3Table_${tableName}`, {
-          name: tableName, // 'events' or 'initial_events'
-          namespace: analyticsS3TableNamespace.namespace,
-          tableBucketArn: analyticsS3TableBucket.arn,
-          format: "ICEBERG",
-        }),
+        { name: $interpolate`${tableName}` },
       ])
-    ) as Record<TableName, aws.s3tables.Table>;
+    );
 
     // 2. Standard S3 Bucket for Firehose Backups
     const firehoseBackupBucket = new sst.aws.Bucket("FirehoseBackupBucket", {
@@ -223,7 +289,7 @@ export default $config({
           "Name": "${s3Tables[tableName].name}"
         }
       }'`,
-    }, { dependsOn: [firehoseS3TablesRole, s3Tables[tableName], lfPermDb] }));
+    }, { dependsOn: [firehoseS3TablesRole, s3TableCommands[tableName as TableName], lfPermDb] }));
 
 
     // 6. Kinesis Data Firehose Delivery Streams

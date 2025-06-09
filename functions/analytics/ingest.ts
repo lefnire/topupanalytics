@@ -365,7 +365,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 
         // Timestamps & Properties
         timestamp: timestamp,
-        properties: body.properties || {},
+        properties: JSON.stringify(body.properties || {}),
         site_id: siteId, // Inject validated site_id
         dt: dt, // Add dt for partitioning
       };
@@ -378,7 +378,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
         event: body.event,
         pathname: body.pathname,
         session_id: body.session_id?.toString(),
-        properties: body.properties || {},
+        properties: JSON.stringify(body.properties || {}),
         timestamp: timestamp,
         site_id: siteId, // Inject validated site_id
         dt: dt, // Add dt for partitioning
