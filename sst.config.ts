@@ -2,9 +2,45 @@
 /*
 ## Instructions
 This uses SST v3, which uses Pulumi under the hood - not CDK (SST v2). SST v3 adds a global variable `aws`, which is an augmented version of the `aws` you'd import from Pulumi. Never try to add imports to this file, always use the global `aws`, and assume it has what you'd need from Pulumi. If you need `aws-native` or other providers, assume those are global variables too and add a note to me to add that provider. SST also adds global `$` functions for Pulumi helpers, like `$interpolate`. Use those instead of Pulumi helpers.
+*/
 
+/*
+====================================================================================================
+MANDATORY PREREQUISITE: Enable S3 Tables Integration in AWS
+====================================================================================================
 
+**CRITICAL: Before deploying this stack, you must perform a one-time manual setup in the AWS
+Management Console for the target AWS Region.**
 
+This stack provisions an AWS Kinesis Firehose stream to deliver data into an S3 Table (Iceberg
+format). This requires a foundational integration between Amazon S3, AWS Glue, and AWS Lake
+Formation, which must be enabled manually.
+
+----------------------------------------------------------------------------------------------------
+Instructions (Perform ONCE PER AWS REGION):
+----------------------------------------------------------------------------------------------------
+1.  Navigate to the Amazon S3 console.
+2.  In the left navigation, click on "S3 Tables".
+3.  Click the button to "Enable integration with AWS analytics services" (or similar wording).
+
+This manual step creates the `s3tablescatalog` in AWS Glue and the necessary service-linked IAM
+role for Lake Formation. This stack depends on these resources. Failure to complete this step will
+result in deployment errors, typically "Catalog not found" or Lake Formation permission issues.
+
+For more details, see the official AWS documentation:
+https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-integrating-aws.html
+
+----------------------------------------------------------------------------------------------------
+What this Stack Automates:
+----------------------------------------------------------------------------------------------------
+Once the prerequisite is met, this script automates the creation of:
+*   The S3 Table, Namespace, and underlying bucket.
+*   A Kinesis Firehose delivery stream targeting the S3 Table.
+*   A backup S3 bucket for Firehose.
+*   The necessary IAM Role and granular permissions for Firehose.
+*   A Glue Resource Link to bridge the default catalog with the `s3tablescatalog`.
+*   Specific Lake Formation permissions for the Firehose role to access the S3 Table.
+====================================================================================================
 */
 const domain = "topupanalytics.com";
 export default $config({
@@ -260,13 +296,13 @@ export default $config({
 
     // 5. Lake Formation Permissions (via AWS CLI)
     const lfPermDb = new command.local.Command("LfPermDb", {
-        create: $interpolate`aws lakeformation grant-permissions --principal '{"DataLakePrincipalIdentifier": "${firehoseS3TablesRole.arn}"}' --permissions '["DESCRIBE"]' --resource '{
+        create: $interpolate`aws lakeformation grant-permissions --principal '{"DataLakePrincipalIdentifier": "${firehoseS3TablesRole.arn}"}' --permissions '["DESCRIBE", "ALTER", "CREATE_TABLE"]' --resource '{
         "Database": {
           "CatalogId": "${accountId}:s3tablescatalog/${analyticsS3TableBucket.name}",
           "Name": "${analyticsS3TableNamespace.namespace}"
         }
       }'`,
-        delete: $interpolate`aws lakeformation revoke-permissions --principal '{"DataLakePrincipalIdentifier": "${firehoseS3TablesRole.arn}"}' --permissions '["DESCRIBE"]' --resource '{
+        delete: $interpolate`aws lakeformation revoke-permissions --principal '{"DataLakePrincipalIdentifier": "${firehoseS3TablesRole.arn}"}' --permissions '["DESCRIBE", "ALTER", "CREATE_TABLE"]' --resource '{
         "Database": {
           "CatalogId": "${accountId}:s3tablescatalog/${analyticsS3TableBucket.name}",
           "Name": "${analyticsS3TableNamespace.namespace}"
@@ -276,17 +312,19 @@ export default $config({
 
     const lfPermsTable = tableNames.map(tableName => new command.local.Command(`LfPermTable_${tableName}`, {
         create: $interpolate`aws lakeformation grant-permissions --principal '{"DataLakePrincipalIdentifier": "${firehoseS3TablesRole.arn}"}' --permissions '["SELECT", "INSERT", "ALTER", "DESCRIBE"]' --resource '{
-        "Table": {
+        "TableWithColumns": {
           "CatalogId": "${accountId}:s3tablescatalog/${analyticsS3TableBucket.name}",
           "DatabaseName": "${analyticsS3TableNamespace.namespace}",
-          "Name": "${s3Tables[tableName].name}"
+          "Name": "${s3Tables[tableName].name}",
+          "ColumnWildcard": {}
         }
       }'`,
         delete: $interpolate`aws lakeformation revoke-permissions --principal '{"DataLakePrincipalIdentifier": "${firehoseS3TablesRole.arn}"}' --permissions '["SELECT", "INSERT", "ALTER", "DESCRIBE"]' --resource '{
-        "Table": {
+        "TableWithColumns": {
           "CatalogId": "${accountId}:s3tablescatalog/${analyticsS3TableBucket.name}",
           "DatabaseName": "${analyticsS3TableNamespace.namespace}",
-          "Name": "${s3Tables[tableName].name}"
+          "Name": "${s3Tables[tableName].name}",
+          "ColumnWildcard": {}
         }
       }'`,
     }, { dependsOn: [firehoseS3TablesRole, s3TableCommands[tableName as TableName], lfPermDb] }));
@@ -307,7 +345,7 @@ export default $config({
               s3Configuration: {
                 roleArn: firehoseS3TablesRole.arn,
                 bucketArn: firehoseBackupBucket.arn,
-                bufferingInterval: 300,
+                bufferingInterval: 60,
                 bufferingSize: 5,
                 cloudwatchLoggingOptions: {
                   enabled: true,
@@ -454,6 +492,10 @@ export default $config({
             $interpolate`arn:${partition}:glue:${region}:${accountId}:catalog/s3tablescatalog`,
             $interpolate`arn:${partition}:glue:${region}:${accountId}:catalog/s3tablescatalog/*`,
           ],
+        },
+        {
+          actions: ["lakeformation:GetDataAccess"],
+          resources: ["*"],
         },
       ],
     });
