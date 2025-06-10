@@ -310,24 +310,37 @@ export default $config({
       }'`,
     }, { dependsOn: [firehoseS3TablesRole, analyticsS3TableNamespace, analyticsS3TableBucket] });
 
-    const lfPermsTable = tableNames.map(tableName => new command.local.Command(`LfPermTable_${tableName}`, {
-        create: $interpolate`aws lakeformation grant-permissions --principal '{"DataLakePrincipalIdentifier": "${firehoseS3TablesRole.arn}"}' --permissions '["SELECT", "INSERT", "ALTER", "DESCRIBE"]' --resource '{
-        "TableWithColumns": {
-          "CatalogId": "${accountId}:s3tablescatalog/${analyticsS3TableBucket.name}",
-          "DatabaseName": "${analyticsS3TableNamespace.namespace}",
-          "Name": "${s3Tables[tableName].name}",
-          "ColumnWildcard": {}
+    const lfPermDbLink = new command.local.Command("LfPermDbLink", {
+        create: $interpolate`aws lakeformation grant-permissions --principal '{"DataLakePrincipalIdentifier": "${firehoseS3TablesRole.arn}"}' --permissions '["DESCRIBE"]' --resource '{
+        "Database": {
+          "CatalogId": "${accountId}",
+          "Name": "${firehoseResourceLinkName}"
         }
       }'`,
-        delete: $interpolate`aws lakeformation revoke-permissions --principal '{"DataLakePrincipalIdentifier": "${firehoseS3TablesRole.arn}"}' --permissions '["SELECT", "INSERT", "ALTER", "DESCRIBE"]' --resource '{
-        "TableWithColumns": {
-          "CatalogId": "${accountId}:s3tablescatalog/${analyticsS3TableBucket.name}",
-          "DatabaseName": "${analyticsS3TableNamespace.namespace}",
-          "Name": "${s3Tables[tableName].name}",
-          "ColumnWildcard": {}
+        delete: $interpolate`aws lakeformation revoke-permissions --principal '{"DataLakePrincipalIdentifier": "${firehoseS3TablesRole.arn}"}' --permissions '["DESCRIBE"]' --resource '{
+        "Database": {
+          "CatalogId": "${accountId}",
+          "Name": "${firehoseResourceLinkName}"
         }
       }'`,
-    }, { dependsOn: [firehoseS3TablesRole, s3TableCommands[tableName as TableName], lfPermDb] }));
+    }, { dependsOn: [firehoseS3TablesRole, s3TableNamespaceLink] });
+
+    const lfPermsTableLink = tableNames.map(tableName => new command.local.Command(`LfPermTableLink_${tableName}`, {
+        create: $interpolate`aws lakeformation grant-permissions --principal '{"DataLakePrincipalIdentifier": "${firehoseS3TablesRole.arn}"}' --permissions '["ALL"]' --resource '{
+        "Table": {
+          "CatalogId": "${accountId}",
+          "DatabaseName": "${firehoseResourceLinkName}",
+          "Name": "${s3Tables[tableName].name}"
+        }
+      }'`,
+        delete: $interpolate`aws lakeformation revoke-permissions --principal '{"DataLakePrincipalIdentifier": "${firehoseS3TablesRole.arn}"}' --permissions '["ALL"]' --resource '{
+        "Table": {
+          "CatalogId": "${accountId}",
+          "DatabaseName": "${firehoseResourceLinkName}",
+          "Name": "${s3Tables[tableName].name}"
+        }
+      }'`,
+    }, { dependsOn: [firehoseS3TablesRole, s3TableCommands[tableName as TableName], lfPermDbLink] }));
 
 
     // 6. Kinesis Data Firehose Delivery Streams
@@ -358,7 +371,7 @@ export default $config({
                 tableName: s3Tables[tableName].name,
               }],
             },
-          }, { dependsOn: [...lfPermsTable, s3TableNamespaceLink] }),
+          }, { dependsOn: [...lfPermsTableLink, s3TableNamespaceLink, lfPermDbLink] }),
         ];
       }),
     ) as Record<TableName, aws.kinesis.FirehoseDeliveryStream>;
